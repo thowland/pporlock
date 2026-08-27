@@ -1,0 +1,17 @@
+{
+  "name": "pporlock-contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Schema validation and TypeScript type generation. Source of truth for cross-component shapes.",
+  "scripts": {
+    "generate": "node scripts/generate-types.mjs",
+    "validate": "node scripts/validate-schemas.mjs"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "json-schema-to-typescript": "^15.0.3",
+    "yaml": "^2.6.1"
+  }
+}

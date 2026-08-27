@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/health.schema.json",
+  "title": "Health",
+  "description": "Response of GET /state/health — the only unauthenticated route (SPEC-0 §6.1, §6.4).",
+  "type": "object",
+  "required": ["ok", "version"],
+  "additionalProperties": false,
+  "properties": {
+    "ok": { "type": "boolean" },
+    "version": { "type": "string", "description": "pporlock version" }
+  }
+}

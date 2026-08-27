@@ -1,0 +1,18 @@
+# gitleaks configuration for pporlock.
+title = "pporlock"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "pporlock-bearer-token"
+description = "Hard-coded pporlock control API bearer token"
+regex = '''(?i)(pporlock_token|bearer_token)\s*[=:]\s*["']?[A-Za-z0-9_\-]{16,}'''
+tags = ["pporlock", "token"]
+
+[allowlist]
+description = "Fixture material that is intentionally fake"
+paths = [
+  '''tests/fixtures/.*''',
+  '''scripts/secret-scan\.sh''',
+]

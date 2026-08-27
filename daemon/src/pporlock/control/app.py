@@ -16,8 +16,9 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import BaseRoute, Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from ..capture.filters import FlowFilter
 from ..config import Config
@@ -31,6 +32,7 @@ from .auth import (
     bearer_token,
     require_client,
 )
+from .events import EventFilter, EventHub
 from .serialize import (
     DEFAULT_ITEM_DETAIL,
     DEFAULT_LIST_DETAIL,
@@ -56,6 +58,7 @@ INLINE_ROUTES: frozenset[str] = frozenset(
         "/exclusions",
         "/audit",
         "/metrics",
+        "/events",
     }
 )
 
@@ -63,6 +66,15 @@ INLINE_ROUTES: frozenset[str] = frozenset(
 #: nothing but liveness and a version, and the extension polls it to decide
 #: whether to clear Chrome's proxy configuration (REQ EXT-010).
 PUBLIC_ROUTES: frozenset[str] = frozenset({"/state/health", "/pair"})
+
+#: Routes that touch the filesystem, SQLite, or module import. These MUST
+#: offload to the executor: on the proxy's own event loop, blocking here stalls
+#: every connection the browser has open (SPEC-1 §7.1).
+OFFLOAD_ROUTES: frozenset[str] = frozenset({"/config", "/"})
+
+#: Path prefixes served without a token. The web UI's own assets: the page has
+#: to load before it can present a token, and the assets are ours, not data.
+PUBLIC_PREFIXES: tuple[str, ...] = ("/assets/", "/favicon", "/vite.svg")
 
 
 def error_response(exc: PporlockError, status: int) -> JSONResponse:
@@ -94,7 +106,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if path != "/pair" and not self.control.policy.allows(origin):
             return error_response(AuthError("origin not permitted", origin=origin), 403)
 
-        is_public = path in PUBLIC_ROUTES
+        is_public = path in PUBLIC_ROUTES or path == "/" or path.startswith(PUBLIC_PREFIXES)
         if not is_public and not self.control.tokens.verify(
             bearer_token(request.headers.get("authorization"))
         ):
@@ -132,6 +144,8 @@ class ControlApp:
         policy: OriginPolicy | None = None,
         pairing: PairingWindow | None = None,
         audit: AuditLog | None = None,
+        events: EventHub | None = None,
+        static_dir: Any = None,
         version: str = "0.1.0",
     ) -> None:
         from pathlib import Path
@@ -144,6 +158,8 @@ class ControlApp:
         self.policy = policy or OriginPolicy(config.control.listen_host, config.control.listen_port)
         self.pairing = pairing or PairingWindow()
         self.audit = audit or AuditLog()
+        self.events = events or EventHub()
+        self.static_dir = static_dir
         # Generate the token now rather than on first verify. It is per-install
         # state the user and the CLI need to be able to find, and a path printed
         # at startup that does not yet exist is worse than no path at all.
@@ -279,6 +295,71 @@ class ControlApp:
             {"ring": stats.to_dict(), "counters": counters, "attribution_coverage": None}
         )
 
+    async def get_index(self, _: Request) -> Response:
+        """Serve the web UI shell with its bearer token injected.
+
+        The UI is served from our own origin by the same process that holds the
+        token, so handing it over in the document is the honest path: there is
+        no third party in between, and the alternative — a token in the query
+        string — would put it in history and Referer.
+
+        The origin policy still applies to every call the page then makes, so a
+        different page cannot use what it cannot read.
+        """
+        from pathlib import Path as _Path
+
+        if self.static_dir is None:
+            return Response(
+                "pporlock web UI is not built. Run `make web`.",
+                media_type="text/plain",
+                status_code=404,
+            )
+
+        index = _Path(self.static_dir) / "index.html"
+        if not index.is_file():
+            return Response(
+                "pporlock web UI is not built. Run `make web`.",
+                media_type="text/plain",
+                status_code=404,
+            )
+
+        html = await self.offload(index.read_text)
+        token = self.tokens.ensure()
+        meta = f'<meta name="pporlock-token" content="{token}">'
+        html = html.replace("</head>", f"  {meta}\n  </head>", 1)
+        return Response(
+            html,
+            media_type="text/html",
+            headers={
+                # The shell carries a credential, so it must never be cached by
+                # anything between us and the browser.
+                "cache-control": "no-store",
+                "referrer-policy": "no-referrer",
+            },
+        )
+
+    async def get_events(self, request: Request) -> StreamingResponse:
+        """SSE stream (REQ API-022).
+
+        Filtered server-side so a narrow client filter reduces event volume
+        rather than merely hiding rows (SPEC-0 §7.1).
+        """
+        event_filter = EventFilter.from_query(dict(request.query_params))
+        stream = self.events.subscribe(
+            event_filter, last_event_id=request.headers.get("last-event-id")
+        )
+        return StreamingResponse(
+            stream,
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache, no-transform",
+                # Without this an intermediary can buffer the stream into
+                # uselessness; harmless on loopback, cheap insurance.
+                "x-accel-buffering": "no",
+                "connection": "keep-alive",
+            },
+        )
+
     async def post_pair(self, request: Request) -> JSONResponse:
         """Redeem a pairing code for the bearer token (REQ API-012).
 
@@ -296,7 +377,7 @@ class ControlApp:
         return JSONResponse({"token": self.tokens.ensure()})
 
     def _build(self) -> Starlette:
-        routes = [
+        routes: list[BaseRoute] = [
             Route("/state/health", self.health, methods=["GET"]),
             Route("/state", self.get_state, methods=["GET"]),
             Route("/state", self.post_state, methods=["POST"]),
@@ -308,8 +389,23 @@ class ControlApp:
             Route("/config", self.get_config, methods=["GET"]),
             Route("/audit", self.get_audit, methods=["GET"]),
             Route("/metrics", self.get_metrics, methods=["GET"]),
+            Route("/events", self.get_events, methods=["GET"]),
             Route("/pair", self.post_pair, methods=["POST"]),
+            Route("/", self.get_index, methods=["GET"]),
         ]
+
+        if self.static_dir is not None:
+            from pathlib import Path as _Path
+
+            directory = _Path(self.static_dir)
+            if directory.is_dir():
+                # Serves the built web UI (REQ API-003). Mounted last so every
+                # API route wins over a same-named asset, and html=True gives
+                # SPA fallback to index.html.
+                # Mounted last so every API route and the token-injecting
+                # index handler win over a same-named asset.
+                routes.append(Mount("/", app=StaticFiles(directory=directory), name="ui"))
+
         return Starlette(
             routes=routes,
             middleware=[Middleware(SecurityMiddleware, control=self)],

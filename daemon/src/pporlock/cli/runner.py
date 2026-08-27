@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from ..addon.interceptor import Interceptor, NullSink
@@ -21,6 +22,22 @@ from ..capture.ring import RingBuffer
 from ..capture.sink import RingSink
 from ..config import Config
 from ..control.app import ControlApp
+from ..control.events import EventHub
+from ..control.serialize import serialize_flow
+
+
+def web_assets_dir() -> Path | None:
+    """The built web UI, if it has been built.
+
+    Looked up rather than required: the daemon is useful without the UI, and a
+    missing build should not stop the proxy from starting. `make web` produces
+    it; a packaged install ships it inside the wheel.
+    """
+    packaged = Path(__file__).resolve().parents[1] / "web"
+    if packaged.is_dir():
+        return packaged
+    repo = Path(__file__).resolve().parents[4] / "web" / "dist"
+    return repo if repo.is_dir() else None
 
 
 def emit(line: str) -> None:
@@ -122,12 +139,29 @@ async def _run(config: Config, sink: Any) -> int:
         max_bytes=config.capture.ring_max_bytes,
         max_body_bytes=config.capture.max_body_bytes,
     )
-    ring_sink = RingSink(ring, max_body_bytes=config.capture.max_body_bytes)
+    events = EventHub()
+    control = ControlApp(
+        config, ring=ring, interceptor=None, events=events, static_dir=web_assets_dir()
+    )
+
+    def publish_flow(record: Any) -> None:
+        """Fan a completed flow out to SSE subscribers.
+
+        Called from the sink on the proxy's own loop. The hub never blocks, so
+        a stalled subscriber cannot slow traffic (SPEC-1 §7.3).
+        """
+        events.publish_flow(
+            "flow.completed",
+            record,
+            serialize_flow(record, "summary"),
+        )
+
+    ring_sink = RingSink(ring, max_body_bytes=config.capture.max_body_bytes, on_flow=publish_flow)
     console = sink if isinstance(sink, ConsoleSink) else ConsoleSink(quiet=True)
     tee = TeeSink(ring_sink, console)
 
     interceptor = Interceptor(config, sink=tee)
-    control = ControlApp(config, ring=ring, interceptor=interceptor)
+    control.interceptor = interceptor
     interceptor.control = control
     master.addons.add(interceptor)  # type: ignore[no-untyped-call]
 
@@ -137,10 +171,15 @@ async def _run(config: Config, sink: Any) -> int:
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     emit(f"  exclusions: {len(interceptor.exclusions)} entries")
+    assets = web_assets_dir()
     emit(
         f"  control API on http://{config.control.listen_host}:"
         f"{config.control.listen_port}  (token: {control.tokens.path})"
     )
+    if assets is not None:
+        emit(f"  web UI      on http://{config.control.listen_host}:{config.control.listen_port}/")
+    else:
+        emit("  web UI      not built — run `make web`")
     emit("  ctrl-c to stop\n")
 
     await master.run()

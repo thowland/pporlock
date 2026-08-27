@@ -40,3 +40,15 @@ coverage/
 *.key
 tests/fixtures/origin/certs/
 .pporlock/
+
+# Playwright
+web/test-results/
+web/playwright-report/
+
+# Lock files ARE committed here, overriding ~/.gitignore_global.
+# Reproducible builds are a gate requirement: the exact mitmproxy pin
+# (REQ PXY-006) is meaningless without a resolved lock, and the security
+# gate's audit results only mean something against a fixed dependency set.
+!*.lock
+!uv.lock
+!package-lock.json

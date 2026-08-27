@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "pporlock harness probe",
+  "version": "0.0.1",
+  "description": "Test infrastructure only. Proves Playwright can load an unpacked MV3 extension. The real extension is built from extension/ at Sprint 5.",
+  "background": { "service_worker": "sw.js" },
+  "permissions": ["storage"]
+}

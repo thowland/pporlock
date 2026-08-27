@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Fast checks only. The full sprint gate is `make gate`, run before merge.
+# Anything slow here trains people to use --no-verify, which is worse than
+# having no hook at all.
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$STAGED" ] && exit 0
+
+FAIL=0
+step() { printf '  %-28s' "$1"; }
+ok()   { echo "ok"; }
+bad()  { echo "FAIL"; FAIL=1; }
+
+echo "pre-commit:"
+
+# --- secrets (always, every file) ---
+step "secrets"
+if ./scripts/gitleaks.sh protect >/tmp/pporlock-hook-secrets 2>&1; then ok; else bad; cat /tmp/pporlock-hook-secrets; fi
+
+# --- forbidden local state ---
+step "local state"
+if echo "$STAGED" | grep -qE '(^|/)(\.env|\.pporlock/|\.mitmproxy/)|\.(pem|key)$'; then
+    bad
+    echo "    refusing to commit local state or key material"
+else
+    ok
+fi
+
+# --- python ---
+PY=$(echo "$STAGED" | grep -E '\.py$' || true)
+if [ -n "$PY" ]; then
+    step "ruff format"
+    if (cd daemon && uv run ruff format --check $(echo "$PY" | sed 's|^|../|' | tr '\n' ' ')) >/tmp/pporlock-hook-fmt 2>&1; then ok; else bad; cat /tmp/pporlock-hook-fmt; fi
+    step "ruff check"
+    if (cd daemon && uv run ruff check $(echo "$PY" | sed 's|^|../|' | tr '\n' ' ')) >/tmp/pporlock-hook-ruff 2>&1; then ok; else bad; cat /tmp/pporlock-hook-ruff; fi
+fi
+
+# --- typescript ---
+TS=$(echo "$STAGED" | grep -E '\.(ts|tsx)$' || true)
+if [ -n "$TS" ]; then
+    for comp in web extension; do
+        COMP_TS=$(echo "$TS" | grep "^$comp/" || true)
+        [ -z "$COMP_TS" ] && continue
+        step "prettier ($comp)"
+        REL=$(echo "$COMP_TS" | sed "s|^$comp/||" | tr '\n' ' ')
+        if (cd "$comp" && npx prettier --check $REL) >/tmp/pporlock-hook-pretty 2>&1; then ok; else bad; cat /tmp/pporlock-hook-pretty; fi
+        step "eslint ($comp)"
+        if (cd "$comp" && npx eslint $REL --max-warnings 0) >/tmp/pporlock-hook-eslint 2>&1; then ok; else bad; cat /tmp/pporlock-hook-eslint; fi
+    done
+fi
+
+# --- generated files must not be hand-edited ---
+step "generated files"
+if echo "$STAGED" | grep -q '^contracts/generated/'; then
+    bad
+    echo "    contracts/generated/ is build output — regenerate with 'make contracts'"
+else
+    ok
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "pre-commit FAILED. Fix, or 'make format' for the mechanical ones."
+    exit 1
+fi
+echo "pre-commit passed"

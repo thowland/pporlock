@@ -1,0 +1,115 @@
+[project]
+name = "pporlock"
+version = "0.1.0"
+description = "Local HTTPS interception and modification proxy daemon"
+requires-python = "==3.12.*"
+license = { text = "Proprietary" }
+
+# mitmproxy is pinned EXACTLY (REQ PXY-006).
+# Upgrades are deliberate work against the addon/ adapter layer and are
+# gated on the integration suite (REQ TST-007). Do not float this pin.
+dependencies = [
+    "mitmproxy==11.1.3",
+    "pyyaml>=6.0.2",
+    "jsonschema>=4.23.0",
+]
+
+[project.scripts]
+pporlock = "pporlock.cli.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "bandit>=1.8.0",
+    "pip-audit>=2.7.3",
+    "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pporlock"]
+
+# ---------------------------------------------------------------- pytest ----
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "integration: requires the fixture origin server",
+    "slow: long-running (soak, benchmark)",
+]
+
+# -------------------------------------------------------------- coverage ----
+# Gate G2: daemon >= 80%. The engine/ package carries a higher bar (REQ TST-002)
+# and is enforced separately by `make coverage`.
+[tool.coverage.run]
+source = ["src/pporlock"]
+branch = true
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+# ------------------------------------------------------------------ ruff ----
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "UP",        # pyupgrade
+    "S",         # bandit-style security rules
+    "ASYNC",     # async correctness — load-bearing, we share the proxy event loop
+    "RUF",
+]
+ignore = [
+    "S101",      # assert — used in tests and in load-bearing invariant checks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108"]  # test fixtures may carry fake secrets
+
+# ------------------------------------------------------------------ mypy ----
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+
+# The engine is pure and fully typed — it is the load-bearing testable core.
+[[tool.mypy.overrides]]
+module = "pporlock.engine.*"
+strict = true
+
+# mitmproxy ships partial types; the adapter layer absorbs that.
+[[tool.mypy.overrides]]
+module = ["mitmproxy.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- bandit ----
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]

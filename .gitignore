@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# Build output
+web/dist/
+extension/dist/
+contracts/generated/
+
+# Test artifacts
+test-results/
+playwright-report/
+.playwright/
+coverage/
+
+# Local state — NEVER commit
+.env
+.env.*
+*.pem
+*.key
+tests/fixtures/origin/certs/
+.pporlock/

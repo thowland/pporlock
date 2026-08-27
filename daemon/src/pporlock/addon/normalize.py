@@ -181,11 +181,23 @@ def sni_of(data: Any) -> str | None:
 
 
 def peer_ip_of(data: Any) -> str | None:
-    """Destination IP for a ClientHello, for the no-SNI fallback path."""
+    """Destination IP for a ClientHello, for the no-SNI fallback path.
+
+    Returns only genuine addresses. Before resolution the connection's address
+    is the hostname from the CONNECT line, and reporting that as an IP would put
+    a hostname in a field the UI and the exclusion list both read as an address.
+    """
+    import ipaddress
+
     try:
         address = data.context.server.address
     except AttributeError:
         return None
     if not address:
         return None
-    return str(address[0])
+    candidate = str(address[0]).strip("[]")
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    return candidate

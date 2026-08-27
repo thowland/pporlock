@@ -95,6 +95,7 @@ class Interceptor:
         sink: FlowSink | None = None,
         exclusions: ExclusionList | None = None,
         profile: str = "default",
+        control: Any = None,
     ) -> None:
         self.config = config or Config()
         self.sink: FlowSink = sink or NullSink()
@@ -103,11 +104,28 @@ class Interceptor:
         self.counters = Counters()
         self.started_at = time.time()
         self._ws_indexes: dict[str, int] = {}
+        # Set by the runner when the control server should be started from
+        # running(). Left None in tests and in bare-addon use.
+        self.control: Any = control
+        self.control_server: Any = None
 
     # -- lifecycle -------------------------------------------------------
 
     def running(self) -> None:
-        """Called once the proxy is up. The control server starts here in Sprint 3."""
+        """Called once the proxy is up.
+
+        The control server starts here, on the proxy's own event loop, which is
+        what removes any need for IPC or locking between hooks and handlers
+        (REQ DD-3, API-001).
+        """
+        if self.control is None:
+            return
+        import asyncio
+
+        from ..control.server import ControlServer
+
+        self.control_server = ControlServer(self.control, self.config)
+        asyncio.create_task(self.control_server.start())  # noqa: RUF006
 
     def done(self) -> None:
         """Called on shutdown."""

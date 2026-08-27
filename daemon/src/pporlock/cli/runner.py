@@ -17,7 +17,10 @@ import sys
 from typing import Any
 
 from ..addon.interceptor import Interceptor, NullSink
+from ..capture.ring import RingBuffer
+from ..capture.sink import RingSink
 from ..config import Config
+from ..control.app import ControlApp
 
 
 def emit(line: str) -> None:
@@ -28,6 +31,34 @@ def emit(line: str) -> None:
     exits. For this command the output *is* the product.
     """
     print(line, flush=True)
+
+
+class TeeSink(NullSink):
+    """Writes to the ring buffer and echoes a line to the console.
+
+    The ring buffer is what the API and UI read; the console line is what makes
+    baseline interception observable while you are watching it happen. Both are
+    wanted, so neither replaces the other.
+    """
+
+    def __init__(self, ring_sink: RingSink, console: ConsoleSink) -> None:
+        super().__init__()
+        self.ring_sink = ring_sink
+        self.console = console
+
+    def record_http(self, request: Any, response: Any, provenance: Any, timing: Any) -> None:
+        super().record_http(request, response, provenance, timing)
+        self.ring_sink.record_http(request, response, provenance, timing)
+        self.console.record_http(request, response, provenance, timing)
+
+    def record_passthrough(self, host: Any, ip: Any, provenance: Any, timing: Any) -> None:
+        super().record_passthrough(host, ip, provenance, timing)
+        self.ring_sink.record_passthrough(host, ip, provenance, timing)
+        self.console.record_passthrough(host, ip, provenance, timing)
+
+    def record_websocket_message(self, message: Any) -> None:
+        super().record_websocket_message(message)
+        self.ring_sink.record_websocket_message(message)
 
 
 class ConsoleSink(NullSink):
@@ -64,7 +95,7 @@ class ConsoleSink(NullSink):
         emit(f"  {'TUNNEL':6} ---  {'':>9}   {'':>8}  {host or ip}  [{reason}]")
 
 
-async def _run(config: Config, sink: ConsoleSink) -> int:
+async def _run(config: Config, sink: Any) -> int:
     from mitmproxy.options import Options
     from mitmproxy.tools.dump import DumpMaster
 
@@ -85,7 +116,19 @@ async def _run(config: Config, sink: ConsoleSink) -> int:
     )
 
     master = DumpMaster(options, with_termlog=False, with_dumper=False)
-    interceptor = Interceptor(config, sink=sink)
+
+    ring = RingBuffer(
+        max_flows=config.capture.ring_max_flows,
+        max_bytes=config.capture.ring_max_bytes,
+        max_body_bytes=config.capture.max_body_bytes,
+    )
+    ring_sink = RingSink(ring, max_body_bytes=config.capture.max_body_bytes)
+    console = sink if isinstance(sink, ConsoleSink) else ConsoleSink(quiet=True)
+    tee = TeeSink(ring_sink, console)
+
+    interceptor = Interceptor(config, sink=tee)
+    control = ControlApp(config, ring=ring, interceptor=interceptor)
+    interceptor.control = control
     master.addons.add(interceptor)  # type: ignore[no-untyped-call]
 
     loop = asyncio.get_running_loop()
@@ -94,20 +137,26 @@ async def _run(config: Config, sink: ConsoleSink) -> int:
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     emit(f"  exclusions: {len(interceptor.exclusions)} entries")
+    emit(
+        f"  control API on http://{config.control.listen_host}:"
+        f"{config.control.listen_port}  (token: {control.tokens.path})"
+    )
     emit("  ctrl-c to stop\n")
 
     await master.run()
 
+    if interceptor.control_server is not None:
+        await interceptor.control_server.stop()
+
     emit("\nstopped.")
     emit(
-        f"  {sink.http} http flows, {sink.passthrough} tunneled, "
-        f"{interceptor.counters.errors} errors"
+        f"  {tee.http} http flows, {tee.passthrough} tunneled, {interceptor.counters.errors} errors"
     )
     return 0
 
 
 def run_foreground(config: Config, *, quiet: bool = False) -> int:
-    sink = ConsoleSink(quiet=quiet)
+    sink: Any = ConsoleSink(quiet=quiet)
     try:
         return asyncio.run(_run(config, sink))
     except KeyboardInterrupt:

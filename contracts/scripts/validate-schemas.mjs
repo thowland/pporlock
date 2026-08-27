@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Validates every JSON Schema in contracts/schemas/ compiles under draft 2020-12,
 // and that each declares $id and $schema. SPEC-0 §1.1 / REQ MOD-015.
+//
+// Schemas cross-reference each other by $id (flow -> provenance), so every
+// schema is registered with the validator before any is compiled.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,18 +14,19 @@ const schemaDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'schemas')
 const ajv = new Ajv2020({ strict: true, allErrors: true });
 addFormats(ajv);
 
-const files = readdirSync(schemaDir).filter((f) => f.endsWith('.schema.json'));
+const files = readdirSync(schemaDir).filter((f) => f.endsWith('.schema.json')).sort();
 if (files.length === 0) {
   console.error('FAIL: no schemas found in contracts/schemas/');
   process.exit(1);
 }
 
+// --- pass 1: parse, check metadata, register ---
+const parsed = [];
 let failed = 0;
 for (const file of files) {
-  const raw = readFileSync(join(schemaDir, file), 'utf8');
   let schema;
   try {
-    schema = JSON.parse(raw);
+    schema = JSON.parse(readFileSync(join(schemaDir, file), 'utf8'));
   } catch (e) {
     console.error(`FAIL ${file}: invalid JSON — ${e.message}`);
     failed++;
@@ -39,6 +43,18 @@ for (const file of files) {
     continue;
   }
   try {
+    ajv.addSchema(schema, schema.$id);
+    parsed.push({ file, schema });
+  } catch (e) {
+    console.error(`FAIL ${file}: ${e.message}`);
+    failed++;
+  }
+}
+
+// --- pass 2: compile, now that cross-references can resolve ---
+for (const { file, schema } of parsed) {
+  try {
+    ajv.getSchema(schema.$id);
     ajv.compile(schema);
     console.log(`ok   ${file}`);
   } catch (e) {

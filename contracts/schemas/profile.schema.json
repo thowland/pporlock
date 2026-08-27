@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/profile.schema.json",
+  "title": "Profile",
+  "description": "A named set of enabled modules (SPEC-0 §5.7). Exactly one profile is active at a time; 'default' always exists and is not deletable (REQ MOD-041).",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+    "description": { "type": "string" },
+    "modules": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Ordered set. Ordering here does not override module priority."
+    },
+    "dev_toggles": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Profile-scoped development toggles (REQ MOD-044). Both alter traffic in ways that make production behaviour unreproducible.",
+      "properties": {
+        "anticache": { "type": "boolean", "default": false },
+        "anticomp": { "type": "boolean", "default": false }
+      }
+    },
+    "exclusions_add": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Profile-scoped additions to the ClientHello exclusion list"
+    }
+  }
+}

@@ -1,0 +1,627 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/rule.schema.json",
+  "title": "Rule",
+  "description": "A single declarative match+action unit (SPEC-0 \u00a75.3, \u00a75.4). Validation is strict: unknown keys are errors, not warnings (REQ MOD-014).",
+  "type": "object",
+  "required": [
+    "name",
+    "action"
+  ],
+  "unevaluatedProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique within the module"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "match": {
+      "$ref": "#/$defs/match"
+    },
+    "action": {
+      "$ref": "#/$defs/action"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "block"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "stub",
+              "kill"
+            ],
+            "default": "stub"
+          },
+          "stub": {
+            "$ref": "#/$defs/stub"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "map_local"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "$ref": "#/$defs/asset_path"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "default": 200
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "redirect"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "required": [
+          "to"
+        ],
+        "properties": {
+          "to": {
+            "$ref": "#/$defs/redirect_spec"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "headers"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/header_ops"
+          },
+          "response": {
+            "$ref": "#/$defs/header_ops"
+          }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/header_ops"
+              }
+            },
+            "required": [
+              "request"
+            ]
+          },
+          {
+            "properties": {
+              "response": {
+                "$ref": "#/$defs/header_ops"
+              }
+            },
+            "required": [
+              "response"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "body"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "transform": {
+            "$ref": "#/$defs/transform"
+          },
+          "transforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/transform"
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "transform": {
+                "$ref": "#/$defs/transform"
+              }
+            },
+            "required": [
+              "transform"
+            ]
+          },
+          {
+            "properties": {
+              "transforms": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/transform"
+                }
+              }
+            },
+            "required": [
+              "transforms"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "passthrough",
+        "block",
+        "map_local",
+        "redirect",
+        "headers",
+        "body"
+      ]
+    },
+    "asset_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Relative to the module's assets/ directory. Absolute paths and '..' traversal are rejected at load (implementation-plan.md \u00a72.5).",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    },
+    "match": {
+      "type": "object",
+      "description": "All present criteria must match. Absent criteria do not constrain (SPEC-0 \u00a75.3).",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Glob, case-insensitive, matched against the full host"
+        },
+        "path": {
+          "type": "string",
+          "description": "Regex, re.search not fullmatch \u2014 anchor explicitly when you mean it"
+        },
+        "method": {
+          "$ref": "#/$defs/string_or_list"
+        },
+        "dest": {
+          "$ref": "#/$defs/string_or_list",
+          "description": "Sec-Fetch-Dest value(s)"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "key -> regex"
+        },
+        "request_headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": "key -> regex; null or omitted value means presence only"
+        },
+        "status": {
+          "description": "Response-side only. Integer, or a \"300-399\" range string, or a list of either.",
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^[1-5][0-9]{2}-[1-5][0-9]{2}$"
+            },
+            {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^[1-5][0-9]{2}-[1-5][0-9]{2}$"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "content_type": {
+          "type": "string",
+          "description": "Response-side only. Media type or regex."
+        }
+      }
+    },
+    "string_or_list": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "redirect_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    "header_ops": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "add": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "stub": {
+      "description": "'auto' derives from Sec-Fetch-Dest (REQ PXY-032); a string names a library stub; an object is an inline spec.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "integer",
+              "default": 200
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "transform": {
+      "type": "object",
+      "description": "Named registry entry with validated parameters. Never an expression in YAML (REQ MOD-013).",
+      "required": [
+        "kind"
+      ],
+      "unevaluatedProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/transform_kind"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "strip_csp"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "report_only": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "inject_script"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "src": {
+                "type": "string"
+              },
+              "inline": {
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/$defs/position"
+              },
+              "reuse_nonce": {
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "src": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "src"
+                ]
+              },
+              {
+                "properties": {
+                  "inline": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "inline"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "inject_style"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "href": {
+                "type": "string"
+              },
+              "inline": {
+                "type": "string"
+              },
+              "position": {
+                "$ref": "#/$defs/position"
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "href": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "href"
+                ]
+              },
+              {
+                "properties": {
+                  "inline": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "inline"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "regex_sub"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "pattern",
+              "repl"
+            ],
+            "properties": {
+              "pattern": {
+                "type": "string"
+              },
+              "repl": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0
+              },
+              "flags": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "replace_literal"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "find",
+              "replace"
+            ],
+            "properties": {
+              "find": {
+                "type": "string"
+              },
+              "replace": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "json_patch"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "ops"
+            ],
+            "properties": {
+              "ops": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                },
+                "description": "RFC 6902 operations"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "transform_kind": {
+      "type": "string",
+      "description": "Built-in transform registry (SPEC-0 \u00a75.5). Modules extend it via ctx.register_transform.",
+      "enum": [
+        "strip_integrity_attributes",
+        "strip_csp",
+        "inject_script",
+        "inject_style",
+        "regex_sub",
+        "replace_literal",
+        "json_patch"
+      ]
+    },
+    "position": {
+      "type": "string",
+      "enum": [
+        "head_start",
+        "head_end",
+        "body_end"
+      ],
+      "default": "head_end"
+    }
+  }
+}

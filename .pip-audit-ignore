@@ -1,0 +1,81 @@
+# Accepted transitive advisories.
+#
+# Every line is a deliberate, justified acceptance — not a convenience. The gate
+# fails on anything not listed here (Makefile, G6). Re-examine this file whenever
+# the mitmproxy pin moves, because most entries exist only because mitmproxy caps
+# a dependency below its fixed version.
+#
+# Format:  ignore: <VULN-ID>
+#
+# ---------------------------------------------------------------------------
+# tornado — 4 advisories, none on our execution path.
+#
+# mitmproxy 12.2.3 caps tornado at <=6.5.5; the fixes land in 6.5.6 and 6.5.7.
+# Verified by inspection and empirically: tornado is imported only by
+# mitmproxy/tools/web/* (mitmweb) and mitmproxy/tools/console/master.py (the
+# TUI). We run mitmdump, and `import mitmproxy.tools.dump` leaves tornado
+# absent from sys.modules. Three of the four advisories are in tornado's HTTP
+# *client* (SimpleAsyncHTTPClient, CurlAsyncHTTPClient, AsyncHTTPClient), which
+# nothing in our path constructs.
+#
+# Re-check trigger: if we ever ship mitmweb, run the console tool, or import
+# tornado directly, these stop being acceptable immediately.
+ignore: PYSEC-2026-3387
+ignore: PYSEC-2026-3388
+ignore: PYSEC-2026-3389
+ignore: GHSA-pw6j-qg29-8w7f
+
+# ---------------------------------------------------------------------------
+# msgpack PYSEC-2026-3625 — availability issue, not on our execution path.
+#
+# Reaches us twice: via pip-audit's own cachecontrol (a dev-group dependency
+# that never ships), and via mitmproxy, which does not import it anywhere —
+# `import mitmproxy.tools.dump` leaves msgpack absent from sys.modules. We
+# never deserialize untrusted msgpack.
+ignore: PYSEC-2026-3625
+
+# ---------------------------------------------------------------------------
+# h2 PYSEC-2026-3628 — ACCEPTED WITH RESIDUAL RISK. This one is real.
+#
+# "Duplicate Host header could facilitate request smuggling." Unlike the entries
+# above, h2 IS loaded by mitmdump: it is how mitmproxy speaks HTTP/2, so this is
+# genuinely on our path. mitmproxy 12.2.3 pins h2 to exactly 4.3.0 (>=4.3.0,
+# <=4.3.0); the fix is in 4.4.1. We cannot move it without breaking the pin.
+#
+# Why we accept it for now:
+#   - Impact is availability only (CVSS AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L).
+#   - pporlock is single-user and loopback-bound. Requests reaching the proxy
+#     originate from the user's own Chrome, so an attacker would need the user's
+#     browser to emit a malformed duplicate-Host HTTP/2 request at their own
+#     local proxy.
+#   - There is no multi-tenant boundary here for smuggling to cross.
+#
+# Re-check trigger: the moment mitmproxy relaxes its h2 pin, drop this entry.
+# Revisit immediately if pporlock ever accepts traffic from anything other than
+# the local browser (see REQ SCP-004, the deferred system-wide mode).
+ignore: PYSEC-2026-3628
+
+# ---------------------------------------------------------------------------
+# cryptography PYSEC-2026-3552 / 3553 / 3554 — accepted, and the accepting is a
+# deliberate trade rather than a shrug.
+#
+# mitmproxy 12.2.3 caps cryptography at <=48.1. The fixes are in 49.0.0 and
+# 50.0.0, out of reach. The choice was between:
+#
+#   44.0.3 — one advisory, GHSA-537c-gmf6-5ccf: "Vulnerable OpenSSL included in
+#            cryptography wheels". pporlock terminates TLS for every connection
+#            the browser makes, so a stale bundled OpenSSL is the broadest
+#            possible exposure we could carry.
+#   48.0.1 — three advisories, all narrow: a Bleichenbacher oracle in PKCS#7
+#            EnvelopedData decryption (we never decrypt PKCS#7), exponential
+#            path-building on duplicate self-signed intermediates, and wildcard
+#            DNS names escaping permittedSubtrees in the X.509 verifier.
+#
+# We took 48.0.1: a current bundled OpenSSL matters more to a TLS-terminating
+# proxy than three findings in certificate-verification paths that mitmproxy
+# reaches through OpenSSL rather than cryptography's own verifier.
+#
+# Re-check trigger: raise the floor the moment mitmproxy's cap allows 49.0.0.
+ignore: PYSEC-2026-3552
+ignore: PYSEC-2026-3553
+ignore: PYSEC-2026-3554

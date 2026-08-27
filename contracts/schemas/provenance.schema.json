@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/provenance.schema.json",
+  "title": "Provenance",
+  "description": "Structural record of what the engine did to a flow and why (SPEC-0 §4). Not logging: this is a first-class return value of the rules engine (REQ CAP-010) and is present on every flow in every consumer (REQ CAP-013).",
+  "type": "object",
+  "required": ["profile", "evaluated_modules", "entries", "notes", "total_ms"],
+  "additionalProperties": false,
+  "properties": {
+    "profile": { "type": "string", "description": "Active profile at evaluation time" },
+    "evaluated_modules": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Modules considered for this flow, in priority order"
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/provenance_entry" },
+      "description": "Every module and rule that matched, in evaluation order"
+    },
+    "notes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/provenance_note" },
+      "description": "Behaviour-changing conditions that are not rule actions (SPEC-0 §4.4)"
+    },
+    "total_ms": { "type": "number", "minimum": 0 },
+    "short_circuited_by": {
+      "type": ["string", "null"],
+      "description": "rule_id that ended short-circuit evaluation, if any"
+    }
+  },
+  "$defs": {
+    "phase": {
+      "type": "string",
+      "description": "Pipeline phase (SPEC-0 §4.2, REQ PXY-020)",
+      "enum": [
+        "clienthello",
+        "request_short_circuit",
+        "request_headers",
+        "buffering_decision",
+        "response_headers",
+        "response_body",
+        "websocket"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "description": "What became of the action (SPEC-0 §4.3)",
+      "enum": [
+        "applied",
+        "no_change",
+        "skipped_streamed",
+        "skipped_budget",
+        "skipped_short_circuit",
+        "skipped_disabled",
+        "error"
+      ]
+    },
+    "action": {
+      "type": "string",
+      "description": "Action taxonomy (REQ PXY-030)",
+      "enum": ["passthrough", "block", "map_local", "redirect", "headers", "body"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "error"]
+    },
+    "note_code": {
+      "type": "string",
+      "description": "Note codes every client must render (SPEC-0 §4.4)",
+      "enum": [
+        "response_streamed",
+        "transform_budget_exceeded",
+        "module_quarantined",
+        "map_local_missing",
+        "csp_modified",
+        "sri_stripped",
+        "script_injected",
+        "dev_toggle_active",
+        "body_truncated",
+        "module_error",
+        "passthrough_excluded",
+        "attribution_missing",
+        "module_deprecation"
+      ]
+    },
+    "provenance_entry": {
+      "type": "object",
+      "required": ["seq", "phase", "module", "rule_id", "action", "outcome", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0 },
+        "phase": { "$ref": "#/$defs/phase" },
+        "module": { "type": "string" },
+        "rule_id": { "type": "string", "description": "\"{module}:{index}\" (SPEC-0 §2)" },
+        "rule_name": { "type": ["string", "null"] },
+        "action": { "$ref": "#/$defs/action" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "detail": { "type": "object", "additionalProperties": true },
+        "duration_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "provenance_note": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/note_code" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "module": { "type": ["string", "null"] },
+        "message": { "type": "string" },
+        "detail": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

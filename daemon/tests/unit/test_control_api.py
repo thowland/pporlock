@@ -15,7 +15,12 @@ from starlette.testclient import TestClient
 from pporlock.addon.interceptor import Interceptor
 from pporlock.capture.ring import RingBuffer
 from pporlock.config import Config
-from pporlock.control.app import INLINE_ROUTES, PUBLIC_ROUTES, ControlApp
+from pporlock.control.app import (
+    INLINE_ROUTES,
+    OFFLOAD_ROUTES,
+    PUBLIC_ROUTES,
+    ControlApp,
+)
 from pporlock.control.audit import AuditLog
 from pporlock.engine.exclusions import ExclusionEntry, ExclusionList
 
@@ -321,6 +326,12 @@ class TestLoopDiscipline:
     def test_config_is_not_inline(self) -> None:
         """It reflects over dataclasses and, from Sprint 9, reads the filesystem."""
         assert "/config" not in INLINE_ROUTES
+        assert "/config" in OFFLOAD_ROUTES
+
+    def test_the_two_sets_do_not_overlap(self) -> None:
+        """A route cannot be both. Overlap would mean the classification says
+        nothing."""
+        assert not (INLINE_ROUTES & OFFLOAD_ROUTES)
 
     def test_public_routes_are_minimal(self) -> None:
         """Every unauthenticated route is attack surface; there are two, and
@@ -329,10 +340,11 @@ class TestLoopDiscipline:
 
     def test_every_registered_route_is_classified(self, app: ControlApp) -> None:
         registered = {r.path for r in app.asgi.routes}  # type: ignore[attr-defined]
-        unclassified = registered - INLINE_ROUTES - PUBLIC_ROUTES - {"/config"}
+        unclassified = registered - INLINE_ROUTES - OFFLOAD_ROUTES - PUBLIC_ROUTES
         assert not unclassified, (
             f"routes with no loop classification: {sorted(unclassified)}. "
-            "Add to INLINE_ROUTES if they read memory only, or offload them."
+            "Add to INLINE_ROUTES if they read memory only; otherwise offload "
+            "them and add to OFFLOAD_ROUTES."
         )
 
 

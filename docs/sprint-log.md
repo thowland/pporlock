@@ -413,3 +413,94 @@ serializer reports `redacted: false` honestly until then.
   load, uvicorn exposes a startup event worth switching to.
 - The `starlette.testclient` deprecation warning about httpx2 is cosmetic and
   will resolve when starlette's own guidance settles.
+
+---
+
+## Sprint 04 — SSE and the live flow table  ◀ VISUAL MVP
+
+**Branch:** `sprint-04-visual-mvp`
+**Tag:** `sprint-04-complete`
+
+**Requirements delivered:** API-022 (SSE stream), API-003 (static asset
+serving), WUI-001/002 (React + Vite SPA served by the daemon), WUI-003
+(live flow table with the filter vocabulary and flag icons), WUI-012 (dev-toggle
+indicator), WUI-013 (disconnected state), plus SPEC-0 §7 in full.
+
+**Requirements deferred:** WUI-004 flow detail and provenance view → Sprint 8.
+PRF-004 is partially addressed (event batching on an animation frame); the
+virtualization requirement is not yet exercised because the ring buffer caps
+what can be shown — revisit when a session browser can show 10,000 rows.
+
+**Gate results:**
+- **G1** — exit demo run against a live daemon and captured as screenshots:
+  11 flows rendered live including two tunneled hosts; filtering to
+  `host=example.com` narrowed 11 rows to 1 and restored them on clear; zero
+  console errors; killing the daemon produced the disconnected banner within a
+  poll interval.
+- **G2** — daemon 94.9%, engine 99.6%, web 95.1%, extension 93.75%.
+- **G3** — 693 daemon + 125 web + 18 extension + 4 mcp, plus 5 Playwright E2E.
+- **G4** — `e2e/web/smoke.spec.ts` was removed and replaced by `mvp.spec.ts`.
+  The smoke test asserted the Sprint 0 placeholder page still rendered, which
+  ceased to describe real behaviour once the shell existed. Its one meaningful
+  assertion — no requests outside the serving origin — was carried across
+  verbatim, and three exit-criteria tests were added alongside it.
+- **G5** — clean. Two `security/detect-object-injection` warnings suppressed
+  inline with the reason stated: the key is constrained to `keyof FlowFilter`
+  at the type level and every call site passes a literal.
+- **G6** — scanners clean. §2.5 areas walked: **token handling** — the decision
+  below is the substantive one this sprint; **logging hygiene** — the SSE stream
+  carries flow bodies only at `bodies` detail, and the live subscription uses
+  `summary`.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **The event stream uses streaming fetch, not EventSource.** EventSource
+   cannot set request headers, which is why token-in-query-string is the usual
+   shortcut for authenticated SSE. We did not take it: a URL lands in logs,
+   history, and Referer, and this token grants read access to captured traffic.
+   The cost is that reconnection, which EventSource provides free, is ours to
+   implement — with backoff and `Last-Event-ID` resume. This resolves the open
+   question the plan left for Sprint 4 ("SSE auth via header or a short-lived
+   stream ticket, decided and documented this sprint").
+
+2. **The daemon injects the token into the document it serves.** The UI is
+   same-origin, served by the process that holds the token, so there is no third
+   party in between. The shell is sent `no-store` with `no-referrer`. The origin
+   policy still governs every subsequent call, so another page cannot use what
+   it cannot read.
+
+3. **Drop-don't-backpressure, everywhere.** A subscriber's queue is bounded and
+   overflow discards the oldest with a `stream.gap`. There is a test that
+   publishes 1536 events into a deliberately stalled subscriber and asserts the
+   publisher does not block — because the publisher runs on the proxy's own
+   event loop, and blocking it means blocking browsing.
+
+4. **Three bugs found by running it rather than reading it.** A late refetch
+   clobbering live events; the fix for that then making filters unable to remove
+   rows; and `requestAnimationFrame` assumed to exist. All three now have
+   regression tests. The middle one is worth remembering: fixing a race by
+   merging is correct only when the two sides describe the same query.
+
+5. **`eslint-plugin-react-hooks` was a declared dependency that was never
+   running.** It is now wired into the flat config, and it is exactly the linter
+   that catches the identity-churn bug this sprint hit — a new object per render
+   churning a subscription effect.
+
+6. **The unattributed flag is suppressed until attribution exists.** Every flow
+   is unattributed until Sprint 6, so the marker appeared on every row and
+   conveyed nothing. A flag that is always on trains the eye to ignore it. It
+   now appears only once at least one flow carries a tab.
+
+**Notes for the next sprint:**
+
+- Sprint 5 builds the extension. The daemon side it needs is already in place:
+  `/state/health` is public and cheap for the fail-safe poll, and `/pair`
+  issues the token without filesystem access.
+- The web UI reads its token from an injected meta tag; the extension will use
+  the pairing flow instead. Both paths exist and are tested.
+- `EventFilter` supports `tab_id`, which the DevTools panel will use in Sprint 8
+  and which does nothing useful until attribution lands in Sprint 6.
+- The flow table is windowed rather than virtualized. That is adequate while the
+  ring buffer bounds what exists; the session browser in Sprint 13 will show
+  more than that and should revisit it against PRF-004.

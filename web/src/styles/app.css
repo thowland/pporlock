@@ -1,0 +1,369 @@
+/* pporlock web UI.
+   A dense, data-first tool interface. Dark by default because it sits beside
+   devtools, with light honoured when the OS asks for it. */
+
+:root {
+  color-scheme: dark light;
+  --bg: #14161a;
+  --bg-raised: #1b1e24;
+  --bg-row: #191c21;
+  --bg-row-alt: #1d2027;
+  --border: #2a2f38;
+  --text: #dfe3ea;
+  --text-dim: #8b93a1;
+  --text-faint: #5c6472;
+  --accent: #5aa9e6;
+  --ok: #5ecf8d;
+  --warn: #e8b862;
+  --error: #ea6a6a;
+  --info: #6f9fd8;
+  --tunnel: #a98be0;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7f8fa;
+    --bg-raised: #ffffff;
+    --bg-row: #ffffff;
+    --bg-row-alt: #f2f4f7;
+    --border: #d8dde5;
+    --text: #1a1d23;
+    --text-dim: #5c6472;
+    --text-faint: #8b93a1;
+    --accent: #1c6fb5;
+    --ok: #1f8a4c;
+    --warn: #9a6b00;
+    --error: #b3261e;
+    --info: #2c5f96;
+    --tunnel: #6b46c1;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------- status bar --- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  height: 40px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.statusbar .brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.statusbar .spacer {
+  flex: 1;
+}
+
+.stat {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.stat b {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pill.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.pill.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.pill.error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 50%, transparent);
+}
+.pill.dim {
+  color: var(--text-faint);
+}
+
+/* A development toggle changes traffic in ways that make production behaviour
+   unreproducible, so it is never subtle (REQ WUI-012, PXY-044). */
+.devtoggle {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  border-color: var(--warn);
+  font-weight: 600;
+}
+
+/* -------------------------------------------------------- disconnected --- */
+
+/* "No flows because nothing happened" must never be confusable with "no flows
+   because we are not connected" (REQ WUI-013). */
+.banner {
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  border-bottom: 1px solid var(--error);
+  color: var(--error);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.banner .msg {
+  flex: 1;
+}
+.banner code {
+  font-family: var(--mono);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* -------------------------------------------------------------- filters --- */
+
+.filterbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.filterbar input[type='text'] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 5px 9px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 180px;
+}
+.filterbar input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.chip {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.chip[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+button.action {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+button.action:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- table --- */
+
+.tablewrap {
+  flex: 1 1 auto;
+  overflow: auto;
+  position: relative;
+}
+
+table.flows {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+table.flows thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  padding: 6px 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+
+table.flows td {
+  padding: 4px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+table.flows tbody tr:nth-child(even) {
+  background: var(--bg-row-alt);
+}
+table.flows tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dim {
+  color: var(--text-dim);
+}
+.faint {
+  color: var(--text-faint);
+}
+
+/* Path truncates from the left so the filename stays visible (SPEC-2 §5.1). */
+.path {
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  display: inline-block;
+  vertical-align: bottom;
+}
+.path > span {
+  direction: ltr;
+  unicode-bidi: bidi-override;
+}
+
+.status-2xx {
+  color: var(--ok);
+}
+.status-3xx {
+  color: var(--info);
+}
+.status-4xx {
+  color: var(--warn);
+}
+.status-5xx {
+  color: var(--error);
+}
+.status-none {
+  color: var(--text-faint);
+}
+
+/* A synthesized response must be visually distinct from an upstream one. */
+.synthesized {
+  text-decoration: underline dotted;
+}
+
+.flags {
+  display: inline-flex;
+  gap: 4px;
+}
+.flag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  font-family: var(--sans);
+  font-weight: 600;
+}
+.flag.blocked {
+  color: var(--error);
+}
+.flag.modified {
+  color: var(--accent);
+}
+.flag.streamed {
+  color: var(--text-faint);
+}
+.flag.tunnel {
+  color: var(--tunnel);
+}
+.flag.warn {
+  color: var(--warn);
+}
+.flag.error {
+  color: var(--error);
+}
+.flag.unattributed {
+  color: var(--text-faint);
+}
+
+.empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-faint);
+}
+.empty h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 0 0 6px;
+}
+.empty p {
+  margin: 3px 0;
+}
+
+.overhead {
+  color: var(--text-faint);
+}
+.overhead.slow {
+  color: var(--warn);
+}

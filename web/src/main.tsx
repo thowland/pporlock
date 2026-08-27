@@ -1,29 +1,49 @@
 /**
  * Web UI entry point.
  *
- * Sprint 0 renders only enough to prove the toolchain builds and the loopback
- * guard is wired. The shell, status bar, and flow table land in Sprint 4
- * (SPEC-2 §3, §5).
+ * The page is served same-origin by the daemon (REQ API-003), so it obtains the
+ * token from a bootstrap element the server can fill rather than pairing. Until
+ * that lands the token is read from the URL fragment on first load and removed
+ * immediately, so it never persists in history.
  */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { resolveControlOrigin } from './lib/control-origin';
+import { App } from './App';
+import { ApiClient } from './api/client';
+import './styles/app.css';
 
-function App() {
-  const origin = resolveControlOrigin(window.location.origin);
-  return (
-    <main>
-      <h1>pporlock</h1>
-      <p>Control origin: {origin}</p>
-    </main>
-  );
+function bootstrapToken(): string | null {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="pporlock-token"]');
+  if (meta?.content) return meta.content;
+
+  const hash = window.location.hash;
+  if (hash.startsWith('#token=')) {
+    const token = decodeURIComponent(hash.slice('#token='.length));
+    // Strip it straight away: a token in the address bar ends up in history.
+    window.history.replaceState(null, '', window.location.pathname);
+    try {
+      sessionStorage.setItem('pporlock.token', token);
+    } catch {
+      /* private browsing; the in-memory client still has it */
+    }
+    return token;
+  }
+
+  try {
+    return sessionStorage.getItem('pporlock.token');
+  } catch {
+    return null;
+  }
 }
+
+const api = new ApiClient(window.location.origin);
+api.setToken(bootstrapToken());
 
 const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <App />
+      <App api={api} />
     </StrictMode>,
   );
 }

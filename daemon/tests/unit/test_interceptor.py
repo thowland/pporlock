@@ -1,0 +1,256 @@
+"""The addon. SPEC-1 §3.1."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from pporlock.addon.interceptor import Counters, Interceptor, NullSink
+from pporlock.config import Config
+from pporlock.engine.exclusions import ExclusionEntry, ExclusionList
+from pporlock.engine.provenance import NoteCode
+from tests.stubs import StubFlow, StubHeaders, StubRequest, StubResponse
+
+
+class RecordingSink(NullSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.http_records: list[tuple[Any, Any, Any, Any]] = []
+        self.passthrough_records: list[tuple[Any, Any, Any, Any]] = []
+        self.ws_records: list[Any] = []
+
+    def record_http(self, request: Any, response: Any, provenance: Any, timing: Any) -> None:
+        super().record_http(request, response, provenance, timing)
+        self.http_records.append((request, response, provenance, timing))
+
+    def record_passthrough(self, host: Any, ip: Any, provenance: Any, timing: Any) -> None:
+        super().record_passthrough(host, ip, provenance, timing)
+        self.passthrough_records.append((host, ip, provenance, timing))
+
+    def record_websocket_message(self, message: Any) -> None:
+        super().record_websocket_message(message)
+        self.ws_records.append(message)
+
+
+def client_hello(sni: str | None, ip: str | None = None) -> Any:
+    class Data:
+        ignore_connection = False
+
+    data = Data()
+    data.client_hello = type("C", (), {"sni": sni})()
+    server = type("S", (), {"address": (ip, 443) if ip else None})()
+    data.context = type("Ctx", (), {"server": server})()
+    return data
+
+
+@pytest.fixture
+def sink() -> RecordingSink:
+    return RecordingSink()
+
+
+@pytest.fixture
+def interceptor(sink: RecordingSink) -> Interceptor:
+    exclusions = ExclusionList([ExclusionEntry("*.apple.com", "update: OS updates", "default")])
+    return Interceptor(Config(), sink=sink, exclusions=exclusions)
+
+
+class TestCounters:
+    def test_starts_at_zero(self) -> None:
+        assert Counters().to_dict() == {
+            "flows_total": 0,
+            "blocked": 0,
+            "modified": 0,
+            "passthrough": 0,
+            "errors": 0,
+        }
+
+
+class TestExclusionHook:
+    def test_excluded_connection_is_tunneled(self, interceptor: Interceptor) -> None:
+        """REQ PXY-013 — ignore_connection means we never see the bytes."""
+        data = client_hello("swscan.apple.com")
+        interceptor.tls_clienthello(data)
+        assert data.ignore_connection is True
+
+    def test_non_excluded_connection_is_decrypted(self, interceptor: Interceptor) -> None:
+        data = client_hello("example.com")
+        interceptor.tls_clienthello(data)
+        assert data.ignore_connection is False
+
+    def test_exclusion_is_recorded_as_a_passthrough(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        """REQ PXY-015. Silence would make excluded traffic invisible, which is a
+        different failure from the one exclusion is solving."""
+        interceptor.tls_clienthello(client_hello("swscan.apple.com"))
+        assert len(sink.passthrough_records) == 1
+        host, _ip, provenance, _timing = sink.passthrough_records[0]
+        assert host == "swscan.apple.com"
+        assert provenance.has_note(NoteCode.PASSTHROUGH_EXCLUDED)
+
+    def test_passthrough_note_carries_the_reason(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        interceptor.tls_clienthello(client_hello("swscan.apple.com"))
+        note = sink.passthrough_records[0][2].notes[0]
+        assert note.detail["pattern"] == "*.apple.com"
+        assert "OS updates" in note.detail["reason"]
+
+    def test_passthrough_increments_the_counter(self, interceptor: Interceptor) -> None:
+        interceptor.tls_clienthello(client_hello("swscan.apple.com"))
+        assert interceptor.counters.passthrough == 1
+
+    def test_non_excluded_records_nothing(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        interceptor.tls_clienthello(client_hello("example.com"))
+        assert sink.passthrough_records == []
+        assert interceptor.counters.passthrough == 0
+
+    def test_no_sni_falls_back_to_ip(self, sink: RecordingSink) -> None:
+        exclusions = ExclusionList([ExclusionEntry("10.0.0.0/8", "private", "user")])
+        interceptor = Interceptor(Config(), sink=sink, exclusions=exclusions)
+        data = client_hello(None, "10.1.2.3")
+        interceptor.tls_clienthello(data)
+        assert data.ignore_connection is True
+
+
+class TestRequestResponseCycle:
+    def test_request_establishes_provenance_and_counts(self, interceptor: Interceptor) -> None:
+        flow = StubFlow()
+        interceptor.request(flow)
+        assert interceptor.counters.flows_total == 1
+        assert "pporlock.builder" in flow.metadata
+        assert "pporlock.request" in flow.metadata
+
+    def test_response_records_the_flow(self, interceptor: Interceptor, sink: RecordingSink) -> None:
+        flow = StubFlow(response=StubResponse())
+        interceptor.request(flow)
+        interceptor.response(flow)
+        assert len(sink.http_records) == 1
+        request, response, provenance, timing = sink.http_records[0]
+        assert request.method == "GET"
+        assert response.status == 200
+        assert provenance.profile == "default"
+        assert timing["pporlock_ms"] >= 0
+
+    def test_every_flow_carries_provenance(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        """REQ CAP-013 — including a flow that matched nothing at all."""
+        flow = StubFlow(response=StubResponse())
+        interceptor.request(flow)
+        interceptor.response(flow)
+        assert sink.http_records[0][2] is not None
+
+    def test_response_without_a_prior_request_still_records(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        """A hook can fire without its partner — a replayed flow, or a restart
+        mid-connection. Recording a partial flow beats dropping it."""
+        interceptor.response(StubFlow(response=StubResponse()))
+        assert len(sink.http_records) == 1
+
+    def test_streamed_response_gets_a_note(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        """REQ PXY-022 — a skipped transform must never be silent."""
+        flow = StubFlow(response=StubResponse(stream=True))
+        interceptor.request(flow)
+        interceptor.response(flow)
+        provenance = sink.http_records[0][2]
+        assert provenance.has_note(NoteCode.RESPONSE_STREAMED)
+
+    def test_streamed_response_carries_no_body(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        flow = StubFlow(response=StubResponse(stream=True, content=b"never buffered"))
+        interceptor.request(flow)
+        interceptor.response(flow)
+        assert sink.http_records[0][1].body is None
+
+    def test_metadata_is_cleaned_up(self, interceptor: Interceptor) -> None:
+        """Per-flow state must not accumulate on long-lived flows."""
+        flow = StubFlow(response=StubResponse())
+        interceptor.request(flow)
+        interceptor.response(flow)
+        assert not [k for k in flow.metadata if k.startswith("pporlock.")]
+
+    def test_error_hook_counts(self, interceptor: Interceptor) -> None:
+        interceptor.error(StubFlow())
+        assert interceptor.counters.errors == 1
+
+    def test_sec_fetch_dest_survives_the_round_trip(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        request = StubRequest(headers=StubHeaders([(b"Sec-Fetch-Dest", b"script")]))
+        flow = StubFlow(request, StubResponse())
+        interceptor.request(flow)
+        interceptor.response(flow)
+        assert sink.http_records[0][0].dest == "script"
+
+
+class TestWebSockets:
+    def test_message_is_captured(self, interceptor: Interceptor, sink: RecordingSink) -> None:
+        flow = StubFlow()
+        message = type(
+            "M", (), {"content": b"hello", "from_client": True, "is_text": True, "timestamp": 1.0}
+        )()
+        flow.websocket = type("W", (), {"messages": [message]})()
+        interceptor.websocket_message(flow)
+        assert len(sink.ws_records) == 1
+        assert sink.ws_records[0].direction == "outbound"
+        assert sink.ws_records[0].opcode == "text"
+
+    def test_indexes_increment_per_flow(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
+        flow = StubFlow()
+        message = type(
+            "M", (), {"content": b"x", "from_client": False, "is_text": False, "timestamp": 1.0}
+        )()
+        flow.websocket = type("W", (), {"messages": [message]})()
+        interceptor.websocket_message(flow)
+        interceptor.websocket_message(flow)
+        assert [m.index for m in sink.ws_records] == [0, 1]
+
+    def test_index_state_is_released_on_close(self, interceptor: Interceptor) -> None:
+        flow = StubFlow()
+        message = type(
+            "M", (), {"content": b"x", "from_client": True, "is_text": True, "timestamp": 1.0}
+        )()
+        flow.websocket = type("W", (), {"messages": [message]})()
+        interceptor.websocket_message(flow)
+        interceptor.websocket_end(flow)
+        assert flow.id not in interceptor._ws_indexes
+
+    def test_flow_without_websocket_is_ignored(self, interceptor: Interceptor) -> None:
+        flow = StubFlow()
+        flow.websocket = None
+        interceptor.websocket_message(flow)
+
+    def test_flow_with_no_messages_is_ignored(self, interceptor: Interceptor) -> None:
+        flow = StubFlow()
+        flow.websocket = type("W", (), {"messages": []})()
+        interceptor.websocket_message(flow)
+
+
+class TestLifecycle:
+    def test_hooks_are_safe_to_call(self, interceptor: Interceptor) -> None:
+        interceptor.running()
+        interceptor.responseheaders(StubFlow(response=StubResponse()))
+        interceptor.done()
+
+    def test_uptime_advances(self, interceptor: Interceptor) -> None:
+        assert interceptor.uptime_s >= 0
+
+    def test_defaults_load_the_shipped_exclusions(self) -> None:
+        assert len(Interceptor().exclusions) > 0
+
+    def test_null_sink_counts(self) -> None:
+        sink = NullSink()
+        sink.record_http(None, None, None, {})
+        sink.record_passthrough(None, None, None, {})
+        sink.record_websocket_message(None)
+        assert (sink.http, sink.passthrough, sink.websocket_messages) == (1, 1, 1)

@@ -13,6 +13,6 @@ tags = ["pporlock", "token"]
 [allowlist]
 description = "Fixture material that is intentionally fake"
 paths = [
-  '''tests/fixtures/.*''',
+  '''testfixtures/.*''',
   '''scripts/secret-scan\.sh''',
 ]

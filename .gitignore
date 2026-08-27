@@ -38,7 +38,7 @@ coverage/
 .env.*
 *.pem
 *.key
-tests/fixtures/origin/certs/
+testfixtures/origin/certs/
 .pporlock/
 
 # Playwright

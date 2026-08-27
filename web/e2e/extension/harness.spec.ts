@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
  * would be expensive there and is cheap here.
  */
 
-const EXT_PATH = resolve(import.meta.dirname, '../../../tests/fixtures/minimal-extension');
+const EXT_PATH = resolve(import.meta.dirname, '../../../testfixtures/minimal-extension');
 
 let context: BrowserContext;
 let userDataDir: string;

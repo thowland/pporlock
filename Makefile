@@ -137,7 +137,7 @@ lint:
 	cd $(DAEMON) && $(UV) run ruff format --check . && $(UV) run ruff check .
 	cd $(MCP)    && $(UV) run ruff format --check . && $(UV) run ruff check .
 	@echo "==> G5 ruff (shared test fixtures)"
-	cd $(DAEMON) && $(UV) run ruff check ../tests
+	cd $(DAEMON) && $(UV) run ruff format --check ../testfixtures && $(UV) run ruff check ../testfixtures
 	@echo "==> G5 mypy"
 	cd $(DAEMON) && $(UV) run mypy src
 	cd $(MCP)    && $(UV) run mypy src
@@ -205,7 +205,7 @@ e2e-extension: extension
 
 .PHONY: fixtures
 fixtures:
-	cd $(DAEMON) && $(UV) run python ../tests/fixtures/origin/server.py --port 8099 --verbose
+	cd $(DAEMON) && $(UV) run python ../testfixtures/origin/server.py --port 8099 --verbose
 
 .PHONY: bench
 bench:

@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/flow.schema.json",
+  "title": "FlowRecord",
+  "description": "The persisted and API-exposed representation of one flow (SPEC-0 §3.4). This shape appears in GET /flows, in session storage, in the SSE stream, and in MCP output.",
+  "type": "object",
+  "required": ["flow_id", "kind", "started_at", "modified", "blocked", "provenance", "redacted"],
+  "additionalProperties": false,
+  "properties": {
+    "flow_id": { "type": "string", "description": "ULID, monotonic and sortable" },
+    "kind": { "type": "string", "enum": ["http", "websocket", "passthrough"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": ["string", "null"], "format": "date-time" },
+    "tab_id": {
+      "type": ["integer", "null"],
+      "description": "Chrome tab. Null until attribution backfills it, and may stay null — every consumer must tolerate that (SPEC-0 §3.6)"
+    },
+    "request": { "$ref": "#/$defs/flow_request" },
+    "response": { "anyOf": [{ "$ref": "#/$defs/flow_response" }, { "type": "null" }] },
+    "websocket": { "anyOf": [{ "$ref": "#/$defs/flow_websocket" }, { "type": "null" }] },
+    "timing": { "anyOf": [{ "$ref": "#/$defs/flow_timing" }, { "type": "null" }] },
+    "modified": { "type": "boolean", "description": "Any header or body mutation was applied" },
+    "blocked": { "type": "boolean", "description": "The flow was short-circuited" },
+    "provenance": { "$ref": "https://pporlock.local/schemas/provenance.schema.json" },
+    "redacted": { "type": "boolean", "description": "Redaction was applied to this representation (REQ CAP-040)" }
+  },
+  "$defs": {
+    "header_pairs": {
+      "type": "array",
+      "description": "Ordered [name, value] pairs. Names lowercased; a list, not a map, because headers repeat (SPEC-0 §2).",
+      "items": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "body_encoding": {
+      "type": "string",
+      "enum": ["utf8", "base64"],
+      "description": "Text bodies travel as UTF-8 strings for readability, binary as base64"
+    },
+    "flow_request": {
+      "type": "object",
+      "required": ["method", "scheme", "host", "port", "path", "url", "headers", "body_size"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string" },
+        "scheme": { "type": "string", "enum": ["http", "https"] },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "path": { "type": "string" },
+        "query": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "url": { "type": "string" },
+        "http_version": { "type": "string" },
+        "dest": { "type": ["string", "null"], "description": "Sec-Fetch-Dest, verbatim" },
+        "headers": { "$ref": "#/$defs/header_pairs" },
+        "body_size": { "type": "integer", "minimum": 0 },
+        "body": { "type": ["string", "null"], "description": "Omitted at summary detail (SPEC-0 §6.3)" },
+        "body_encoding": { "anyOf": [{ "$ref": "#/$defs/body_encoding" }, { "type": "null" }] },
+        "body_truncated": { "type": "boolean" }
+      }
+    },
+    "flow_response": {
+      "type": "object",
+      "required": ["status", "headers", "body_size", "streamed"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "integer" },
+        "reason": { "type": "string" },
+        "http_version": { "type": "string" },
+        "headers": { "$ref": "#/$defs/header_pairs" },
+        "content_type": { "type": ["string", "null"], "description": "Media type only, no parameters" },
+        "body_size": { "type": "integer", "minimum": 0 },
+        "body": { "type": ["string", "null"] },
+        "body_encoding": { "anyOf": [{ "$ref": "#/$defs/body_encoding" }, { "type": "null" }] },
+        "body_truncated": { "type": "boolean" },
+        "streamed": { "type": "boolean", "description": "Buffering guard declined; body transforms unavailable (REQ PXY-022)" }
+      }
+    },
+    "flow_websocket": {
+      "type": "object",
+      "required": ["closed", "message_count"],
+      "additionalProperties": false,
+      "properties": {
+        "closed": { "type": "boolean" },
+        "close_code": { "type": ["integer", "null"] },
+        "message_count": { "type": "integer", "minimum": 0 },
+        "messages": {
+          "type": "array",
+          "description": "Omitted at summary detail. Inspection-only in v1 (REQ PXY-051).",
+          "items": { "$ref": "#/$defs/ws_message" }
+        }
+      }
+    },
+    "ws_message": {
+      "type": "object",
+      "required": ["index", "timestamp", "direction", "opcode", "size"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "direction": { "type": "string", "enum": ["outbound", "inbound"] },
+        "opcode": { "type": "string", "enum": ["text", "binary"] },
+        "size": { "type": "integer", "minimum": 0 },
+        "payload": { "type": ["string", "null"] },
+        "payload_encoding": { "anyOf": [{ "$ref": "#/$defs/body_encoding" }, { "type": "null" }] },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "flow_timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dns_ms": { "type": ["number", "null"] },
+        "connect_ms": { "type": ["number", "null"] },
+        "request_ms": { "type": ["number", "null"] },
+        "upstream_ms": { "type": ["number", "null"] },
+        "response_ms": { "type": ["number", "null"] },
+        "pporlock_ms": { "type": ["number", "null"], "description": "Total time spent in our pipeline" },
+        "total_ms": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

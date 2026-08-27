@@ -1,0 +1,947 @@
+openapi: 3.1.0
+info:
+  title: pporlock control API
+  version: 0.1.0
+  description: |
+    Control surface for the pporlock daemon (SPEC-0 §6).
+
+    Binds loopback only, asserted in code rather than merely defaulted
+    (REQ API-010). Access control is a per-install bearer token plus an origin
+    policy — this defends against other local processes and against ordinary
+    web pages on this machine, not against a remote attacker.
+
+    Route implementation status is tracked per sprint; this document is the
+    contract and is written ahead of the implementation (REQ API-029).
+
+servers:
+  - url: http://127.0.0.1:8081
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: state
+  - name: flows
+  - name: modules
+  - name: profiles
+  - name: sessions
+  - name: config
+  - name: extension
+  - name: events
+
+paths:
+  /state/health:
+    get:
+      tags: [state]
+      summary: Liveness. The only unauthenticated route (SPEC-0 §6.1).
+      description: |
+        Kept cheap and failing closed, because the extension polls it to decide
+        whether to clear Chrome's proxy configuration (REQ EXT-010, PXY-008).
+      security: []
+      responses:
+        '200':
+          description: Alive
+          content:
+            application/json:
+              schema: { $ref: './schemas/health.schema.json' }
+
+  /state:
+    get:
+      tags: [state]
+      summary: Daemon status, active profile, dev toggles, counters, module errors
+      responses:
+        '200':
+          description: Current state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/State' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [state]
+      summary: Set development toggles, start/stop the proxy listener
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatePatch' }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/State' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /flows:
+    get:
+      tags: [flows]
+      summary: Ring buffer, filtered and paginated
+      parameters:
+        - { $ref: '#/components/parameters/host' }
+        - { $ref: '#/components/parameters/path' }
+        - { $ref: '#/components/parameters/method' }
+        - { $ref: '#/components/parameters/status' }
+        - { $ref: '#/components/parameters/contentType' }
+        - { $ref: '#/components/parameters/dest' }
+        - { $ref: '#/components/parameters/tabId' }
+        - { $ref: '#/components/parameters/modified' }
+        - { $ref: '#/components/parameters/blocked' }
+        - { $ref: '#/components/parameters/module' }
+        - { $ref: '#/components/parameters/noteCode' }
+        - { $ref: '#/components/parameters/since' }
+        - { $ref: '#/components/parameters/until' }
+        - { $ref: '#/components/parameters/q' }
+        - { $ref: '#/components/parameters/limit' }
+        - { $ref: '#/components/parameters/cursor' }
+        - { $ref: '#/components/parameters/detail' }
+      responses:
+        '200':
+          description: A page of flows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FlowPage' }
+    delete:
+      tags: [flows]
+      summary: Clear the ring buffer
+      responses:
+        '204': { description: Cleared }
+
+  /flows/{flow_id}:
+    parameters:
+      - { $ref: '#/components/parameters/flowId' }
+    get:
+      tags: [flows]
+      summary: One flow with full provenance
+      parameters:
+        - { $ref: '#/components/parameters/detail' }
+        - name: unmask
+          in: query
+          description: |
+            Reveal one masked value, by field path. Live ring-buffer flows only,
+            requires the bearer token, and is audited. Categorically unavailable
+            to the MCP client (REQ CAP-043, MCP-003).
+          schema: { type: string }
+      responses:
+        '200':
+          description: The flow
+          content:
+            application/json:
+              schema: { $ref: './schemas/flow.schema.json' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /flows/{flow_id}/suggest-rule:
+    parameters:
+      - { $ref: '#/components/parameters/flowId' }
+    post:
+      tags: [flows]
+      summary: Candidate rule matching this flow (REQ WUI-008, MCP-014)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intent]
+              properties:
+                intent:
+                  type: string
+                  enum: [block, map_local, redirect, headers]
+      responses:
+        '200':
+          description: Candidate rule
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  yaml: { type: string }
+                  rule: { $ref: './schemas/rule.schema.json' }
+
+  /events:
+    get:
+      tags: [events]
+      summary: Server-Sent Events stream of flows, module errors, and state changes
+      description: |
+        Filtered server-side so a narrow client filter reduces event volume
+        rather than merely hiding rows. Clients send Last-Event-ID on reconnect;
+        where replay is impossible the server emits stream.gap (SPEC-0 §7.2).
+      parameters:
+        - { $ref: '#/components/parameters/tabId' }
+        - name: kinds
+          in: query
+          schema: { type: string }
+          description: Comma-separated event types
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { $ref: './schemas/events.schema.json' }
+
+  /modules:
+    get:
+      tags: [modules]
+      summary: List modules with load state, errors, quarantine, and stats
+      responses:
+        '200':
+          description: Modules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ModuleStatus' }
+    post:
+      tags: [modules]
+      summary: Create a module
+      description: Creating a module never enables it (REQ MCP-030).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModuleWrite' }
+      responses:
+        '201':
+          description: Created, disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModuleStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /modules/{name}:
+    parameters:
+      - { $ref: '#/components/parameters/moduleName' }
+    get:
+      tags: [modules]
+      summary: Manifest, parsed rules, Python source, asset listing
+      responses:
+        '200':
+          description: Module detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModuleDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [modules]
+      summary: Replace module files
+      description: Updating a module never enables it (REQ MCP-030).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModuleWrite' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModuleStatus' }
+    patch:
+      tags: [modules]
+      summary: Set enabled or priority only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                priority: { type: integer }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModuleStatus' }
+    delete:
+      tags: [modules]
+      summary: Remove a module
+      responses:
+        '204': { description: Deleted }
+
+  /modules/reload:
+    post:
+      tags: [modules]
+      summary: Force reload of all modules
+      responses:
+        '200':
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loaded: { type: integer }
+                  errors:
+                    type: array
+                    items: { $ref: '#/components/schemas/ModuleError' }
+
+  /profiles:
+    get:
+      tags: [profiles]
+      summary: List profiles
+      responses:
+        '200':
+          description: Profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: './schemas/profile.schema.json' }
+    post:
+      tags: [profiles]
+      summary: Create a profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './schemas/profile.schema.json' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: './schemas/profile.schema.json' }
+
+  /profiles/{name}:
+    parameters:
+      - { $ref: '#/components/parameters/profileName' }
+    get:
+      tags: [profiles]
+      summary: One profile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: './schemas/profile.schema.json' }
+    put:
+      tags: [profiles]
+      summary: Replace a profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './schemas/profile.schema.json' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: './schemas/profile.schema.json' }
+    delete:
+      tags: [profiles]
+      description: Refuses to delete 'default' (REQ MOD-041).
+      responses:
+        '204': { description: Deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /profiles/{name}/activate:
+    parameters:
+      - { $ref: '#/components/parameters/profileName' }
+    post:
+      tags: [profiles]
+      summary: Activate a profile without restarting the daemon (REQ MOD-042)
+      responses:
+        '200':
+          description: New state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/State' }
+
+  /sessions:
+    get:
+      tags: [sessions]
+      summary: List recorded sessions
+      responses:
+        '200':
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SessionMeta' }
+    post:
+      tags: [sessions]
+      summary: Start recording. Opt-in, off by default (REQ CAP-020).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          description: Recording started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionMeta' }
+
+  /sessions/{session_id}:
+    parameters:
+      - { $ref: '#/components/parameters/sessionId' }
+    get:
+      tags: [sessions]
+      summary: Session metadata
+      responses:
+        '200':
+          description: Session metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionMeta' }
+    delete:
+      tags: [sessions]
+      summary: Delete a session and its database file
+      responses:
+        '204': { description: Deleted }
+
+  /sessions/{session_id}/stop:
+    parameters:
+      - { $ref: '#/components/parameters/sessionId' }
+    post:
+      tags: [sessions]
+      summary: Stop recording
+      responses:
+        '200':
+          description: Recording stopped
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionMeta' }
+
+  /sessions/{session_id}/flows:
+    parameters:
+      - { $ref: '#/components/parameters/sessionId' }
+    get:
+      tags: [sessions]
+      summary: Session flows, same filter vocabulary as /flows
+      parameters:
+        - { $ref: '#/components/parameters/host' }
+        - { $ref: '#/components/parameters/limit' }
+        - { $ref: '#/components/parameters/cursor' }
+        - { $ref: '#/components/parameters/detail' }
+      responses:
+        '200':
+          description: A page of flows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FlowPage' }
+
+  /sessions/{session_id}/dryrun:
+    parameters:
+      - { $ref: '#/components/parameters/sessionId' }
+    post:
+      tags: [sessions]
+      summary: Evaluate candidate modules against a session without touching live traffic
+      description: |
+        Executes the candidate module's Python hooks (REQ CAP-032). Uses the same
+        Evaluator and ModuleLoader as live traffic — there is no second
+        implementation (REQ CAP-031).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DryRunRequest' }
+      responses:
+        '200':
+          description: Dry run result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DryRunResult' }
+
+  /validate:
+    post:
+      tags: [modules]
+      summary: Validate a candidate module without installing it (REQ API-027)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModuleWrite' }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationResult' }
+
+  /config:
+    get:
+      tags: [config]
+      summary: Effective configuration, with defaults resolved
+      responses:
+        '200':
+          description: Effective configuration
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    put:
+      tags: [config]
+      summary: Update buffering, capture, budget, redaction, and logging settings
+      description: listen_host values are validated to be loopback and rejected otherwise (REQ API-010).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Updated configuration
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /exclusions:
+    get:
+      tags: [config]
+      summary: ClientHello exclusion list (REQ PXY-014)
+      responses:
+        '200':
+          description: Exclusions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Exclusions' }
+    put:
+      tags: [config]
+      summary: Replace the exclusion list
+      description: |
+        Takes effect without a daemon restart (REQ PXY-014). Removing a
+        certificate-pinning or financial host may break that site or draw its
+        traffic into the capture buffer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Exclusions' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Exclusions' }
+
+  /metrics:
+    get:
+      tags: [state]
+      summary: Throughput, latency percentiles, per-module cost, attribution coverage
+      responses:
+        '200':
+          description: Metrics
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /audit:
+    get:
+      tags: [state]
+      summary: Origin-tagged log of state changes (REQ MCP-031)
+      parameters:
+        - { $ref: '#/components/parameters/limit' }
+        - { $ref: '#/components/parameters/cursor' }
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditEntry' }
+                  next_cursor: { type: [string, 'null'] }
+
+  /pair:
+    post:
+      tags: [extension]
+      summary: Redeem a pairing code for the bearer token (REQ API-012)
+      description: |
+        Available only within a short window opened by `pporlock pair` or a web
+        UI button, and only from a chrome-extension:// origin. The extension
+        never reads the filesystem.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /attribution:
+    post:
+      tags: [extension]
+      summary: Batched (request key -> tab_id) associations (SPEC-0 §3.6)
+      description: |
+        Best-effort. Joined against the ring buffer within a bounded window;
+        matched flows emit flow.updated. Attribution never blocks a flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                entries:
+                  type: array
+                  items: { $ref: '#/components/schemas/AttributionEntry' }
+      responses:
+        '200':
+          description: Accepted count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: { type: integer }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Per-install token at ~/.pporlock/token, mode 0600 (REQ API-011).
+        Mutating requests must additionally carry a recognized Origin and the
+        non-simple header X-Pporlock-Client, which forces a preflight and
+        defeats form-based CSRF (REQ API-013).
+
+  parameters:
+    flowId: { name: flow_id, in: path, required: true, schema: { type: string } }
+    moduleName: { name: name, in: path, required: true, schema: { type: string } }
+    profileName: { name: name, in: path, required: true, schema: { type: string } }
+    sessionId: { name: session_id, in: path, required: true, schema: { type: string } }
+    host: { name: host, in: query, schema: { type: string } }
+    path: { name: path, in: query, schema: { type: string } }
+    method: { name: method, in: query, schema: { type: string } }
+    status: { name: status, in: query, schema: { type: string } }
+    contentType: { name: content_type, in: query, schema: { type: string } }
+    dest: { name: dest, in: query, schema: { type: string } }
+    tabId: { name: tab_id, in: query, schema: { type: integer } }
+    modified: { name: modified, in: query, schema: { type: boolean } }
+    blocked: { name: blocked, in: query, schema: { type: boolean } }
+    module: { name: module, in: query, schema: { type: string } }
+    noteCode: { name: note_code, in: query, schema: { type: string } }
+    since: { name: since, in: query, schema: { type: string, format: date-time } }
+    until: { name: until, in: query, schema: { type: string, format: date-time } }
+    q: { name: q, in: query, schema: { type: string }, description: Substring over URL }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+    cursor: { name: cursor, in: query, schema: { type: string } }
+    detail:
+      name: detail
+      in: query
+      description: Representation level (SPEC-0 §6.3). Bodies dominate response size.
+      schema: { type: string, enum: [summary, full, bodies] }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Unrecognized Origin, or missing X-Pporlock-Client
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadRequest:
+      description: Schema or syntax error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Refused — for example, deleting the default profile
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: Stable; clients branch on it }
+            message: { type: string }
+            detail: { type: object, additionalProperties: true }
+            trace:
+              type: [string, 'null']
+              description: 500-class only, and only under debug logging
+
+    State:
+      type: object
+      properties:
+        version: { type: string }
+        mitmproxy_version: { type: string }
+        proxy:
+          type: object
+          properties:
+            running: { type: boolean }
+            listen: { type: string }
+            uptime_s: { type: number }
+        active_profile: { type: string }
+        dev_toggles:
+          type: object
+          properties:
+            anticache: { type: boolean }
+            anticomp: { type: boolean }
+        modules:
+          type: object
+          properties:
+            loaded: { type: integer }
+            enabled: { type: integer }
+            quarantined: { type: integer }
+            errors:
+              type: array
+              items: { $ref: '#/components/schemas/ModuleError' }
+        capture:
+          type: object
+          properties:
+            ring_flows: { type: integer }
+            ring_bytes: { type: integer }
+            recording_session: { type: [string, 'null'] }
+        counters:
+          type: object
+          properties:
+            flows_total: { type: integer }
+            blocked: { type: integer }
+            modified: { type: integer }
+            passthrough: { type: integer }
+        clients:
+          type: object
+          properties:
+            mcp_connected: { type: integer }
+            mcp_read_only: { type: boolean }
+
+    StatePatch:
+      type: object
+      properties:
+        dev_toggles:
+          type: object
+          properties:
+            anticache: { type: boolean }
+            anticomp: { type: boolean }
+        proxy_running: { type: boolean }
+
+    FlowPage:
+      type: object
+      required: [flows]
+      properties:
+        flows:
+          type: array
+          items: { $ref: './schemas/flow.schema.json' }
+        next_cursor: { type: [string, 'null'] }
+        total_estimate: { type: integer }
+
+    ModuleError:
+      type: object
+      required: [code, message]
+      properties:
+        module: { type: string }
+        code: { type: string }
+        message: { type: string }
+        trace: { type: [string, 'null'] }
+        line: { type: [integer, 'null'] }
+
+    ModuleStatus:
+      type: object
+      required: [name, state]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        state:
+          type: string
+          enum: [loaded, disabled, quarantined, load_error]
+        has_python: { type: boolean }
+        rule_count: { type: integer }
+        error: { oneOf: [{ $ref: '#/components/schemas/ModuleError' }, { type: 'null' }] }
+        quarantine:
+          type: [object, 'null']
+          properties:
+            reason: { type: string }
+            failures: { type: integer }
+            since: { type: string, format: date-time }
+        stats:
+          type: object
+          properties:
+            flows_matched: { type: integer }
+            flows_modified: { type: integer }
+            errors: { type: integer }
+            avg_ms: { type: number }
+
+    ModuleWrite:
+      type: object
+      required: [name, files]
+      properties:
+        name: { type: string }
+        files:
+          type: object
+          description: Filename -> contents. Recognized keys are module.yaml and module.py.
+          additionalProperties: { type: string }
+
+    ModuleDetail:
+      allOf:
+        - { $ref: '#/components/schemas/ModuleStatus' }
+        - type: object
+          properties:
+            manifest: { $ref: './schemas/module-manifest.schema.json' }
+            files:
+              type: object
+              additionalProperties: { type: string }
+            assets:
+              type: array
+              items: { type: string }
+
+    ValidationResult:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              file: { type: string }
+              line: { type: [integer, 'null'] }
+              code: { type: string }
+              message: { type: string }
+
+    SessionMeta:
+      type: object
+      required: [session_id, name, state]
+      properties:
+        session_id: { type: string }
+        name: { type: string }
+        state: { type: string, enum: [recording, stopped] }
+        started_at: { type: string, format: date-time }
+        stopped_at: { type: [string, 'null'], format: date-time }
+        flow_count: { type: integer }
+        size_bytes: { type: integer }
+        profile: { type: string }
+        dropped:
+          type: integer
+          description: |
+            Flows dropped because the writer queue filled. Recording must never
+            backpressure the proxy, so drops are visible rather than silent.
+
+    DryRunRequest:
+      type: object
+      properties:
+        modules:
+          type: array
+          items: { $ref: '#/components/schemas/ModuleWrite' }
+        use_installed:
+          type: array
+          items: { type: string }
+        profile: { type: [string, 'null'] }
+        limit: { type: integer, default: 500 }
+        include_diffs: { type: boolean, default: true }
+
+    DryRunResult:
+      type: object
+      required: [summary, results]
+      properties:
+        summary:
+          type: object
+          properties:
+            flows_evaluated: { type: integer }
+            matched: { type: integer }
+            modified: { type: integer }
+            blocked: { type: integer }
+            errors: { type: integer }
+            avg_ms: { type: number }
+            p95_ms: { type: number }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              flow_id: { type: string }
+              url: { type: string }
+              provenance: { $ref: './schemas/provenance.schema.json' }
+              diff:
+                type: object
+                properties:
+                  headers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        op: { type: string, enum: [add, remove, replace] }
+                        name: { type: string }
+                        value: { type: [string, 'null'] }
+                  body:
+                    type: [object, 'null']
+                    properties:
+                      kind: { type: string, enum: [unified, binary] }
+                      text: { type: string }
+                      truncated: { type: boolean }
+
+    Exclusions:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            required: [pattern]
+            properties:
+              pattern: { type: string, description: SNI glob or CIDR }
+              comment:
+                type: string
+                description: |
+                  Why this entry exists. An unexplained exclusion is
+                  indistinguishable from a bug.
+              source: { type: string, enum: [default, user, profile] }
+
+    AuditEntry:
+      type: object
+      required: [ts, origin, action]
+      properties:
+        ts: { type: string, format: date-time }
+        origin: { type: string, enum: [ui, extension, mcp, cli] }
+        action: { type: string }
+        detail: { type: object, additionalProperties: true }
+
+    AttributionEntry:
+      type: object
+      required: [method, url, ts, tabId]
+      properties:
+        method: { type: string }
+        url: { type: string }
+        ts: { type: string, format: date-time }
+        tabId: { type: integer }
+        frameId: { type: integer }
+        type: { type: string, description: chrome.webRequest ResourceType }

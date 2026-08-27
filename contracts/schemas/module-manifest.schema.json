@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/module-manifest.schema.json",
+  "title": "ModuleManifest",
+  "description": "module.yaml — manifest plus declarative rules (SPEC-0 §5.2). Strict: unknown top-level keys are an error, not a warning (REQ MOD-014).",
+  "type": "object",
+  "required": ["name", "version", "pporlock_api"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "description": "Slug. Must equal the module directory name and be unique in the library."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-.]+)?$",
+      "description": "Semver"
+    },
+    "pporlock_api": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Module API major version the module targets (SPEC-0 §8.1). An unsupported value refuses to load with a clear message (REQ MOD-026)."
+    },
+    "description": { "type": "string" },
+    "author": { "type": "string" },
+    "enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Creating or updating a module never enables it (REQ MCP-030); enabling is a separate explicit action."
+    },
+    "priority": {
+      "type": "integer",
+      "default": 100,
+      "description": "Lower runs earlier. Orders rules across modules (SPEC-0 §5.4)."
+    },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "https://pporlock.local/schemas/rule.schema.json" },
+      "default": []
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Free-form; passed to ctx.config (SPEC-0 §8.2)"
+    }
+  }
+}

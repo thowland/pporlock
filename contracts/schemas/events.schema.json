@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pporlock.local/schemas/events.schema.json",
+  "title": "Event",
+  "description": "Server-Sent Event payloads from GET /events (SPEC-0 §7.3). Every event carries seq (monotonic per connection) and ts.",
+  "type": "object",
+  "required": ["type", "seq", "ts"],
+  "unevaluatedProperties": false,
+  "properties": {
+    "type": { "$ref": "#/$defs/event_type" },
+    "seq": { "type": "integer", "minimum": 0 },
+    "ts": { "type": "string", "format": "date-time" },
+    "data": { "type": "object", "additionalProperties": true }
+  },
+  "$defs": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "flow.started",
+        "flow.completed",
+        "flow.updated",
+        "websocket.message",
+        "state.changed",
+        "module.error",
+        "module.quarantined",
+        "session.changed",
+        "stream.gap"
+      ]
+    },
+    "flow_started": {
+      "type": "object",
+      "required": ["flow_id", "method", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "flow_id": { "type": "string" },
+        "tab_id": { "type": ["integer", "null"] },
+        "method": { "type": "string" },
+        "url": { "type": "string" },
+        "dest": { "type": ["string", "null"] }
+      }
+    },
+    "flow_updated": {
+      "type": "object",
+      "description": "Backfill of an already-delivered flow, notably tab_id (SPEC-0 §3.6). Clients must key rows on flow_id and tolerate late field updates.",
+      "required": ["flow_id", "changed"],
+      "additionalProperties": false,
+      "properties": {
+        "flow_id": { "type": "string" },
+        "changed": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "module_error": {
+      "type": "object",
+      "required": ["module", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "module": { "type": "string" },
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "trace": { "type": ["string", "null"] },
+        "flow_id": { "type": ["string", "null"] }
+      }
+    },
+    "module_quarantined": {
+      "type": "object",
+      "required": ["module", "reason", "failures"],
+      "additionalProperties": false,
+      "properties": {
+        "module": { "type": "string" },
+        "reason": { "type": "string" },
+        "failures": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "session_changed": {
+      "type": "object",
+      "required": ["session_id", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string" },
+        "state": { "type": "string", "enum": ["recording", "stopped"] }
+      }
+    },
+    "stream_gap": {
+      "type": "object",
+      "description": "Events were dropped. The client must refetch rather than silently miss flows (SPEC-0 §7.2).",
+      "required": ["from_seq", "to_seq"],
+      "additionalProperties": false,
+      "properties": {
+        "from_seq": { "type": "integer", "minimum": 0 },
+        "to_seq": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -162,8 +162,11 @@ security:
 	cd $(DAEMON) && $(UV) run bandit -q -c pyproject.toml -r src
 	cd $(MCP)    && $(UV) run bandit -q -c pyproject.toml -r src
 	@echo "==> G6 pip-audit"
-	cd $(DAEMON) && $(UV) run pip-audit --skip-editable || true
-	cd $(MCP)    && $(UV) run pip-audit --skip-editable || true
+	@# No '|| true' here. An advisory that does not fail the gate is an advisory
+	@# nobody reads. Transitive findings we have accepted live in .pip-audit-ignore
+	@# with a written justification and are passed as explicit --ignore-vuln flags.
+	cd $(DAEMON) && $(UV) run pip-audit --skip-editable $$(sed -n 's/^ignore: *//p' ../.pip-audit-ignore | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+	cd $(MCP)    && $(UV) run pip-audit --skip-editable
 	@echo "==> G6 npm audit (high+)"
 	cd $(WEB) && $(NPM) audit --audit-level=high
 	cd $(EXT) && $(NPM) audit --audit-level=high

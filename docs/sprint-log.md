@@ -222,3 +222,108 @@ decision 2.
 - Rule `$defs` include `passthrough` in the action enum, but the exclusion list
   (Sprint 2) is the mechanism that actually implements it at ClientHello. Keep
   the two consistent when the loader lands.
+
+---
+
+## Sprint 02 — Baseline interception
+
+**Branch:** `sprint-02-interception`
+**Tag:** `sprint-02-complete`
+
+**Requirements delivered:** PXY-001 (explicit proxy on loopback), PXY-005
+(`pporlock run` foreground), PXY-004 (`doctor`), PXY-010/011 (CA into the login
+keychain), PXY-012 (QUIC warning), PXY-013/014/015 (exclusions, editable,
+recorded as passthrough), PXY-023 (transparent decode/re-encode), PXY-051
+(WebSocket capture, inspection only), DD-2 (adapter boundary), DOC-005
+(uninstall states what it leaves behind).
+
+**Requirements deferred:** PXY-021/022 buffering guard → Sprint 9. PXY-030–036
+actions → Sprints 7 and 9. PXY-043 dev toggles → Sprint 10, and they need the
+same treatment as `flow_detail` (decision 1). PXY-002/003/007 launchd, full CLI,
+log rotation → Sprint 16.
+
+**Gate results:**
+- **G1** — exit demo run. Four real sites (example.com, iana.org, httpbin.org,
+  and a 314KB Wikipedia page) plus seven fixture endpoints proxied with no
+  certificate warnings; a gzip response arrived as 81 bytes on the wire and
+  6,000 decoded, demonstrating REQ PXY-023; `www.apple.com` and `www.chase.com`
+  both tunneled undecrypted with the matching pattern named in the output.
+  `doctor` reported 0 failures.
+- **G2** — daemon 95.85%, engine 99.4% against the 90% bar. mcp exempt.
+- **G3** — 474 daemon + 4 mcp + 18 web + 18 extension. No Sprint 0/1 regressions.
+- **G4** — no tests removed. Stub mitmproxy objects were moved out of
+  `test_adapter.py` into `tests/stubs.py` so more than one module can use them;
+  no assertions were lost.
+- **G5** — clean. Three `mypy --strict` findings fixed properly rather than
+  ignored: a lambda leaking `TrustStatus` into a `-> None` slot, an untyped
+  mitmproxy call, and a missing return annotation that `ruff --fix` had
+  previously stripped.
+- **G6** — bandit surfaced three findings. One, a "hardcoded password" on the
+  string `"pass"`, was a genuine false positive and was restructured away rather
+  than suppressed. The other two are justified inline: macOS keychain trust is
+  only reachable through the `security` binary, argv is fixed, and there is no
+  shell. §2.5 areas walked: loopback binding (unchanged, still asserted),
+  logging hygiene (no bodies logged; the console feed prints URLs and sizes
+  only), and the trusted-CA decision below.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **mitmproxy 12 does not register `flow_detail` on bare `Options`.** It comes
+   from the dumper addon, which we disable, so passing it raised at startup.
+   This is precisely the version-churn surface SPEC-1 §2.1 confines to the
+   adapter, and it showed up on the first run. `anticache` and `anticomp` are in
+   the same category and must be set through `master.options` after the addon
+   set is built — noted in `runner.py` for Sprint 10.
+
+2. **CA goes into the login keychain, never the System keychain.** No admin
+   rights required, and the blast radius of a trusted MITM root is one user
+   account rather than the machine. Trust is verified with `security
+   verify-cert` rather than `find-certificate`: the latter proves the
+   certificate was imported, not that it is trusted, and an imported-but-
+   untrusted root produces exactly the certificate warnings the check exists to
+   rule out.
+
+3. **QUIC is a warning, not a failure.** It cannot be reliably enforced or even
+   reliably detected from outside Chrome. A check that blocked on it would make
+   `doctor` unusable on a normal machine, and `doctor` is what you run when
+   things are already broken.
+
+4. **33 default exclusions, every one commented, in four named categories.** A
+   test asserts none is undocumented. The financial set is deliberately short
+   and says so in the file: it establishes the category and the shape of an
+   entry rather than pretending to be exhaustive.
+
+5. **Excluded connections are recorded, not silent.** A passthrough flow carries
+   host, timing, and the matching pattern but no content. Making excluded
+   traffic invisible would be a different failure from the one exclusion solves.
+
+6. **`flow.id` is reused as our flow identity** rather than minting a ULID.
+   Maintaining a second identity map would buy nothing and the two would
+   eventually disagree. Note that SPEC-0 §2 describes flow_id as a ULID; the
+   contract only requires it be stable and sortable, which mitmproxy's UUID is
+   for our purposes, but this is worth revisiting if session ordering ever
+   depends on lexical sort.
+
+7. **Renamed `tests/` to `testfixtures/`.** Making `daemon/tests` a package
+   shadowed the repo-root `tests` package, so the fixture origin became
+   unimportable. A distinct top-level name removes the collision permanently
+   rather than papering over it with sys.path ordering.
+
+8. **Console output is flushed explicitly.** stdout is block-buffered when
+   redirected, so `pporlock run > log` produced nothing until the process
+   exited. For this command the live feed is the product.
+
+**Notes for the next sprint:**
+
+- Sprint 3 replaces `NullSink`/`ConsoleSink` with the ring buffer behind the
+  same `FlowSink` interface, and starts the control server from
+  `Interceptor.running()` — which is currently an empty hook waiting for it.
+- The `_stash`/`_unstash` helpers carry per-flow state between hooks through
+  mitmproxy's flow metadata. Sprint 7 will add the evaluator's decision to the
+  same channel.
+- `runner.py` is at 71% coverage; the uncovered lines are the `_run` coroutine
+  that binds a real port, which the integration harness covers by equivalent
+  means rather than directly.
+- Sprint 9's buffering guard needs `responseheaders`, which is currently an
+  empty hook with a docstring explaining that everything buffers until then.

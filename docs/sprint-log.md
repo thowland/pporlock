@@ -327,3 +327,89 @@ log rotation → Sprint 16.
   means rather than directly.
 - Sprint 9's buffering guard needs `responseheaders`, which is currently an
   empty hook with a docstring explaining that everything buffers until then.
+
+---
+
+## Sprint 03 — Capture and control API
+
+**Branch:** `sprint-03-capture-api`
+**Tag:** `sprint-03-complete`
+
+**Requirements delivered:** CAP-001 (dual-bound ring buffer), CAP-003 (body cap,
+truncation flagged), CAP-004 (filter vocabulary, one implementation), API-001
+(control server on the proxy's loop), API-002 (loop discipline, classified and
+tested), API-004 (origin policy), API-010 (loopback asserted), API-011 (token,
+0600), API-012 (pairing), API-013 (CSRF defence), API-020/021/025/028 (routes),
+MCP-031 (audit log with actor origin), and the SPEC-0 §6.3 detail levels.
+
+**Requirements deferred:** API-022 SSE → Sprint 4. API-003 static asset serving
+→ Sprint 4, when there are assets. CAP-040–045 redaction → Sprint 13; the
+serializer reports `redacted: false` honestly until then.
+
+**Gate results:**
+- **G1** — exit demo run. Browsed through the proxy and read flows back over the
+  API with filters; the three security layers each refused what they exist to
+  refuse (see decision 2); the audit log attributed the successful change; an
+  excluded host came back carrying its pattern and reason.
+- **G2** — daemon 94.90%, engine 99.56% against the 90% bar.
+- **G3** — 660 daemon + 4 mcp + 18 web + 18 extension. No earlier regressions.
+- **G4** — no tests removed.
+- **G5** — clean. Two `mypy --strict` findings fixed rather than ignored.
+- **G6** — scanners clean. §2.5 areas walked: **token handling** (0600 via
+  `open()` flags rather than write-then-chmod, constant-time verify, never in a
+  URL or error body — asserted by test), **origin/CSRF policy** (a real
+  cross-origin form POST is refused, tested end to end), **loopback binding**
+  (`ControlServer.__init__` asserts it), **logging hygiene** (no bodies logged).
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **starlette + uvicorn rather than hand-rolled HTTP.** HTTP/1.1 parsing is
+   exactly the class of thing not to write by hand — request smuggling lives
+   there — and the control server is security-relevant. uvicorn runs on the
+   existing loop via `Server.serve()` as a task, which satisfies DD-3. Both were
+   checked against pip-audit before adoption and add no advisories. Signal
+   handler installation is disabled; the proxy owns ctrl-c.
+
+2. **Three layers of access control, because loopback binding is not one.** The
+   threat is that any page you visit can POST to 127.0.0.1:8081. Bearer token,
+   origin allowlist, and a required non-simple header. Verified end to end
+   against a running server: a cross-origin form POST is refused *with* a valid
+   token, and a token-bearing request without the client header is also refused.
+
+3. **`/pair` is exempt from the origin allowlist.** It has to be — an extension
+   cannot be on the allowlist until it pairs, and pairing is how it gets there.
+   Found by test, not by reasoning: the first pairing test returned 403. The
+   route is still guarded (origin shape, single-use code, human-opened window),
+   and the exemption is commented in place so it does not read as an oversight.
+
+4. **The token is generated when the control app is constructed, not lazily.**
+   The runner prints its path at startup; a path that does not exist yet is
+   worse than no path. Found by running the exit demo.
+
+5. **Contract gap: passthrough flows had nowhere to put the host.** A
+   passthrough has no request or response, so the excluded host never reached
+   the wire — REQ PXY-015's "visible but not readable" was only half true.
+   Added a `passthrough` object to `flow.schema.json` with host, ip, pattern,
+   and the entry's comment. Found by looking at real API output, not by reading
+   the schema.
+
+6. **`peer_ip_of` was reporting a hostname in an `ip` field.** Before
+   resolution, a connection's address is the CONNECT hostname. It now returns
+   only genuine addresses, which also keeps CIDR exclusion matching honest.
+
+7. **Bodies are capped at write time, not read time.** The ring's memory bound
+   has to reflect what is actually held, and truncation is always flagged.
+
+**Notes for the next sprint:**
+
+- Sprint 4 attaches the SSE hub to `RingSink.on_flow`, which exists and is
+  tested but is currently unused in production wiring.
+- `INLINE_ROUTES` and the classification test are in place; every route added
+  from here must be classified or the test fails. `/config` is deliberately
+  outside it and offloads.
+- `ControlServer` polls for `server.started` with a 2-second ceiling. That is
+  adequate on loopback but is a poll, not a signal; if it proves flaky under
+  load, uvicorn exposes a startup event worth switching to.
+- The `starlette.testclient` deprecation warning about httpx2 is cosmetic and
+  will resolve when starlette's own guidance settles.

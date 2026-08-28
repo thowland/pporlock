@@ -195,3 +195,113 @@ export interface SuggestedRule {
   rule: import('@contracts/types').Rule;
   module?: string | null;
 }
+
+/* ------------------------------------------------------------------ *
+ * Sessions and dry run (SPEC-0 §6.8)                                  *
+ * ------------------------------------------------------------------ */
+
+/** `GET /sessions`. Mirrors the daemon's `SessionMeta.to_dict`. */
+export interface SessionMeta {
+  session_id: string;
+  name: string;
+  state: 'recording' | 'stopped';
+  started_at: string;
+  stopped_at: string | null;
+  flow_count: number;
+  size_bytes: number;
+  profile: string;
+  /**
+   * Flows the writer dropped under overflow (REQ CAP-023). Surfaced in the
+   * list because a session with drops is not a faithful recording, and a dry
+   * run against it is answering a slightly different question.
+   */
+  dropped: number;
+  schema_version?: number;
+}
+
+/** `POST /sessions/{id}/dryrun` request body (SPEC-0 §6.8). */
+export interface DryRunRequest {
+  modules?: { name: string; files: Record<string, string> }[];
+  use_installed?: string[];
+  profile?: string | null;
+  limit?: number;
+  include_diffs?: boolean;
+}
+
+/** REQ CAP-033. Every field is an aggregate over the evaluated flows. */
+export interface DryRunSummary {
+  flows_evaluated: number;
+  matched: number;
+  modified: number;
+  blocked: number;
+  errors: number;
+  avg_ms: number;
+  p95_ms: number;
+}
+
+/** `op` is one of add | remove | replace (contracts/openapi.yaml DryRunResult). */
+export interface DryRunHeaderDiff {
+  op: string;
+  name: string;
+  value?: string | null;
+}
+
+export interface DryRunBodyDiff {
+  kind: string;
+  text: string;
+  truncated: boolean;
+}
+
+export interface DryRunDiff {
+  headers?: DryRunHeaderDiff[];
+  body?: DryRunBodyDiff | null;
+}
+
+export interface DryRunFlowResult {
+  flow_id: string;
+  url: string;
+  provenance?: import('@contracts/types').Provenance | undefined;
+  diff?: DryRunDiff | undefined;
+}
+
+export interface DryRunResult {
+  summary: DryRunSummary;
+  results: DryRunFlowResult[];
+  /** Present when the daemon capped the per-flow list (REQ MCP-005). */
+  results_total?: number;
+  results_shown?: number;
+  results_note?: string;
+}
+
+/** `GET /flows/{id}?unmask=<field_path>` (REQ CAP-043). */
+export interface UnmaskResult {
+  flow_id: string;
+  field_path: string;
+  value: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * Configuration (SPEC-0 §6.9, §9.2 — REQ CAP-044)                     *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The redaction section of `GET /config`. This is the *effective*
+ * configuration — what is in force right now, defaults included — which is the
+ * whole point of the route: "redaction is configurable" is otherwise a claim
+ * nobody can check (REQ CAP-044).
+ */
+export interface RedactionConfig {
+  enabled: boolean;
+  header_patterns: string[];
+  json_key_patterns: string[];
+}
+
+/**
+ * `GET /config` returns every section. Only the sections the UI edits are
+ * described; the rest travel as opaque values so a daemon that grows a section
+ * does not break the round-trip.
+ */
+export interface DaemonConfig {
+  redaction: RedactionConfig;
+  [section: string]: unknown;
+}

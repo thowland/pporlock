@@ -16,20 +16,34 @@ export type Route =
   | { view: 'modules' }
   | { view: 'module'; name: string }
   | { view: 'profiles' }
-  | { view: 'newrule' };
+  | { view: 'newrule' }
+  | { view: 'sessions' }
+  | { view: 'session'; id: string }
+  | { view: 'dryrun'; id: string }
+  | { view: 'settings' };
 
 export const DEFAULT_ROUTE: Route = { view: 'traffic' };
 
 export function parseRoute(hash: string): Route {
   const path = hash.replace(/^#/, '').replace(/^\/+/, '');
   const segments = path.split('/').filter((s) => s.length > 0);
-  const [head, second] = segments;
+  const [head, second, third] = segments;
   if (head === 'modules') {
     if (second !== undefined && second !== '') {
       return { view: 'module', name: decodeURIComponent(second) };
     }
     return { view: 'modules' };
   }
+  if (head === 'sessions') {
+    if (second !== undefined && second !== '') {
+      const id = decodeURIComponent(second);
+      // Dry run hangs off the session it runs against, because it is
+      // meaningless without one and the URL should say which (SPEC-2 §8.3).
+      return third === 'dryrun' ? { view: 'dryrun', id } : { view: 'session', id };
+    }
+    return { view: 'sessions' };
+  }
+  if (head === 'settings') return { view: 'settings' };
   if (head === 'profiles') return { view: 'profiles' };
   if (head === 'newrule') return { view: 'newrule' };
   return DEFAULT_ROUTE;
@@ -45,6 +59,14 @@ export function routeToHash(route: Route): string {
       return '#/profiles';
     case 'newrule':
       return '#/newrule';
+    case 'sessions':
+      return '#/sessions';
+    case 'session':
+      return `#/sessions/${encodeURIComponent(route.id)}`;
+    case 'dryrun':
+      return `#/sessions/${encodeURIComponent(route.id)}/dryrun`;
+    case 'settings':
+      return '#/settings';
     default:
       return '#/traffic';
   }

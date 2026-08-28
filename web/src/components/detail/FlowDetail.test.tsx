@@ -145,7 +145,9 @@ describe('FlowDetail', () => {
       render(<FlowDetail flow={flow} api={api(flow)} onClose={() => {}} />);
       await userEvent.click(screen.getByRole('tab', { name: 'request' }));
       await waitFor(() => expect(screen.getByText('redacted')).toBeTruthy());
-      expect(screen.getByText(/142b · a3f2/)).toBeTruthy();
+      // Same length-and-fingerprint presentation the extension uses, so the
+      // two clients agree about what a masked value looks like.
+      expect(screen.getByText(/142 bytes · #a3f2/)).toBeTruthy();
     });
 
     it('leaves an ordinary header alone', async () => {

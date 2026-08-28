@@ -8,7 +8,7 @@
  * Traffic stays the default view. The authoring views (modules, editor, rule
  * builder, profiles) hang off the same shell and share the same API client.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiClient } from './api/client';
 import type { FlowFilter, FlowRecord, Rule } from './api/types';
 import { FlowDetail } from './components/detail/FlowDetail';
@@ -21,6 +21,10 @@ import { ModuleEditor } from './components/modules/ModuleEditor';
 import { ProfilesView } from './components/profiles/ProfilesView';
 import { CreateRuleMenu } from './components/rules/CreateRuleMenu';
 import { RuleFromFlowView } from './components/rules/RuleFromFlowView';
+import { SessionsView } from './components/sessions/SessionsView';
+import { SessionBrowser } from './components/sessions/SessionBrowser';
+import { DryRunView } from './components/sessions/DryRunView';
+import { SettingsView } from './components/settings/SettingsView';
 import { useDaemonState } from './hooks/useDaemonState';
 import { useFlows } from './hooks/useFlows';
 import { useHashRoute, type Route } from './lib/router';
@@ -29,7 +33,22 @@ const NAV: { route: Route; label: string }[] = [
   { route: { view: 'traffic' }, label: 'Traffic' },
   { route: { view: 'modules' }, label: 'Modules' },
   { route: { view: 'profiles' }, label: 'Profiles' },
+  { route: { view: 'sessions' }, label: 'Sessions' },
+  { route: { view: 'settings' }, label: 'Settings' },
 ];
+
+/** Which nav item is highlighted for a route that has no nav item of its own. */
+const NAV_GROUP: Record<Route['view'], Route['view']> = {
+  traffic: 'traffic',
+  newrule: 'traffic',
+  modules: 'modules',
+  module: 'modules',
+  profiles: 'profiles',
+  sessions: 'sessions',
+  session: 'sessions',
+  dryrun: 'sessions',
+  settings: 'settings',
+};
 
 export function App({ api }: { api: ApiClient }) {
   const [filter, setFilter] = useState<FlowFilter>({});
@@ -38,6 +57,9 @@ export function App({ api }: { api: ApiClient }) {
   const [route, navigate] = useHashRoute();
   const { state, connection, refresh } = useDaemonState(api);
   const { flows, streamState, paused, heldCount, setPaused, clear } = useFlows(api, filter);
+
+  const main = useRef<HTMLElement | null>(null);
+  const lastRow = useRef<HTMLElement | null>(null);
 
   const hasFilter = useMemo(() => Object.keys(filter).length > 0, [filter]);
   const selected = useMemo(
@@ -55,6 +77,19 @@ export function App({ api }: { api: ApiClient }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId]);
+
+  // Focus moves to the new view on a route change (REQ WUI-015). Without this a
+  // keyboard or screen-reader user stays parked on the nav button they pressed
+  // while the entire page beneath them changed — the classic SPA failure.
+  useEffect(() => {
+    main.current?.focus();
+  }, [route.view]);
+
+  /** Closing the detail panel returns focus to the row that opened it. */
+  const closeDetail = useCallback(() => {
+    setSelectedId(null);
+    lastRow.current?.focus();
+  }, []);
 
   const openModule = useCallback(
     (module: string) => navigate({ view: 'module', name: module }),
@@ -87,7 +122,11 @@ export function App({ api }: { api: ApiClient }) {
             connected={connection === 'connected'}
             hasFilter={hasFilter}
             selectedId={selectedId}
-            onSelect={(flow: FlowRecord) => setSelectedId(flow.flow_id)}
+            onSelect={(flow: FlowRecord) => {
+              // Remember where focus was so closing the panel can put it back.
+              lastRow.current = document.activeElement as HTMLElement | null;
+              setSelectedId(flow.flow_id);
+            }}
             renderActions={(flow: FlowRecord) => (
               <CreateRuleMenu api={api} flow={flow} onRule={startRuleFromFlow} />
             )}
@@ -97,8 +136,13 @@ export function App({ api }: { api: ApiClient }) {
           <FlowDetail
             flow={selected}
             api={api}
-            onClose={() => setSelectedId(null)}
+            onClose={closeDetail}
             onOpenModule={openModule}
+            // Live flows only (REQ CAP-043). The session browser passes no
+            // equivalent, which is what makes the control absent there.
+            onUnmask={(fieldPath) =>
+              api.unmask(selected.flow_id, fieldPath).then((result) => result.value)
+            }
           />
         )}
       </div>
@@ -117,6 +161,36 @@ export function App({ api }: { api: ApiClient }) {
         return (
           <ProfilesView api={api} activeProfile={state?.active_profile} onActivated={refresh} />
         );
+      case 'sessions':
+        return (
+          <SessionsView
+            api={api}
+            onOpen={(id) => navigate({ view: 'session', id })}
+            onDryRun={(id) => navigate({ view: 'dryrun', id })}
+            onChanged={refresh}
+          />
+        );
+      case 'session':
+        return (
+          <SessionBrowser
+            api={api}
+            sessionId={route.id}
+            onBack={() => navigate({ view: 'sessions' })}
+            onDryRun={(id) => navigate({ view: 'dryrun', id })}
+            onOpenModule={openModule}
+          />
+        );
+      case 'dryrun':
+        return (
+          <DryRunView
+            api={api}
+            sessionId={route.id}
+            onBack={() => navigate({ view: 'sessions' })}
+            onOpenModule={openModule}
+          />
+        );
+      case 'settings':
+        return <SettingsView api={api} />;
       case 'newrule':
         // Deep-linking here without a rule in hand is meaningless, so it falls
         // back to the view the rule would have come from.
@@ -152,10 +226,7 @@ export function App({ api }: { api: ApiClient }) {
       <DisconnectedBanner connection={connection} onRetry={refresh} />
       <nav className="nav" aria-label="Views">
         {NAV.map((item) => {
-          const current =
-            item.route.view === route.view ||
-            (item.route.view === 'modules' && route.view === 'module') ||
-            (item.route.view === 'traffic' && route.view === 'newrule');
+          const current = item.route.view === NAV_GROUP[route.view];
           return (
             <button
               key={item.label}
@@ -169,7 +240,11 @@ export function App({ api }: { api: ApiClient }) {
           );
         })}
       </nav>
-      {body()}
+      {/* A real landmark, and the focus target on route change. `tabIndex={-1}`
+          makes it programmatically focusable without adding a tab stop. */}
+      <main className="mainview" ref={main} tabIndex={-1} aria-label={route.view}>
+        {body()}
+      </main>
     </>
   );
 }

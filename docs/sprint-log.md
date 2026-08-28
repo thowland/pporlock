@@ -981,3 +981,94 @@ can fire, and where expensive work runs. Two of those turned out to be broken.
   the decision rather than leave it advisory.
 - `evaluate_response` (the combined form) exists only for the dry runner. If
   Sprint 14 finds it does not need it, remove it rather than leaving two paths.
+
+---
+
+## Sprint 10 — Body rewriting  ◀ v0.3
+
+**Branch:** `sprint-10-body-rewriting`
+**Tag:** `sprint-10-complete`
+
+**Requirements delivered:** MOD-013 (transform registry), MOD-014 (parameters
+validated at load), PXY-040 (SRI stripped on any rewritten document), PXY-041
+(nonce reuse before relaxation), PXY-042 (both CSP headers), PXY-043/044 (dev
+toggles and their notes), PXY-024 (offload actually honoured).
+
+**Requirements deferred:** CAP-014 / WUI-014 body diff → Sprint 13. A real
+before/after diff needs both bodies retained, which doubles memory for every
+rewritten flow against CAP-001's bounds. Sessions are where the original can be
+stored deliberately, so the diff belongs there rather than half-built here.
+
+**Gate results:**
+- **G1** — the v0.3 checkpoint, run against a live daemon and a real browser: a
+  script injected into a nonce-bearing page ran with zero console errors **and
+  the page's CSP intact**; the same injection into a page with no nonce worked
+  after relaxation; an SRI-protected script still executed after we rewrote the
+  document around it. Confirmed on the wire that CSP survived on the first page
+  and was removed on the second.
+- **G2** — daemon 92%+, engine unchanged, web and extension unchanged.
+- **G3** — 1,025 daemon + 189 extension + 212 web + 4 mcp, plus 8 E2E.
+- **G4** — no tests removed. Five were updated because they used `strip_csp` as
+  a body transform, which now correctly runs in the header phase; they were
+  changed to use a genuine body transform, and a new test asserts the
+  header-phase behaviour directly.
+- **G5** — clean.
+- **G6** — scanners clean. §2.5 areas walked: **injection into rewritten
+  pages** — injected content comes only from the rule, never from response
+  data; the nonce is read from the page's own header and reused on the injected
+  tag alone, and CSP/SRI changes are always recorded and surfaced.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **The response hook is now async.** Sprint 9 classified expensive work but
+   left the decision advisory. A synchronous hook submitting to a thread pool
+   and blocking on the result stalls the loop exactly as much as doing the work
+   inline — the `await` is the entire point. This changed the addon's hook
+   signature, so the affected tests became async too.
+
+2. **`strip_csp` runs in the header phase despite being a body transform in the
+   schema.** It operates on headers, and Sprint 9 established that once a
+   response streams its headers are already on the wire. Registered for the
+   schema's sake, applied where it can take effect. Worth noting as a genuine
+   spec/implementation divergence: SPEC-0 §5.5 lists it among body transforms.
+
+3. **The implicit SRI strip is unconditional and recorded.** Any document whose
+   body we rewrote gets it, whether or not a rule asked. The breakage is
+   invisible from the proxy's side, so relying on the operator to remember would
+   guarantee it is eventually forgotten. It appears in provenance as "implicit
+   SRI strip" rather than happening quietly.
+
+4. **Regex over HTML, deliberately.** The alternative — parsing and
+   re-serialising with a full HTML parser — rewrites markup the page never asked
+   us to touch, which for a tool whose whole job is not breaking pages is the
+   worse risk. Each pattern is scoped to the smallest thing that does its job.
+
+5. **The charset bug.** Re-encoding read `content_type`, which strips parameters
+   by design, so a latin-1 page would have been re-encoded as UTF-8 and rendered
+   as mojibake. A page that loads and is subtly wrong is the exact failure this
+   system exists to avoid, and it took a test with an accented character to find
+   it.
+
+6. **The captured response is the served one.** It had been the pre-mutation
+   body: the wire got the rewritten page while the record showed the original.
+   Same reasoning as the request side in Sprint 9.
+
+7. **`json_patch` supports add, remove, and replace only.** Move, copy, and test
+   are omitted rather than half-implemented. A path that does not exist is not an
+   error — the rule describes a shape the body may or may not have — and a
+   non-JSON body is left alone and reported rather than failing the flow.
+
+**Notes for the next sprint:**
+
+- Sprint 11 builds the module system. `TransformRegistry.register` is the
+  extension point; module-registered transforms should carry their own cost so
+  the default-to-expensive fallback becomes a genuine last resort.
+- `TransformContext` is deliberately small. A module transform needing more than
+  URL, content type, and headers is a signal the rule model should express it
+  instead.
+- The implicit SRI strip runs only on `text/html`. A rewritten SVG or XHTML
+  document carrying `integrity` would not be covered; worth revisiting if a real
+  case appears.
+- The dev toggles are per-daemon, not per-profile. REQ MOD-044 wants
+  profile-scoped toggles, which lands with profiles in Sprint 11.

@@ -1,0 +1,102 @@
+{
+  "id": "09-inject-script-strips-sri-implicitly",
+  "description": "Injecting into a document rewrites its body, so the integrity attributes on its subresources must go too \u2014 whether or not a rule asked (REQ PXY-040). Three things must appear together: the injection entry, the implicit SRI entry with an empty module, and both notes. The two notes are attributed differently on purpose: script_injected names the module whose rule asked for it, and sri_stripped names none, because the implicit strip is the engine's own act rather than any module's. Both carried a null module until Sprint 16, which made \"which module weakened this page\" unanswerable from the note alone (\u00a72.5, A03).",
+  "requirements": [
+    "PXY-040",
+    "PXY-041",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "inject the debug shim",
+      "action": "body",
+      "match": {
+        "host": "app.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "inject_script",
+        "inline": "window.__pporlock=1",
+        "position": "head_end"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c09",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c09",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><head><script src=\"https://cdn.vendor.example/a.js\" integrity=\"sha384-abc\" crossorigin=\"anonymous\"></script></head><body><h1>hello</h1></body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_body",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "inject the debug shim",
+        "action": "body",
+        "outcome": "applied",
+        "detail": {
+          "transform": "inject_script",
+          "offload": true,
+          "cost": "expensive",
+          "offload_reason": "expensive transform"
+        },
+        "duration_ms": "<timing>"
+      },
+      {
+        "seq": 1,
+        "phase": "response_body",
+        "module": "",
+        "rule_id": "",
+        "rule_name": "implicit SRI strip",
+        "action": "body",
+        "outcome": "applied",
+        "detail": {
+          "reason": "a rewritten document must not fail its own integrity checks"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "script_injected",
+        "severity": "warning",
+        "module": "corpus",
+        "message": "injected a script tag",
+        "detail": {
+          "nonce_reused": false,
+          "position": "head_end",
+          "src": null
+        }
+      },
+      {
+        "code": "sri_stripped",
+        "severity": "warning",
+        "module": null,
+        "message": "removed 2 integrity/crossorigin attribute(s)",
+        "detail": {
+          "count": 2
+        }
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "id": "01-passthrough-no-rule-matches",
+  "description": "A flow no rule touches still carries provenance: structural, never None (REQ CAP-013). The empty-but-present record is the baseline every other case is a departure from.",
+  "requirements": [
+    "CAP-010",
+    "CAP-013",
+    "PRF-002"
+  ],
+  "rules": [],
+  "request": {
+    "flow_id": "c01",
+    "host": "www.example.test",
+    "path": "/index.html",
+    "dest": "document",
+    "headers": [
+      [
+        "accept",
+        "text/html"
+      ]
+    ]
+  },
+  "response": {
+    "flow_id": "c01",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><body>ok</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

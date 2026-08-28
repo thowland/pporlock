@@ -400,6 +400,119 @@ class TestStartupWiring:
         assert runner.installed_root == Path(config.modules.root)
         assert runner.redactor is control.redactor
 
+    def test_the_daemon_starts_a_log_rotation_task(self, tmp_path: Any) -> None:
+        """REQ PXY-007, and OI-11's lesson.
+
+        launchd appends to the log files and never truncates them, so nothing
+        bounds them but this. A rotation function that exists and is never
+        scheduled is the exact shape of the bug this class was created for: it
+        would be fully unit-tested and would never run.
+        """
+        import asyncio
+        import inspect
+
+        from pporlock.cli import runner
+
+        source = inspect.getsource(runner._run)
+        assert "rotate_logs_forever" in source, (
+            "cli/runner._run does not schedule log rotation; REQ PXY-007 would "
+            "be implemented and never executed"
+        )
+        assert "rotator.cancel()" in source, "the rotation task is never cancelled on shutdown"
+
+        # And the coroutine itself actually rotates, on the interval it is given.
+        config = self._config(tmp_path)
+        config.logging.dir = str(tmp_path / "logs")
+        config.logging.max_bytes = 100
+        directory = Path(config.logging.dir)
+        directory.mkdir(parents=True)
+        log = directory / "pporlock.out.log"
+        log.write_bytes(b"x" * 5000)
+
+        async def drive() -> None:
+            task = asyncio.create_task(runner.rotate_logs_forever(config, interval=0.01))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if log.stat().st_size == 0:
+                    break
+            task.cancel()
+
+        asyncio.run(drive())
+        assert log.stat().st_size == 0
+        assert (directory / "pporlock.out.log.1").stat().st_size == 5000
+
+    def test_the_daemon_accumulates_per_module_cost(self, tmp_path: Any) -> None:
+        """REQ PRF-007. The metrics route reads `interceptor.module_cost`; if
+        nothing on the flow-completion path writes to it, every module reports
+        zero forever and the UI column is decoration."""
+        import inspect
+
+        from pporlock.addon.interceptor import Interceptor
+
+        source = inspect.getsource(Interceptor.response)
+        assert "self.module_cost.record(" in source
+        assert "registry.record_provenance(" in source
+
+    def test_the_interceptor_the_runner_builds_has_a_cost_index(self, tmp_path: Any) -> None:
+        """Built by the daemon, not by the test: an index the running process
+        does not own is an index nothing writes to."""
+        from pporlock.addon.interceptor import Interceptor
+        from pporlock.cli.runner import build_evaluator
+
+        config = self._config(tmp_path)
+        evaluator, registry, _profiles, _base, _path, _error = build_evaluator(config)
+        interceptor = Interceptor(config, evaluator=evaluator)
+        assert interceptor.module_cost is not None
+        assert interceptor.evaluator.registry is registry
+
+    def test_module_stats_reach_the_control_apps_module_list(self, tmp_path: Any) -> None:
+        """REQ PRF-007 end to end through the app the daemon serves.
+
+        The `stats` field was absent from `LoadedModule.to_dict()` while the
+        contract declared it, and the module library read it unconditionally —
+        so a live daemon crashed the page while every unit test passed on
+        fixtures that supplied a field the daemon never sent.
+        """
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+        from pporlock.engine.provenance import Action, Outcome, Phase, ProvenanceBuilder
+
+        config = self._config(tmp_path)
+        self._write_module(
+            tmp_path / "modules", "csp", "name: csp\npporlock_api: '1'\nenabled: true\n"
+        )
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.RESPONSE_HEADERS,
+            module="csp",
+            rule_id="csp:0",
+            action=Action.HEADERS,
+            outcome=Outcome.APPLIED,
+            duration_ms=3.0,
+        )
+        registry.record_provenance(builder.build())
+
+        client = TestClient(control.asgi)
+        modules = client.get(
+            "/modules",
+            headers={
+                "Authorization": f"Bearer {control.tokens.ensure()}",
+                "X-Pporlock-Client": "ui",
+            },
+        ).json()
+        stats = modules[0]["stats"]
+        assert stats["flows_matched"] == 1
+        assert stats["flows_modified"] == 1
+        assert stats["avg_ms"] == 3.0
+
 
 class TestApplyModulesKeepsFileRules:
     def test_reinstalling_module_rules_does_not_delete_rules_yaml(self) -> None:

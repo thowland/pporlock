@@ -258,13 +258,27 @@ class TestRunAndFix:
     def test_uninstall_purge_removes_the_state_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
     ) -> None:
+        """Same assertion as before, driven through an explicit config.
+
+        This previously monkeypatched ``Path.home`` and relied on ``uninstall``
+        calling it at command time. Sprint 16 made ``--purge`` delete the
+        *configured* ``state_dir`` — so a user with a custom state directory is
+        told, and purged, the truth — and ``Config``'s default binds
+        ``DEFAULT_STATE_DIR`` at import (OI-10). Patching ``home`` afterwards
+        therefore no longer redirects anything, and the test became
+        import-order-dependent: in a full run it deleted the *real*
+        ``~/.pporlock``. A unit test that can delete the developer's state is a
+        worse problem than the one it was written to catch. Pointing it at a
+        config makes it deterministic and confines it to tmp_path.
+        """
         from pporlock.cli import certs
 
         state = tmp_path / ".pporlock"
         state.mkdir()
         (state / "token").write_text("secret")
+        config = tmp_path / "config.yaml"
+        config.write_text(f"state_dir: {state}\nlogging: {{dir: {tmp_path / 'logs'}}}\n")
         monkeypatch.setattr(certs, "remove_trust", lambda: None)
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        assert cli.main(["uninstall", "--purge"]) == 0
+        assert cli.main(["--config", str(config), "uninstall", "--purge"]) == 0
         assert not state.exists()
         assert "--purge" in capsys.readouterr().out

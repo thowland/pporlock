@@ -1,0 +1,88 @@
+{
+  "id": "07-strip-csp-runs-in-the-header-phase",
+  "description": "strip_csp is declared as a body transform but operates on headers, so it is applied at responseheaders where a mutation can still reach the wire. Both CSP headers go, and CSP_MODIFIED records that the page was weakened (REQ PXY-042).",
+  "requirements": [
+    "PXY-042",
+    "PXY-021",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "strip csp on the app",
+      "action": "body",
+      "match": {
+        "host": "app.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "strip_csp"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c07",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c07",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ],
+      [
+        "content-security-policy",
+        "default-src 'self'"
+      ],
+      [
+        "content-security-policy-report-only",
+        "default-src 'self'; report-uri /csp"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_headers",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "strip csp on the app",
+        "action": "body",
+        "outcome": "applied",
+        "detail": {
+          "transform": "strip_csp",
+          "removed": [
+            "content-security-policy",
+            "content-security-policy-report-only"
+          ]
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "csp_modified",
+        "severity": "warning",
+        "module": "corpus",
+        "message": "removed content-security-policy, content-security-policy-report-only",
+        "detail": {
+          "headers": [
+            "content-security-policy",
+            "content-security-policy-report-only"
+          ]
+        }
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "id": "11-a-streamed-response-skips-body-rules",
+  "description": "The buffering guard streams a body too large to hold, which makes every body transform on that flow impossible. Both halves are recorded: RESPONSE_STREAMED for the decision, skipped_streamed for each rule it disabled \u2014 the engine says what did not happen and why (REQ PXY-021, PXY-022).",
+  "requirements": [
+    "PXY-021",
+    "PXY-022",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "rewrite the download page",
+      "action": "body",
+      "match": {
+        "host": "files.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "replace_literal",
+        "find": "a",
+        "replace": "b"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c11",
+    "host": "files.example.test",
+    "path": "/big.html",
+    "dest": "document"
+  },
+  "buffering": {
+    "content_type": "text/html",
+    "content_length": 40000000
+  },
+  "response": {
+    "flow_id": "c11",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": null,
+    "streamed": true
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_body",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "rewrite the download page",
+        "action": "body",
+        "outcome": "skipped_streamed",
+        "detail": {
+          "reason": "response was streamed; the body was never buffered"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "response_streamed",
+        "severity": "info",
+        "module": null,
+        "message": "body is 40000000 bytes, over the 2097152 threshold",
+        "detail": {
+          "reason": "size"
+        }
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

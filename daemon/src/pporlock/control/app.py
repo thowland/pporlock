@@ -850,10 +850,18 @@ class ControlApp:
     async def get_metrics(self, _: Request) -> JSONResponse:
         stats = self.ring.stats
         counters = self.interceptor.counters.to_dict() if self.interceptor is not None else {}
+        # REQ PRF-007. Accumulated on the addon as flows complete, not computed
+        # here: this route is inline-classified and may only read memory.
+        modules = self.interceptor.module_cost.to_list() if self.interceptor is not None else []
         return JSONResponse(
             {
                 "ring": stats.to_dict(),
                 "counters": counters,
+                # An expensive module should be identifiable rather than merely
+                # suspected, so this is ordered most-expensive first and carries
+                # max alongside mean: a module that is slow on one page and fast
+                # on four hundred disappears into an average.
+                "modules": modules,
                 # The Sprint 6 decision criterion is measured against this, so
                 # it lives in the product rather than in a one-off script.
                 # Coverage is over flows; the index's own counters are join

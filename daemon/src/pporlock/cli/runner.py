@@ -12,6 +12,7 @@ when it says the control server shares the proxy's loop.
 from __future__ import annotations
 
 import asyncio
+import functools
 import signal
 import sys
 from pathlib import Path
@@ -44,6 +45,38 @@ def web_assets_dir() -> Path | None:
         return packaged
     repo = Path(__file__).resolve().parents[4] / "web" / "dist"
     return repo if repo.is_dir() else None
+
+
+async def rotate_logs_forever(config: Config, *, interval: float | None = None) -> None:
+    """Keep the daemon's own logs bounded while it runs (REQ PXY-007).
+
+    Nothing else can do this. launchd appends to the files and never truncates
+    them, and a rotation run at startup only would leave an agent that has been
+    up since login writing an unbounded file — which is exactly the uptime
+    PXY-005 and PRF-005 are about.
+
+    The stat calls go to the executor. They are two of them a minute and would
+    almost certainly never be noticed inline, but "almost certainly" is not the
+    standard for filesystem work on the proxy's own event loop (REQ DD-3).
+    """
+    from . import logs as logs_mod
+
+    every = logs_mod.ROTATION_INTERVAL_S if interval is None else interval
+    loop = asyncio.get_running_loop()
+    directory = logs_mod.log_dir(config.logging.dir)
+    while True:
+        await asyncio.sleep(every)
+        rotated = await loop.run_in_executor(
+            None,
+            functools.partial(
+                logs_mod.rotate,
+                directory,
+                max_bytes=config.logging.max_bytes,
+                retain=config.logging.retain,
+            ),
+        )
+        for path in rotated:
+            emit(f"  rotated {path}")
 
 
 def emit(line: str) -> None:
@@ -282,6 +315,10 @@ async def _run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, master.shutdown)
 
+    # REQ PXY-007. Started here, on the running loop, because a rotation that
+    # only runs at startup does nothing for the uptime this daemon is built for.
+    rotator = asyncio.create_task(rotate_logs_forever(config))
+
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     emit(f"  exclusions: {len(interceptor.exclusions)} entries")
     active = registry.active(profiles.module_filter())
@@ -314,6 +351,8 @@ async def _run(
     emit("  ctrl-c to stop\n")
 
     await master.run()
+
+    rotator.cancel()
 
     if interceptor.control_server is not None:
         await interceptor.control_server.stop()

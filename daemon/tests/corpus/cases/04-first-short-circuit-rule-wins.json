@@ -1,0 +1,67 @@
+{
+  "id": "04-first-short-circuit-rule-wins",
+  "description": "Two short-circuit rules match the same request; only the first records (REQ MOD-012). If the second ever appears in this golden, first-match-wins has broken \u2014 the failure mode where a later block silently overrides an earlier map_local.",
+  "requirements": [
+    "MOD-012",
+    "MOD-023"
+  ],
+  "rules": [
+    {
+      "name": "redirect to the local build",
+      "action": "redirect",
+      "match": {
+        "host": "cdn.vendor.example",
+        "path": "^/lib\\.js$"
+      },
+      "to": {
+        "scheme": "http",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "path": "/lib.js"
+      }
+    },
+    {
+      "name": "block everything on that CDN",
+      "action": "block",
+      "match": {
+        "host": "cdn.vendor.example"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c04",
+    "host": "cdn.vendor.example",
+    "path": "/lib.js",
+    "dest": "script"
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "redirect to the local build",
+        "action": "redirect",
+        "outcome": "applied",
+        "detail": {
+          "to": {
+            "scheme": "http",
+            "host": "127.0.0.1",
+            "port": 8000,
+            "path": "/lib.js"
+          }
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

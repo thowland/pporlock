@@ -280,3 +280,125 @@ def test_no_masked_value_leaks_the_original_anywhere() -> None:
     assert out is not None
     assert secret not in out.decode()
     assert re.search(r"«redacted:sha1=[0-9a-f]{4},len=28»", out.decode())
+
+
+class TestQueryStringRedaction:
+    """A credential in a URL is still a credential — REQ CAP-045, §2.5 (A02).
+
+    Until Sprint 16 the same bearer token was masked in the ``Authorization``
+    header and written verbatim into ``request.query`` and ``request.url``. A
+    session file therefore contained the unredacted secret, which is exactly
+    what CAP-045 says must never happen, and the flow table displayed it.
+    """
+
+    def _request(self, url: str, query: tuple[tuple[str, str], ...]) -> NormalizedRequest:
+        return NormalizedRequest(
+            flow_id="f",
+            timestamp="2026-08-27T14:00:00.000Z",
+            scheme="https",
+            method="GET",
+            host="api.example.com",
+            port=443,
+            path="/v1/me",
+            url=url,
+            query=query,
+        )
+
+    def test_a_token_in_the_query_is_masked(self) -> None:
+        redactor = Redactor()
+        pairs, changed = redactor.redact_query((("access_token", "SUPERSECRET"),))
+        assert changed is True
+        assert is_masked(pairs[0][1])
+
+    def test_an_ordinary_parameter_is_left_alone(self) -> None:
+        redactor = Redactor()
+        pairs, changed = redactor.redact_query((("page", "2"), ("q", "kittens")))
+        assert changed is False
+        assert pairs == (("page", "2"), ("q", "kittens"))
+
+    def test_matching_is_by_substring_like_json_keys(self) -> None:
+        """The names that carry secrets are spelled every way a hundred APIs
+        could spell them: authToken, x-secret, user_password."""
+        redactor = Redactor()
+        pairs, _ = redactor.redact_query((("oauth_access_token", "x"), ("userPassword", "y")))
+        assert all(is_masked(value) for _, value in pairs)
+
+    def test_presigned_url_parameters_are_covered(self) -> None:
+        redactor = Redactor()
+        pairs, _ = redactor.redact_query(
+            (("X-Amz-Signature", "deadbeef"), ("X-Amz-Security-Token", "tok"))
+        )
+        assert all(is_masked(value) for _, value in pairs)
+
+    def test_the_url_is_rewritten_to_match_the_masked_query(self) -> None:
+        """The URL is a second copy of the same secret, and it is the copy the
+        flow table shows and the session file stores."""
+        redactor = Redactor()
+        request = self._request(
+            "https://api.example.com/v1/me?access_token=SUPERSECRET&page=2",
+            (("access_token", "SUPERSECRET"), ("page", "2")),
+        )
+        out, changed = redactor.redact_request(request)
+        assert changed is True
+        assert "SUPERSECRET" not in out.url
+        assert "page=2" in out.url
+
+    def test_the_mask_stays_readable_in_the_url(self) -> None:
+        """Percent-encoding the mask makes it look like data rather than an
+        absence, which defeats the point of the mask format (SPEC-0 §9.1)."""
+        redactor = Redactor()
+        out, _ = redactor.redact_request(
+            self._request("https://api.example.com/v1/me?token=SECRET", (("token", "SECRET"),))
+        )
+        assert "«redacted:" in out.url
+
+    def test_the_fragment_survives(self) -> None:
+        redactor = Redactor()
+        out, _ = redactor.redact_request(
+            self._request(
+                "https://api.example.com/v1/me?token=SECRET#section",
+                (("token", "SECRET"),),
+            )
+        )
+        assert out.url.endswith("#section")
+
+    def test_a_url_with_no_query_is_untouched(self) -> None:
+        """Appending a '?' would invent a query the request never carried."""
+        redactor = Redactor()
+        request = self._request("https://api.example.com/v1/me", ())
+        out, changed = redactor.redact_request(request)
+        assert changed is False
+        assert out.url == "https://api.example.com/v1/me"
+
+    def test_an_already_masked_value_is_not_masked_twice(self) -> None:
+        redactor = Redactor()
+        first, _ = redactor.redact_query((("token", "SECRET"),))
+        second, changed = redactor.redact_query(first)
+        assert changed is False
+        assert second == first
+
+    def test_disabling_redaction_disables_this_too(self) -> None:
+        redactor = Redactor(RedactionConfig(enabled=False))
+        pairs, changed = redactor.redact_query((("access_token", "SECRET"),))
+        assert changed is False
+        assert pairs[0][1] == "SECRET"
+
+    def test_a_whole_record_carries_no_query_secret(self) -> None:
+        """The end-to-end guarantee: what reaches the session writer is clean."""
+        redactor = Redactor()
+        record = FlowRecord(
+            flow_id="f",
+            kind="http",
+            started_at="2026-08-27T14:00:00.000Z",
+            request=self._request(
+                "https://api.example.com/v1/me?access_token=SUPERSECRET",
+                (("access_token", "SUPERSECRET"),),
+            ),
+        )
+        redacted = redactor.redact_record(record)
+        assert redacted.request is not None
+        assert "SUPERSECRET" not in redacted.request.url
+        assert "SUPERSECRET" not in str(redacted.request.query)
+        # And the original is untouched, so unmasking from the ring still works.
+        assert record.request is not None
+        assert "SUPERSECRET" in record.request.url

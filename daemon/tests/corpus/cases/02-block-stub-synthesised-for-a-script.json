@@ -1,0 +1,59 @@
+{
+  "id": "02-block-stub-synthesised-for-a-script",
+  "description": "block in stub mode short-circuits the request and synthesises a response derived from Sec-Fetch-Dest (REQ PXY-032). The entry records the derivation inputs, and short_circuited_by names the rule that ate the flow.",
+  "requirements": [
+    "PXY-030",
+    "PXY-031",
+    "PXY-032",
+    "MOD-012"
+  ],
+  "rules": [
+    {
+      "name": "block the vendor CDN",
+      "action": "block",
+      "match": {
+        "host": "*.vendor.example"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c02",
+    "host": "cdn.vendor.example",
+    "path": "/analytics.js",
+    "dest": "script",
+    "headers": [
+      [
+        "accept",
+        "*/*"
+      ]
+    ]
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "block the vendor CDN",
+        "action": "block",
+        "outcome": "applied",
+        "detail": {
+          "stub": "auto",
+          "derived_from_dest": "script",
+          "synthesized_status": 200,
+          "synthesized_content_type": "application/javascript"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "id": "12-an-exhausted-budget-skips-the-rest",
+  "description": "With the per-flow budget already spent, remaining transforms are skipped and the flow is delivered with what has been applied \u2014 never dropped, never delayed further (REQ PXY-026). A zero budget is the deterministic form of the condition.",
+  "requirements": [
+    "PXY-026",
+    "CAP-010"
+  ],
+  "budget_ms": 0.0,
+  "rules": [
+    {
+      "name": "an expensive rewrite that never gets to run",
+      "action": "body",
+      "match": {
+        "host": "app.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "replace_literal",
+        "find": "app",
+        "replace": "APP"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c12",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c12",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_body",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "an expensive rewrite that never gets to run",
+        "action": "body",
+        "outcome": "skipped_budget",
+        "detail": {},
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "transform_budget_exceeded",
+        "severity": "warning",
+        "module": "corpus",
+        "message": "per-flow budget exhausted; an expensive rewrite that never gets to run was not run",
+        "detail": {}
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

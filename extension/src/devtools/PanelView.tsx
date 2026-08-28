@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ControlApi } from '../shared/api';
 import type { FlowRecord, ProvenanceEntry, ProvenanceNote } from '../shared/flows';
+import { describeMasked, isMasked } from '../shared/redaction';
 import {
   NEGATIVE_OUTCOMES,
   NOTE_LABEL,
@@ -27,6 +28,35 @@ export function severityOf(flow: FlowRecord): 'error' | 'warning' | null {
   if (notes.some((n: ProvenanceNote) => n.severity === 'error')) return 'error';
   if (notes.some((n: ProvenanceNote) => n.severity === 'warning')) return 'warning';
   return null;
+}
+
+/**
+ * Headers, with masked values rendered as what they are (REQ CAP-043).
+ *
+ * There is deliberately no reveal control. Unmasking is live-ring-only and web
+ * UI-only (SPEC-0 §9.3); a second path here would be a second thing to get
+ * wrong. What the panel does give you is the fingerprint, so you can tell
+ * whether two requests carried the same cookie without seeing it.
+ */
+function Headers({ title, headers }: { title: string; headers: [string, string][] | undefined }) {
+  if (!headers || headers.length === 0) return null;
+  return (
+    <section className="headers">
+      <h4>{title}</h4>
+      <dl>
+        {headers.map(([name, value], i) => (
+          <div key={`${name}-${i}`} className={isMasked(value) ? 'masked' : undefined}>
+            <dt>{name}</dt>
+            <dd
+              title={isMasked(value) ? 'Redacted — reveal is available in the web UI only' : value}
+            >
+              {describeMasked(value)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
 }
 
 function Provenance({ flow }: { flow: FlowRecord }) {
@@ -201,6 +231,8 @@ export function PanelView({
             <>
               <div className="detail-url">{current.request?.url ?? current.flow_id}</div>
               <Provenance flow={current} />
+              <Headers title="Request headers" headers={current.request?.headers} />
+              <Headers title="Response headers" headers={current.response?.headers} />
               {onOpenModule &&
                 (current.provenance?.evaluated_modules ?? []).map((module: string) => (
                   <button

@@ -52,7 +52,7 @@ interface Manifest {
   action: { default_popup: string; default_title?: string };
   options_page?: string;
   devtools_page?: string;
-  content_scripts?: unknown[];
+  content_scripts?: { matches: string[]; js: string[]; run_at?: string }[];
 }
 
 const manifest: Manifest = {
@@ -61,7 +61,7 @@ const manifest: Manifest = {
   version: '0.1.0',
   description: 'Control and observe the pporlock local interception proxy.',
   minimum_chrome_version: '116',
-  permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest'],
+  permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest', 'notifications'],
   host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'],
   optional_host_permissions: ['<all_urls>'],
   background: {
@@ -73,6 +73,16 @@ const manifest: Manifest = {
     default_title: 'pporlock',
   },
   options_page: 'src/popup/options.html',
+  // <all_urls> here is the same grant attribution needs, and the banner is
+  // inert without it: the content script only ever renders what the service
+  // worker sends it (SPEC-3 §8).
+  content_scripts: [
+    {
+      matches: ['http://*/*', 'https://*/*'],
+      js: ['src/content/banner.ts'],
+      run_at: 'document_idle',
+    },
+  ],
   devtools_page: 'src/devtools/devtools.html',
 };
 

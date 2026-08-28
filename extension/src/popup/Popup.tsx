@@ -6,6 +6,7 @@
  * altering my traffic in a way I should know about.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { describeError } from '../shared/errors';
 import type { ActionReply, StatusReply } from '../shared/messages';
 import type { Message } from '../shared/messages';
 
@@ -164,6 +165,31 @@ export function Popup() {
                   turn off {name}
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {state.lastError && !failSafeTripped && (
+        // A recorded error is shown as what it means and what to do, never as
+        // its code (REQ EXT-024). The code stays available as a tooltip for a
+        // bug report.
+        <div className="row">
+          <div
+            className={`alert ${describeError(state.lastError.code).actionable ? 'error' : 'warn'}`}
+            title={state.lastError.code}
+          >
+            <b>{describeError(state.lastError.code).title}</b>
+            {describeError(state.lastError.code).meaning}
+            <div style={{ marginTop: 6 }}>{describeError(state.lastError.code).remedy}</div>
+            <div style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className="link"
+                onClick={() => void act({ type: 'dismiss_error' })}
+              >
+                dismiss
+              </button>
             </div>
           </div>
         </div>

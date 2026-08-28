@@ -43,6 +43,21 @@ export interface DurableState {
   lastError: ExtError | null;
   /** Set when the fail-safe cleared the proxy. Never auto-cleared. */
   failSafeTrippedAt: number | null;
+  /** Hosts the user has asked not to be warned about (REQ EXT-021). */
+  suppressedHosts: string[];
+  /** Turns the in-page banner off entirely. */
+  bannerEnabled: boolean;
+  /**
+   * How much of Chrome's traffic goes through the proxy (REQ EXT-003).
+   *
+   * `all` is the normal mode and uses fixed_servers. `scoped` installs a PAC
+   * script that proxies only `scopedHosts` and sends everything else direct —
+   * for the case where you want one site intercepted and the rest of the
+   * browser untouched.
+   */
+  proxyScope: 'all' | 'scoped';
+  /** Host glob patterns proxied when `proxyScope` is `scoped`. */
+  scopedHosts: string[];
 }
 
 export const DEFAULT_CONTROL_ORIGIN = 'http://127.0.0.1:8081';
@@ -59,6 +74,10 @@ export const DEFAULT_STATE: DurableState = {
   recordingSession: null,
   lastError: null,
   failSafeTrippedAt: null,
+  suppressedHosts: [],
+  bannerEnabled: true,
+  proxyScope: 'all',
+  scopedHosts: [],
 };
 
 const STATE_KEY = 'pporlock.state';

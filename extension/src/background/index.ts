@@ -128,7 +128,13 @@ async function enableProxy(): Promise<ActionReply> {
   }
 
   try {
-    await proxy.enable(proxyTargetFrom(listen), state.controlOrigin);
+    // Scoped mode is a PAC script rather than a bypass list: bypassList only
+    // subtracts from "everything", and scoping needs the opposite default.
+    if (state.proxyScope === 'scoped') {
+      await proxy.enablePac(state.scopedHosts, proxyTargetFrom(listen));
+    } else {
+      await proxy.enable(proxyTargetFrom(listen), state.controlOrigin);
+    }
   } catch (error) {
     return { ok: false, error: `Could not set the proxy: ${String(error)}` };
   }
@@ -272,6 +278,40 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
       }
     }
 
+    case 'suppress_host': {
+      const state = await store.load();
+      const hosts = new Set(state.suppressedHosts);
+      hosts.add(message.host);
+      return { ok: true, state: await store.save({ suppressedHosts: [...hosts] }) };
+    }
+
+    case 'unsuppress_host': {
+      const state = await store.load();
+      return {
+        ok: true,
+        state: await store.save({
+          suppressedHosts: state.suppressedHosts.filter((h) => h !== message.host),
+        }),
+      };
+    }
+
+    case 'set_proxy_scope': {
+      const next = await store.save({
+        proxyScope: message.scope,
+        ...(message.hosts ? { scopedHosts: message.hosts } : {}),
+      });
+      // Re-apply immediately if the proxy is already on, otherwise the setting
+      // silently does nothing until the next toggle.
+      if (next.proxyApplied) {
+        const reply = await enableProxy();
+        if (!reply.ok) return reply;
+      }
+      return { ok: true, state: await store.load() };
+    }
+
+    case 'set_banner_enabled':
+      return { ok: true, state: await store.save({ bannerEnabled: message.enabled }) };
+
     case 'dismiss_error':
       return { ok: true, state: await store.save({ lastError: null, failSafeTrippedAt: null }) };
 
@@ -301,6 +341,88 @@ void (async () => {
 })();
 
 chrome.tabs.onRemoved.addListener((tabId) => void store.resetCounters(tabId));
+
+/**
+ * Tell a page when pporlock changed it (REQ EXT-020).
+ *
+ * Driven from the daemon's own record rather than guessed at: the notes on the
+ * document flow are the authority on what was done to it. Polled on navigation
+ * completion, because that is when the document flow exists and the page is
+ * ready to receive a message.
+ */
+export async function maybeWarnTab(tabId: number, url: string): Promise<void> {
+  const state = await store.load();
+  if (!state.bannerEnabled || !state.paired) return;
+
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return;
+  }
+  if (state.suppressedHosts.includes(host)) return;
+
+  try {
+    const client = await apiForState();
+
+    // Per-tab first, by host second.
+    //
+    // Tab attribution needs the optional <all_urls> grant — without it every
+    // flow carries a null tab_id (the OI-2 spike measured 0% coverage), so a
+    // tab-scoped query returns nothing and the banner would simply never
+    // appear. Making the warning depend on a permission the user is told is
+    // optional would silently disable the one affordance that exists to stop
+    // this system modifying pages invisibly.
+    //
+    // The host fallback is broader than the tab: it can warn about a
+    // modification made for a different tab on the same host. That is the
+    // right way to be wrong — the modification did happen, and this host is
+    // where it happened.
+    let page = await client.listFlows({ tab_id: tabId, limit: 100 });
+    if (page.flows.length === 0) {
+      page = await client.listFlows({ host, limit: 100 });
+    }
+
+    // Every flow, not just the document. A stripped integrity
+    // attribute on a subresource, or a module that errored handling one, is a
+    // modification to *this page* as far as the person looking at it is
+    // concerned — and it is exactly the kind that is otherwise invisible.
+    const seen = new Set<string>();
+    const notes = [];
+    for (const flow of page.flows) {
+      for (const note of flow.provenance?.notes ?? []) {
+        if (note.severity !== 'warning' && note.severity !== 'error') continue;
+        // Deduped by code and module: one line per distinct thing that
+        // happened, however many subresources it happened to.
+        const key = `${note.code}\u0000${note.module ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        notes.push(note);
+      }
+    }
+    if (notes.length === 0) return;
+
+    const document_ = page.flows.find(
+      (f) => f.request?.dest === 'document' || f.request?.url === url,
+    );
+
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'pporlock_banner',
+      flowId: document_?.flow_id ?? '',
+      notes,
+      profile: state.activeProfile ?? 'default',
+    });
+  } catch {
+    // The tab may have navigated away, or the content script may not be there.
+    // A missing warning is a lesser failure than a thrown error in the worker.
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url) {
+    void maybeWarnTab(tabId, tab.url);
+  }
+});
 
 /**
  * Attribution: observe only, never block — and only with an explicit grant.

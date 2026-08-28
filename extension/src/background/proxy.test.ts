@@ -122,3 +122,57 @@ describe('ProxyController', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('scoped PAC mode (REQ EXT-003)', () => {
+  const target = { host: '127.0.0.1', port: 8080 };
+
+  it('proxies a listed host and sends the rest direct', () => {
+    const script = pacScript(['*.example.com'], target);
+    expect(script).toContain('shExpMatch');
+    expect(script).toContain('PROXY 127.0.0.1:8080');
+    expect(script).toContain('return "DIRECT"');
+  });
+
+  it('proxies everything when the list is empty', () => {
+    // An empty scope list is ambiguous, and the safe reading is "no narrowing
+    // asked for" rather than "proxy nothing" — which would look like the proxy
+    // silently failing.
+    const script = pacScript([], target);
+    expect(script).toMatch(/include\.length === 0\) return "PROXY 127\.0\.0\.1:8080"/);
+  });
+
+  it('always sends loopback direct so the control API is reachable', () => {
+    // Same rule as the fixed-server bypass list: routing the control origin
+    // through the proxy makes a dead proxy indistinguishable from a dead
+    // daemon, and the fail-safe depends on telling them apart.
+    const script = pacScript(['*.example.com'], target);
+    expect(script).toContain('host === "127.0.0.1"');
+    expect(script).toContain('isPlainHostName(host)');
+  });
+
+  it('escapes interpolated values rather than splicing them into source', () => {
+    // A PAC script is executable source. Both the host list and the proxy
+    // target are JSON-encoded, so a quote in either stays inside its string
+    // literal instead of closing it.
+    const script = pacScript(['a"; return "PROXY evil:1'], { host: 'x"; //', port: 1 });
+    expect(script).toContain(JSON.stringify(['a"; return "PROXY evil:1']));
+    expect(script).toContain(JSON.stringify('PROXY x"; //:1'));
+    // The payload never appears with its quotes unescaped, which is what
+    // "closed the literal" would look like.
+    expect(script).not.toContain('return "PROXY evil:1');
+  });
+
+  it('enablePac installs a pac_script config, not fixed_servers', async () => {
+    const calls: { value: chrome.proxy.ProxyConfig; scope: string }[] = [];
+    const controller = new ProxyController({
+      set: async (c) => {
+        calls.push(c);
+      },
+      clear: async () => {},
+      get: async () => ({ levelOfControl: 'controllable_by_this_extension' }),
+    });
+    await controller.enablePac(['example.com'], target);
+    expect(calls[0]?.value.mode).toBe('pac_script');
+    expect(calls[0]?.value.pacScript?.data).toContain('example.com');
+  });
+});

@@ -257,3 +257,36 @@ button.link {
   padding: 4px 0;
   display: block;
 }
+
+/* Headers, with masked values visibly distinct from real ones — a redaction
+   that looks like ordinary data invites someone to trust it as a value. */
+.headers h4 {
+  margin: 12px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim, #888);
+}
+.headers dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.headers dl > div {
+  display: contents;
+}
+.headers dt {
+  color: var(--dim, #888);
+  white-space: nowrap;
+}
+.headers dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.headers .masked dd {
+  font-style: italic;
+  opacity: 0.75;
+}

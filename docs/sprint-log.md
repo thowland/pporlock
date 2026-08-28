@@ -893,3 +893,91 @@ correctly today, the reveal control arrives with redaction itself.
   bodies should reconsider.
 - The `matches_everything` flag from Sprint 7 is still unsurfaced. The module
   editor in Sprint 12 should warn on a rule with an empty match block.
+
+---
+
+## Sprint 09 — Short-circuit actions, buffering, and offload
+
+**Branch:** `sprint-09-actions-buffering`
+**Tag:** `sprint-09-complete`
+
+**Requirements delivered:** PXY-034 (map_local, verified on the wire), PXY-035
+(redirect), PXY-036 (header actions, both sides), PXY-021/022 (buffering guard
+with its provenance), PXY-026 (time budget, now actually charged), PXY-024
+(offload classification).
+
+**Requirements deferred:** none. The transform registry remains Sprint 10 as
+planned; body rules match, order, classify their offload cost, and record.
+
+**Scope note:** most of this sprint's nominal scope landed early in Sprint 7,
+where the evaluator implemented all three actions. What remained was what had
+not been exercised — whether the mutations reach the wire, whether the budget
+can fire, and where expensive work runs. Two of those turned out to be broken.
+
+**Gate results:**
+- **G1** — exit demo run against a live daemon: map_local substituted a remote
+  script from disk with the correct content type and `no-store`; a redirect
+  retargeted a 4 MiB response to an 11-byte one; CSP was removed and a marker
+  set, both confirmed on the wire; a request header we added appears in the
+  captured record; provenance showed the phases in order with the buffering
+  decision and offload classification alongside.
+- **G2** — daemon 92.92%, **engine 99%**, web and extension unchanged.
+- **G3** — 959 daemon + 189 extension + 212 web + 4 mcp, plus 8 E2E.
+- **G4** — no tests removed.
+- **G5** — clean.
+- **G6** — scanners clean. §2.5 areas walked in full for this sprint's actions:
+  **path traversal** — `_resolve_asset` refuses absolute paths and resolves
+  symlinks before the containment check, tested with a planted symlink;
+  **SSRF via redirect** — documented in the code where it lives, with an
+  integration test asserting the target comes only from the rule.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **Response headers must be applied at `responseheaders`, not `response`.**
+   Once a response streams, mitmproxy has already put its headers on the wire,
+   so a mutation computed later is recorded as applied and silently changes
+   nothing. This was invisible to unit tests — the mutation object was correct —
+   and only surfaced when an end-to-end test read the header off the wire. It is
+   also where SPEC-0 §4.2 places the phase; the implementation had drifted from
+   the spec rather than the spec being wrong.
+
+2. **The time budget could never fire.** Created and checked since Sprint 7,
+   never consumed. `skipped_budget` was unreachable in production. Both phases
+   now charge it, because a budget counting only body transforms would let
+   request-side matching overrun it unnoticed.
+
+3. **Work is classified, not uniformly offloaded.** Thread-pool handoff for a
+   header edit would cost more than the edit. HTML transforms are
+   unconditionally expensive — they parse a document, so cost tracks structure
+   rather than length and a size threshold would not predict it. Scanning
+   transforms offload above a body threshold. An unknown transform defaults to
+   expensive: a module-provided transform we know nothing about must not be
+   assumed fast on the proxy's loop.
+
+4. **The offload decision is recorded in provenance.** An operator diagnosing a
+   slow page should be able to see why, not infer it.
+
+5. **The captured request is the one that was sent.** It had been the
+   pre-mutation snapshot, so the provenance panel would have displayed a request
+   that never went out. Re-normalising costs one extra pass and only when a
+   mutation was actually applied.
+
+6. **`offload_reason`, not `reason`, in the detail block.** A provenance entry
+   already carries a `reason` for what the rule did; two different facts under
+   one key is how a detail block becomes misleading. Found by a key collision at
+   runtime.
+
+**Notes for the next sprint:**
+
+- Sprint 10 implements the transform registry. The phase, ordering, offload
+  classification, and provenance are all in place around it; what lands is the
+  transforms themselves plus CSP/SRI handling and the dev toggles.
+- `TRANSFORM_COST` currently classifies by name. When modules can register their
+  own transforms (Sprint 11), the registration should carry a cost so the
+  default-to-expensive fallback is a genuine last resort.
+- The executor is classified but not yet wired: nothing calls
+  `run_in_executor` because no transform runs work yet. Sprint 10 must honour
+  the decision rather than leave it advisory.
+- `evaluate_response` (the combined form) exists only for the dry runner. If
+  Sprint 14 finds it does not need it, remove it rather than leaving two paths.

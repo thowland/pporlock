@@ -154,9 +154,15 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [rule, yaml]
                 properties:
                   yaml: { type: string }
                   rule: { $ref: './schemas/rule.schema.json' }
+                  module:
+                    type: [string, 'null']
+                    description: The module the rule would be added to, if known.
+                  flow_id: { type: string }
+                  intent: { type: string }
 
   /events:
     get:
@@ -271,8 +277,16 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [loaded, enabled, quarantined, errors]
                 properties:
                   loaded: { type: integer }
+                  enabled: { type: integer }
+                  quarantined:
+                    type: integer
+                    description: |
+                      Modules disabled after repeated failures. Distinct from
+                      `errors`, which counts modules that would not load at all
+                      — a quarantined module loaded fine and then misbehaved.
                   errors:
                     type: array
                     items: { $ref: '#/components/schemas/ModuleError' }
@@ -884,18 +898,35 @@ components:
 
     ValidationResult:
       type: object
-      required: [valid]
+      description: |
+        `ok` and `valid` are the same boolean. The daemon emits both because the
+        web UI reads `ok` and this document declared `valid`, and picking a
+        winner would have broken one of them for no gain. Both are required so
+        a client may rely on either.
+
+        `line` and `column` matter: the editor turns them into markers, and a
+        validation error with no position is one the author has to hunt for.
+      required: [ok, valid, errors]
       properties:
+        ok: { type: boolean }
         valid: { type: boolean }
         errors:
           type: array
-          items:
-            type: object
-            properties:
-              file: { type: string }
-              line: { type: [integer, 'null'] }
-              code: { type: string }
-              message: { type: string }
+          items: { $ref: '#/components/schemas/ValidationIssue' }
+        warnings:
+          type: array
+          items: { $ref: '#/components/schemas/ValidationIssue' }
+
+    ValidationIssue:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        file: { type: [string, 'null'] }
+        line: { type: [integer, 'null'] }
+        column: { type: [integer, 'null'] }
+        severity: { type: string, enum: [error, warning] }
 
     SessionMeta:
       type: object
@@ -936,12 +967,27 @@ components:
           type: object
           properties:
             flows_evaluated: { type: integer }
+            flows_skipped:
+              type: integer
+              description: |
+                Flows the runner declined to replay. Reported rather than
+                quietly excluded from the denominator: "nothing matched" and
+                "nothing was tried" are different answers.
             matched: { type: integer }
             modified: { type: integer }
             blocked: { type: integer }
             errors: { type: integer }
             avg_ms: { type: number }
             p95_ms: { type: number }
+            by_module:
+              type: object
+              additionalProperties: { type: integer }
+            by_rule:
+              type: object
+              additionalProperties: { type: integer }
+            by_note:
+              type: object
+              additionalProperties: { type: integer }
         results:
           type: array
           items:
@@ -961,6 +1007,13 @@ components:
                         op: { type: string, enum: [add, remove, replace] }
                         name: { type: string }
                         value: { type: [string, 'null'] }
+                        phase:
+                          type: string
+                          description: |
+                            Which phase applied it. A response header set at
+                            response_headers reaches the wire; one attempted at
+                            response_body on a streamed response does not, and
+                            the phase is how you tell those apart.
                   body:
                     type: [object, 'null']
                     properties:

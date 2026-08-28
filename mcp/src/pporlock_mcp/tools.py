@@ -288,7 +288,14 @@ async def _suggest_rule_from_flow(client: ControlClient, args: dict[str, Any]) -
 
 # ---------------------------------------------------- validation handlers ---
 async def _validate_module(client: ControlClient, args: dict[str, Any]) -> Any:
-    body = {"name": str(args.get("name", "candidate")), "files": _files_arg(args)}
+    # `name` is sent only when the caller gave one. It used to default to
+    # "candidate", which meant validating any manifest not called "candidate"
+    # reported a spurious module_name_mismatch — a validator inventing an error
+    # that is not in the thing being validated. Omitted, the daemon uses the
+    # manifest's own name, which is the only name that can be correct.
+    body: dict[str, Any] = {"files": _files_arg(args)}
+    if args.get("name"):
+        body["name"] = str(args["name"])
     return await client.request("POST", "/validate", json=body)
 
 
@@ -301,7 +308,12 @@ async def _dry_run(client: ControlClient, args: dict[str, Any]) -> Any:
         "profile": args.get("profile"),
     }
     if args.get("files"):
-        body["modules"] = [{"name": str(args.get("name", "candidate")), "files": _files_arg(args)}]
+        # Same reasoning as _validate_module: a name we invented would be
+        # compared against the manifest's and reported as a mismatch.
+        candidate: dict[str, Any] = {"files": _files_arg(args)}
+        if args.get("name"):
+            candidate["name"] = str(args["name"])
+        body["modules"] = [candidate]
     if args.get("module_name"):
         body["use_installed"] = [str(args["module_name"])]
     if "modules" not in body and "use_installed" not in body:

@@ -17,8 +17,11 @@ import time
 from typing import Any, Protocol
 
 from ..config import Config
+from ..engine.evaluator import Evaluator, TimeBudget
 from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.provenance import NoteCode, Provenance, ProvenanceBuilder
+from ..engine.ruleset import RuleSet
+from . import apply as apply_mod
 from . import normalize
 
 
@@ -96,6 +99,7 @@ class Interceptor:
         exclusions: ExclusionList | None = None,
         profile: str = "default",
         control: Any = None,
+        evaluator: Evaluator | None = None,
     ) -> None:
         self.config = config or Config()
         self.sink: FlowSink = sink or NullSink()
@@ -108,6 +112,12 @@ class Interceptor:
         # running(). Left None in tests and in bare-addon use.
         self.control: Any = control
         self.control_server: Any = None
+        # The evaluator holds an immutable rule-set snapshot. Reload swaps the
+        # whole evaluator rather than mutating it, so an in-flight flow finishes
+        # against the snapshot it started with (REQ MOD-004).
+        self.evaluator = (
+            evaluator if evaluator is not None else Evaluator(RuleSet(), exclusions=self.exclusions)
+        )
 
     # -- lifecycle -------------------------------------------------------
 
@@ -161,31 +171,67 @@ class Interceptor:
         self.sink.record_passthrough(sni, ip, builder.build(), {"started_at": time.time()})
 
     def request(self, flow: Any) -> None:
-        """Request-side evaluation.
+        """Request-side evaluation: short-circuit rules, then header rules.
 
-        Sprint 7 inserts short-circuit and header rules here. Today it
-        establishes flow identity and the provenance record that every flow
-        carries from birth (REQ CAP-013).
+        Every flow carries provenance from birth, whether or not any rule
+        matched (REQ CAP-013).
         """
         started = time.perf_counter()
         flow_id = _flow_id(flow)
         builder = ProvenanceBuilder(self.profile)
 
         request = normalize.normalize_request(flow, flow_id=flow_id, body=flow.request.content)
+        decision = self.evaluator.evaluate_request(request, builder)
 
-        # Seam: engine.evaluate_request(request, builder) -> RequestDecision.
+        if decision.kill:
+            # Opt-in only: flow.kill() is the wrong default because a page's
+            # JavaScript reacts badly to a failed fetch (REQ PXY-031).
+            flow.kill()
+            self.counters.blocked += 1
+        elif apply_mod.apply_request_mutation(flow, decision.mutation):
+            if decision.short_circuit is not None:
+                self.counters.blocked += 1
+            else:
+                self.counters.modified += 1
+
         _stash(flow, "request", request)
         _stash(flow, "builder", builder)
         _stash(flow, "started", started)
+        _stash(flow, "wants_body", decision.wants_body)
+        _stash(flow, "budget", TimeBudget(self.config.budget.per_flow_ms))
 
         self.counters.flows_total += 1
 
     def responseheaders(self, flow: Any) -> None:
         """The buffering decision, which can only be made here (REQ PXY-021).
 
-        Sprint 9 installs the size and content-type guard. Until then everything
-        buffers, which is correct-but-slow rather than silently wrong.
+        Deciding to stream means the body is never held in memory, so any body
+        transform for this flow becomes impossible — which is why the engine
+        records that it was skipped rather than doing nothing quietly.
         """
+        if flow.response is None:
+            return
+
+        request = flow.metadata.get("pporlock.request")
+        builder = flow.metadata.get("pporlock.builder")
+        if request is None or builder is None:
+            return
+
+        length: int | None
+        try:
+            length = int(flow.response.headers.get("content-length", "") or 0) or None
+        except (TypeError, ValueError):
+            length = None
+
+        decision = self.evaluator.decide_buffering(
+            request,
+            flow.response.headers.get("content-type"),
+            length,
+            bool(flow.metadata.get("pporlock.wants_body", True)),
+            builder,
+        )
+        if not decision.buffer:
+            apply_mod.set_stream(flow, True)
 
     def response(self, flow: Any) -> None:
         """Response-side evaluation and flow completion."""
@@ -201,14 +247,14 @@ class Interceptor:
             streamed=streamed,
         )
 
-        if streamed:
-            builder.note(
-                NoteCode.RESPONSE_STREAMED,
-                "response streamed; body transforms unavailable",
-                reason="size",
+        if request is not None:
+            decision = self.evaluator.evaluate_response(
+                request, response, builder, _unstash(flow, "budget")
             )
+            if apply_mod.apply_response_mutation(flow, decision.mutation):
+                self.counters.modified += 1
 
-        # Seam: engine.evaluate_response(request, response, builder).
+        _unstash(flow, "wants_body")
 
         elapsed_ms = (time.perf_counter() - started) * 1000 if started is not None else 0.0
         self.sink.record_http(
@@ -233,6 +279,22 @@ class Interceptor:
 
     def websocket_end(self, flow: Any) -> None:
         self._ws_indexes.pop(_flow_id(flow), None)
+
+    def replace_ruleset(self, ruleset: RuleSet) -> None:
+        """Swap in a new rule set without restarting the proxy (REQ MOD-004).
+
+        A whole new Evaluator, not a mutation: an in-flight flow keeps the
+        reference it started with, so no locking is needed and no flow can
+        observe a half-applied change.
+        """
+        self.evaluator = Evaluator(
+            ruleset,
+            exclusions=self.exclusions,
+            stubs=self.evaluator.stubs,
+            asset_root=self.evaluator.asset_root,
+            buffer_types=self.evaluator.buffer_types,
+            max_buffer_bytes=self.evaluator.max_buffer_bytes,
+        )
 
     # -- state -----------------------------------------------------------
 

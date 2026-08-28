@@ -23,7 +23,9 @@ from starlette.staticfiles import StaticFiles
 from ..capture.attribution import AttributionIndex, coverage_of, entry_from_dict
 from ..capture.filters import FlowFilter
 from ..config import Config
-from ..errors import AuthError, PairingError, PporlockError
+from ..engine.rules_file import rules_to_dicts
+from ..engine.ruleset import RuleSet
+from ..errors import AuthError, PairingError, PporlockError, RuleValidationError
 from .audit import AuditLog
 from .auth import (
     CLIENT_HEADER,
@@ -62,6 +64,7 @@ INLINE_ROUTES: frozenset[str] = frozenset(
         "/events",
         "/attribution",
         "/pair/begin",
+        "/rules",
     }
 )
 
@@ -310,6 +313,37 @@ class ControlApp:
             }
         )
 
+    async def get_rules(self, _: Request) -> JSONResponse:
+        """The rules currently in force, as loaded."""
+        ruleset = self.interceptor.evaluator.ruleset if self.interceptor else RuleSet()
+        return JSONResponse({"rules": rules_to_dicts(ruleset), "count": len(ruleset)})
+
+    async def put_rules(self, request: Request) -> JSONResponse:
+        """Replace the rule set. Takes effect without restarting the proxy.
+
+        The new set is compiled first and only swapped in if it compiles
+        cleanly, so a bad edit leaves the running rules untouched rather than
+        emptying them. The swap itself replaces an immutable snapshot, so an
+        in-flight flow finishes against the rules it started with (REQ MOD-004).
+        """
+        body = await request.json()
+        raw = body.get("rules")
+        if not isinstance(raw, list):
+            raise RuleValidationError("'rules' must be a list")
+
+        ruleset = await self.offload(
+            lambda: RuleSet.from_rules(raw, module=str(body.get("module") or "api"))
+        )
+
+        if self.interceptor is not None:
+            self.interceptor.replace_ruleset(ruleset)
+
+        self.audit.record(
+            request.scope.get("pporlock_client", "cli"), "put_rules", count=len(ruleset)
+        )
+        self.events.publish("state.changed", {"rules": len(ruleset)})
+        return JSONResponse({"rules": rules_to_dicts(ruleset), "count": len(ruleset)})
+
     async def post_attribution(self, request: Request) -> JSONResponse:
         """Batched (request -> tab) associations from the extension.
 
@@ -462,6 +496,8 @@ class ControlApp:
             Route("/audit", self.get_audit, methods=["GET"]),
             Route("/metrics", self.get_metrics, methods=["GET"]),
             Route("/events", self.get_events, methods=["GET"]),
+            Route("/rules", self.get_rules, methods=["GET"]),
+            Route("/rules", self.put_rules, methods=["PUT"]),
             Route("/attribution", self.post_attribution, methods=["POST"]),
             Route("/pair/begin", self.post_pair_begin, methods=["POST"]),
             Route("/pair", self.post_pair, methods=["POST"]),

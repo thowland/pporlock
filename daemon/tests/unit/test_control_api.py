@@ -478,3 +478,72 @@ class TestAttribution:
         payload = client.get("/metrics", headers=auth(token)).json()
         assert "attribution" in payload
         assert "coverage" in payload["attribution"]
+
+
+class TestRules:
+    """REQ MOD-004 — rules edited through the API take effect without a restart."""
+
+    def test_get_returns_the_active_set(self, client: TestClient, token: str) -> None:
+        payload = client.get("/rules", headers=auth(token)).json()
+        assert payload["count"] == 0
+
+    def test_put_installs_rules(self, client: TestClient, token: str, app: ControlApp) -> None:
+        response = client.put(
+            "/rules",
+            json={"rules": [{"name": "b", "action": "block", "match": {"host": "*.x.test"}}]},
+            headers=auth(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["count"] == 1
+        assert app.interceptor is not None
+        assert len(app.interceptor.evaluator.ruleset) == 1
+
+    def test_a_bad_rule_leaves_the_running_set_untouched(
+        self, client: TestClient, token: str, app: ControlApp
+    ) -> None:
+        """Compiling first means a typo does not empty the rules in force."""
+        client.put(
+            "/rules",
+            json={"rules": [{"name": "good", "action": "block"}]},
+            headers=auth(token),
+        )
+        response = client.put(
+            "/rules",
+            json={"rules": [{"name": "bad", "action": "nonsense"}]},
+            headers=auth(token),
+        )
+        assert response.status_code == 400
+        assert app.interceptor is not None
+        assert len(app.interceptor.evaluator.ruleset) == 1
+
+    def test_the_error_names_the_problem(self, client: TestClient, token: str) -> None:
+        response = client.put(
+            "/rules",
+            json={"rules": [{"name": "bad", "action": "nonsense"}]},
+            headers=auth(token),
+        )
+        assert response.json()["error"]["code"] == "rule_invalid"
+        assert "unknown action" in response.json()["error"]["message"]
+
+    def test_rules_must_be_a_list(self, client: TestClient, token: str) -> None:
+        response = client.put("/rules", json={"rules": "nope"}, headers=auth(token))
+        assert response.status_code == 400
+
+    def test_the_swap_replaces_rather_than_mutates(
+        self, client: TestClient, token: str, app: ControlApp
+    ) -> None:
+        """An in-flight flow keeps the snapshot it started with, which is what
+        removes any need for locking (REQ MOD-004)."""
+        assert app.interceptor is not None
+        before = app.interceptor.evaluator
+        client.put(
+            "/rules",
+            json={"rules": [{"name": "b", "action": "block"}]},
+            headers=auth(token),
+        )
+        assert app.interceptor.evaluator is not before
+
+    def test_a_change_is_audited(self, client: TestClient, token: str, app: ControlApp) -> None:
+        client.put("/rules", json={"rules": []}, headers=auth(token, "ui"))
+        entries, _ = app.audit.entries()
+        assert entries[0].action == "put_rules"

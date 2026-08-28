@@ -5,7 +5,9 @@ description = "MCP stdio server for pporlock — HTTP client of the control API"
 requires-python = "==3.12.*"
 license = { text = "Proprietary" }
 dependencies = [
-    "mcp>=1.2.0",
+    # 2.x only: the lowlevel Server takes on_list_tools/on_call_tool handlers
+    # rather than decorators, and ToolAnnotations fields are snake_case.
+    "mcp>=2.1.0",
     "httpx>=0.28.0",
 ]
 
@@ -54,10 +56,19 @@ src = ["src", "tests"]
 select = ["E", "W", "F", "I", "B", "C4", "UP", "S", "ASYNC", "RUF"]
 ignore = ["S101"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests carry fake bearer tokens by design; S105/S106 fire on every one of them.
+"tests/**" = ["S105", "S106"]
+
+# The MCP server is small, pure, and entirely I/O-boundary code, so it carries
+# the strict bar the daemon reserves for engine/ (CLAUDE.md, G5).
 [tool.mypy]
 python_version = "3.12"
-disallow_untyped_defs = true
+strict = true
 warn_unused_configs = true
+warn_redundant_casts = true
+
+# mcp and httpx both ship types; nothing here needs an escape hatch.
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]

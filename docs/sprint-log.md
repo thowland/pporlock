@@ -1072,3 +1072,118 @@ stored deliberately, so the diff belongs there rather than half-built here.
   case appears.
 - The dev toggles are per-daemon, not per-profile. REQ MOD-044 wants
   profile-scoped toggles, which lands with profiles in Sprint 11.
+
+---
+
+## Sprint 11 — Module system and profiles
+
+**Branch:** `sprint-11-modules` · **Tag:** `sprint-11-complete`
+
+**Requirements:** MOD-001–MOD-004, MOD-014, MOD-020–MOD-026, MOD-030, MOD-040–MOD-044, API-023, API-024
+
+**Gate:** ruff, mypy `--strict`, bandit, gitleaks clean. **1248 tests pass**
+(was 1033), **93%** coverage. New code: `context.py` 98%, `loader.py` 93%,
+`registry.py` 98%, `profiles.py` 100%, `control/app.py` 90%.
+
+### What landed
+
+Modules become the unit of authorship: a directory with `module.yaml`, optional
+`module.py`, and an `assets/` tree. Profiles decide which modules are live.
+
+The engine boundary held — `engine/modules/` and `engine/profiles.py` import
+nothing from mitmproxy, asyncio, or sibling packages (DD-2), and the AST test
+that enforces it needed no exemption.
+
+All 13 module and profile routes landed on the control API. Every one does its
+filesystem work through `offload()` and is listed in `OFFLOAD_ROUTES`, so the
+test that asserts every route is classified still passes (DD-3).
+
+### Decisions
+
+1. **A broken module loads.** `load_module` never raises; a failure produces
+   `state="load_error"` carrying a code, a message, and a line number. A module
+   that disappears from the list when it has a syntax error is the failure this
+   system exists to prevent — you would be debugging a page while the thing you
+   just wrote was invisible.
+
+2. **Reload is a snapshot swap.** An in-flight flow finishes against the module
+   set it started with (REQ MOD-004). Mutating in place would mean a flow whose
+   provenance describes rules that no longer exist.
+
+3. **Python hooks interleave with declarative rules by priority** (REQ MOD-023)
+   rather than running as a separate pass. Otherwise a module's own hook and its
+   own rules would order differently against a third module's, which nobody
+   could reason about.
+
+4. **`ctx.register_transform` defaults cost to `expensive`.** We know nothing
+   about a module's transform, and the scheduler uses cost to decide what may
+   run inline on the event loop. Assuming cheap is how one module makes every
+   page slow.
+
+5. **Asset containment is checked after symlink resolution.** Module code is
+   trusted (MOD-030), so this catches mistakes rather than malice — but a module
+   that accidentally reads outside its own directory is a mistake worth catching.
+
+6. **`ProfileManager.list()` became `all_profiles()`.** The method shadowed the
+   builtin, so `list[str] | None` annotations in the same class resolved to the
+   method object instead of the type. A name that silently changes what an
+   annotation means is not worth keeping.
+
+### Bugs found — all four would have shipped
+
+1. **`replace_ruleset` dropped `transforms` and `registry`** when rebuilding the
+   Evaluator. Every Python hook and every module-registered transform would have
+   silently stopped running the first time anyone edited a rule or reloaded
+   modules. Nothing would have reported an error.
+
+2. **`_import_python` reused a cached `.pyc`.** It went through the import
+   system's loader, whose cache keys on mtime-to-the-second plus size — so an
+   edit made within a second of the last one, leaving the file the same length,
+   ran the *old* code on reload. Reproduced outside the test suite. A hot reload
+   that runs the code the author just replaced is worse than no hot reload at
+   all. Now compiled from source on every load, and `SyntaxError.lineno` is used
+   as the line fallback so a syntax error reports where.
+
+3. **`all_profiles` raised on a profile file containing a YAML list**, taking
+   down the entire listing — the precise opposite of the documented behaviour
+   that a malformed profile is skipped, not fatal.
+
+4. **`reload` reset every module's `enabled`/`priority` from its manifest**, so
+   creating or reloading one module silently disabled every module the user had
+   turned on. Manifests ship `enabled: false`; the *user* enabled them. The
+   manifest now seeds a module the first time it is seen, and live state
+   survives reloads.
+
+### Security
+
+The three `assert self.registry is not None` narrowing guards were removed.
+Asserts are stripped under `python -O`, which would turn a clear invariant
+violation into an `AttributeError` on `None` several frames from the cause; they
+raise explicitly now. Bandit found them, which is the argument for having it in
+the gate.
+
+The loader's `exec()` is annotated rather than worked around. Executing module
+source *is* the Python tier, MOD-030 states plainly that module code is fully
+trusted, and there is nothing to sandbox here that would not be a sandbox in
+name only. The obligation this creates is documentation, and DOC-002 discharges
+it — `docs/module-authoring.md` leads with the warning.
+
+### Known gaps, deliberately left
+
+- **`Profile.exclusions_add` is parsed and persisted but not applied on
+  activation.** Unwinding exclusions on a profile switch has no defined
+  semantics in the sprint requirements, and inventing them here would be a
+  design decision made by accident.
+- **Module enablement does not survive a daemon restart.** It is registry state,
+  not manifest state. Persisting it means rewriting user-authored `module.yaml`
+  files, which is a design call rather than a bug fix. Worth deciding before
+  v1.0.
+
+**Notes for the next sprint:**
+
+- Sprint 12's authoring UI consumes these routes. `POST /modules` never enables
+  (REQ MOD-003) — the UI must make enabling a visibly separate act, and so must
+  MCP in Sprint 14.
+- The module store is SQLite with a write-through cache so `ctx.store_get` never
+  touches disk on the loop. Sprint 13's session store should follow the same
+  shape rather than inventing a second one.

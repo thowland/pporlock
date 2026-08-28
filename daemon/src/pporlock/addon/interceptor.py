@@ -388,6 +388,11 @@ class Interceptor:
         A whole new Evaluator, not a mutation: an in-flight flow keeps the
         reference it started with, so no locking is needed and no flow can
         observe a half-applied change.
+
+        Everything the outgoing evaluator was configured with carries over. The
+        module registry and the transform registry especially: dropping them
+        here would silently stop every Python hook and every module-registered
+        transform the first time anyone edited a rule.
         """
         self.evaluator = Evaluator(
             ruleset,
@@ -397,6 +402,8 @@ class Interceptor:
             buffer_types=self.evaluator.buffer_types,
             max_buffer_bytes=self.evaluator.max_buffer_bytes,
             offload_threshold=self.evaluator.offload_threshold,
+            transforms=self.evaluator.transforms,
+            registry=self.evaluator.registry,
         )
 
     # -- state -----------------------------------------------------------

@@ -806,3 +806,90 @@ reason, so the phase and ordering are established rather than retrofitted.
   that becomes the hot path; if PRF-002 tightens, index body rules by host.
 - The `matches_everything` flag is computed but not yet surfaced. The UI should
   warn on a rule with an empty match block, since it fires on every flow.
+
+---
+
+## Sprint 08 — Provenance UI
+
+**Branch:** `sprint-08-provenance-ui`
+**Tag:** `sprint-08-complete`
+
+**Requirements delivered:** WUI-004 (flow detail), CAP-013 / DOC-003 (the
+provenance view), EXT-013 (DevTools panel), EXT-014 (jump to module — the
+targets land in Sprint 12), and the first part of WUI-015 (keyboard-navigable
+rows, Escape to close).
+
+**Requirements deferred:** WUI-014 body diff → Sprint 10, when there is a
+transform to diff. CAP-043 unmasking → Sprint 13; masked values render
+correctly today, the reveal control arrives with redaction itself.
+
+**Gate results:**
+- **G1** — exit demo run against live blocked traffic. The panel named the
+  module, the rule, its id, the action, the outcome and duration; called out
+  that the rule short-circuited the flow; expanded the synthesised status,
+  content type, and stub; and carried the streaming note explaining why body
+  transforms could not run. Zero console errors.
+- **G2** — daemon 92.92%, engine unchanged, web 92.9%, extension 93.38%.
+- **G3** — 916 daemon + 189 extension + 212 web + 4 mcp, plus 8 E2E.
+- **G4** — no tests removed.
+- **G5** — clean. Three suppressions, each justified inline: two
+  `security/detect-object-injection` on indexing a label table with a value
+  that comes from a module constant rather than the wire, and one severity map
+  rewritten as a `Map` rather than suppressed, because the rule was right that
+  indexing an object with a wire value is worth avoiding.
+- **G6** — scanners clean. §2.5 areas walked: **redaction correctness** — the
+  UI detects the SPEC-0 §9.1 mask format and never attempts to reconstruct a
+  value, only to display its length and fingerprint.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **Non-applied outcomes are as prominent as applied ones.** This runs against
+   the usual instinct to foreground successes, and it is the point: the view
+   exists to explain why something did *not* happen. A skipped or errored rule
+   is bordered and labelled, never greyed out.
+
+2. **`short_circuited_by` is stated, not inferred.** "An earlier rule ate it" is
+   the single most common confusion when debugging a rule set, so the culprit
+   entry says so in place rather than leaving the reader to work it out from
+   ordering.
+
+3. **The panel and the web UI keep separate label tables.** They are separately
+   built with no shared package, and a panel that silently disagreed with the
+   web UI about what an outcome means would be worse than one that repeats a
+   table. Both suites iterate the full enum from the contract, which is what
+   keeps them honest.
+
+4. **A flags-column fix found by looking at real output.** Blocked flows were
+   also showing MOD, because `modified` was derived from "any module fired". A
+   short-circuited flow was blocked, not modified — and the flags column is
+   precisely how you scan a hundred rows for the one that went wrong, so two
+   flags on one row makes it harder to read. `modified` now means an applied
+   headers or body action; a redirect counts as neither, since it changed where
+   the request went rather than what came back.
+
+5. **`Panel.tsx` and `panel.tsx` are the same file on macOS.** One silently
+   overwrote the other, and the failure surfaced as a nonsensical "module
+   declares X locally but does not export it". Renamed to `PanelView.tsx`. Worth
+   remembering: a case-only filename difference is not a difference here.
+
+6. **Flow detail opens on the provenance tab.** It is the reason the panel
+   exists; making it one click away would be the wrong default.
+
+7. **A streamed response says its body was never buffered**, rather than
+   rendering as an empty body. Those are different facts, and the second is the
+   reason a transform may not have run.
+
+**Notes for the next sprint:**
+
+- Sprint 9 adds `map_local`, `redirect`, and header actions end to end. The
+  evaluator already implements all three; the sprint is the buffering guard's
+  remaining edges plus executor offload.
+- The panel polls every two seconds. SSE with a `tab_id` filter already exists
+  server-side and would be a straight substitution — worth doing when the panel
+  gets its Sprint 15 pass.
+- `FlowDetail` fetches at `bodies` detail on open. With the ring buffer's 512
+  KiB body cap that is bounded, but a session browser showing large recorded
+  bodies should reconsider.
+- The `matches_everything` flag from Sprint 7 is still unsurfaced. The module
+  editor in Sprint 12 should warn on a rule with an empty match block.

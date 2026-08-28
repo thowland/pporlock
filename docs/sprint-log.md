@@ -712,3 +712,97 @@ access. Measurement says otherwise — see decision 3.
 - `chrome.notifications` is still called optionally in the fail-safe trip
   handler without the permission being held, so it silently no-ops. Carry to
   Sprint 15 with the rest of the notification surface.
+
+---
+
+## Sprint 07 — Rules engine and blocking
+
+**Branch:** `sprint-07-rules-engine`
+**Tag:** `sprint-07-complete`
+
+**Requirements delivered:** MOD-010/011 (match criteria, response-side
+validation), MOD-012 (both evaluation semantics), MOD-014 (action parameters
+validated at load), MOD-004 (hot reload via the API), PXY-020 (fixed phase
+order), PXY-025 (regexes compiled once), PXY-026 (time budget), PXY-030/031/032
+(block, stub vs kill, the derivation table), PXY-033 (stub library), PXY-034
+(map_local failing loudly), PXY-021/022 (buffering guard and its provenance),
+CAP-010–013 (provenance throughout).
+
+**Requirements deferred:** the transform registry itself → Sprint 10. Body rules
+match, order, and record correctly today; they record `no_change` with the
+reason, so the phase and ordering are established rather than retrofitted.
+
+**Gate results:**
+- **G1** — exit demo run against a live daemon: a blocked host returns a
+  synthesised script, a blocked pixel a real 1×1 GIF the browser renders, GTM a
+  stub keeping `dataLayer` alive. A page with all three blocked reported
+  "Rendered correctly" with zero console errors. A rule installed through the
+  API took effect on the next request with no restart.
+- **G2** — daemon 93.43%, **engine 98.68%** against the 90% bar (REQ TST-002).
+- **G3** — 911 daemon + 144 extension + 125 web + 4 mcp, plus 8 E2E.
+- **G4** — no tests removed. Three were rewritten because they asserted the old
+  always-buffer behaviour, which the buffering guard correctly replaced; the
+  replacement asserts the new behaviour in both directions (streams when nothing
+  wants the body, buffers when a rule does).
+- **G5** — clean.
+- **G6** — scanners clean. §2.5 areas walked: **path traversal** —
+  `_resolve_asset` refuses absolute paths and resolves symlinks *before* the
+  containment check, with a test that plants a symlink pointing out of the root;
+  **SSRF via redirect** — the action can retarget any host, documented as
+  intended under the trusted-rules model, and the target comes only from the
+  rule, never from response content.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **Sec-Fetch-Dest is only sent on secure contexts.** Measured, not assumed: on
+   a plain-HTTP page Chrome omits the Sec-Fetch headers entirely, so `stub:
+   auto` fell through to 204 and a blocked tracking pixel never rendered.
+   `Accept` is always sent and distinguishes documents, stylesheets, images, and
+   fonts, so it is the fallback. It cannot separate a script from an XHR — both
+   send `*/*` — and that resolves toward script: an empty script body is
+   harmless, and a blocked tracker requested with `*/*` is overwhelmingly a
+   script tag. An explicit `stub:` overrides all of it.
+
+2. **A headers rule spans two phases, and the phase decides what it may match
+   on.** Deriving the phase from the action alone rejected a response-header
+   rule matching on `status`, which is a legitimate and obvious thing to write.
+   The phase is now resolved per rule from the side it declares.
+
+3. **A bad rule set never replaces a good one.** `PUT /rules` compiles before it
+   swaps, so a typo leaves the rules in force untouched rather than emptying
+   them. The swap replaces an immutable snapshot, so an in-flight flow finishes
+   against the rules it started with — which is what removes the need for
+   locking under DD-3.
+
+4. **A broken `rules.yaml` does not stop the daemon.** It reports the failure
+   loudly at startup and runs with no rules. The daemon is still useful for
+   inspection, and the alternative is a user who cannot browse because of a typo.
+
+5. **Rule loading moved off the event loop.** `ASYNC240` flagged filesystem work
+   inside the async runner — precisely what DD-3 exists to prevent. Exclusions
+   and rules are now loaded before the loop is created, where doing it
+   synchronously costs nothing.
+
+6. **`wants_body` drives the buffering guard.** When no enabled rule could
+   produce a body transform for a flow, the response streams regardless of size
+   or type. That is the cheapest optimisation available and applies to the
+   overwhelming majority of flows on any real page — and it is recorded, so a
+   transform that did not run is never silent.
+
+7. **Header rules still run on a short-circuited request.** A rule adding a
+   header the synthesised response should carry is legitimate, and skipping it
+   silently would be surprising.
+
+**Notes for the next sprint:**
+
+- Sprint 8 builds the provenance UI. Everything it renders now exists and is
+  populated: phases, outcomes, note codes, `short_circuited_by`, and the
+  per-rule detail blocks.
+- The `stubs/` directory ships at the repository root and is resolved relative
+  to the package. Packaging in Sprint 16 must include it, or `stub:` by name
+  silently stops working — worth an install test.
+- `RuleSet.wants_body` walks every body rule per request. With a large rule set
+  that becomes the hot path; if PRF-002 tightens, index body rules by host.
+- The `matches_everything` flag is computed but not yet surfaced. The UI should
+  warn on a rule with an empty match block, since it fires on every flow.

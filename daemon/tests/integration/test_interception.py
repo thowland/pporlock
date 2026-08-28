@@ -58,8 +58,10 @@ class ProxyHarness:
         self,
         exclusions: ExclusionList | None = None,
         rules: list[dict[str, Any]] | None = None,
+        asset_root: Any = None,
     ) -> None:
         self.rules = rules or []
+        self.asset_root = asset_root
         self.port = _free_port()
         self.sink = CollectingSink()
         self.interceptor: Interceptor | None = None
@@ -102,6 +104,7 @@ class ProxyHarness:
             evaluator = Evaluator(
                 RuleSet.from_rules(self.rules, module="test"),
                 exclusions=self._exclusions or ExclusionList(),
+                asset_root=self.asset_root,
             )
             self.interceptor = Interceptor(
                 config,

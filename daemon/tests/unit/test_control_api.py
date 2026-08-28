@@ -22,7 +22,10 @@ from pporlock.control.app import (
     ControlApp,
 )
 from pporlock.control.audit import AuditLog
+from pporlock.control.events import EventHub
 from pporlock.engine.exclusions import ExclusionEntry, ExclusionList
+from pporlock.engine.modules.registry import ModuleRegistry
+from pporlock.engine.profiles import ProfileManager
 
 from .test_ring import make_record
 
@@ -547,3 +550,731 @@ class TestRules:
         client.put("/rules", json={"rules": []}, headers=auth(token, "ui"))
         entries, _ = app.audit.entries()
         assert entries[0].action == "put_rules"
+
+
+# -- modules and profiles (REQ API-023, API-024) ---------------------------
+
+MANIFEST = "name: tidy\npporlock_api: '1'\nversion: '1.0.0'\nenabled: true\n"
+BLOCK_MANIFEST = (
+    "name: tidy\npporlock_api: '1'\nversion: '1.0.0'\n"
+    "rules:\n"
+    "  - name: block-ads\n"
+    "    action: block\n"
+    "    match:\n"
+    "      host: ads.example\n"
+)
+
+
+class RecordingHub(EventHub):
+    """An EventHub that remembers what it published.
+
+    A subclass rather than a monkeypatch: EventHub has __slots__, which is the
+    right design for something on the proxy's hot path.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[str, dict[str, Any]]] = []
+
+    def publish(self, event_type, data, record=None):  # type: ignore[no-untyped-def]
+        self.seen.append((event_type, data))
+        return super().publish(event_type, data, record)
+
+
+@pytest.fixture
+def module_root(tmp_path: Path) -> Path:
+    root = tmp_path / "modules"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def modular(tmp_path: Path, module_root: Path) -> ControlApp:
+    """A ControlApp with a real module registry and profile store on disk."""
+    config = Config()
+    config.state_dir = str(tmp_path)
+    config.modules.root = str(module_root)
+    registry = ModuleRegistry(module_root, store_path=tmp_path / "module-store.db")
+    registry.reload()
+    return ControlApp(
+        config,
+        ring=RingBuffer(),
+        interceptor=Interceptor(config),
+        registry=registry,
+        profiles=ProfileManager(tmp_path / "profiles"),
+        events=RecordingHub(),
+    )
+
+
+@pytest.fixture
+def mclient(modular: ControlApp) -> TestClient:
+    return TestClient(modular.asgi)
+
+
+@pytest.fixture
+def mtoken(modular: ControlApp) -> str:
+    return modular.tokens.ensure()
+
+
+def write_module_dir(root: Path, name: str, manifest: str, python: str | None = None) -> Path:
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "module.yaml").write_text(manifest)
+    if python is not None:
+        (path / "module.py").write_text(python)
+    return path
+
+
+class TestModuleListing:
+    """REQ API-023 — what is installed, and what state each module is in."""
+
+    def test_an_empty_root_lists_nothing(self, mclient: TestClient, mtoken: str) -> None:
+        assert mclient.get("/modules", headers=auth(mtoken)).json() == []
+
+    def test_a_module_is_listed_with_its_state(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp, module_root: Path
+    ) -> None:
+        write_module_dir(module_root, "tidy", MANIFEST)
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        listed = mclient.get("/modules", headers=auth(mtoken)).json()
+        assert [m["name"] for m in listed] == ["tidy"]
+        assert listed[0]["state"] == "loaded"
+
+    def test_a_module_that_failed_to_load_is_still_listed(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """Omitting it is how an author concludes the daemon never saw their
+        module at all (REQ MOD-005)."""
+        write_module_dir(
+            module_root,
+            "boom",
+            MANIFEST.replace("tidy", "boom"),
+            python="raise ValueError('nope')\n",
+        )
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        listed = mclient.get("/modules", headers=auth(mtoken)).json()
+        assert listed[0]["state"] == "load_error"
+        assert listed[0]["error"]["code"] == "module_import_failed"
+
+    def test_the_detail_view_returns_the_source(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """The editor needs the bytes on disk, not a re-serialisation of what we
+        parsed — a round trip would quietly reformat the author's file."""
+        write_module_dir(module_root, "tidy", MANIFEST, python="X = 1\n")
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        payload = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        assert payload["files"]["module.yaml"] == MANIFEST
+        assert payload["files"]["module.py"] == "X = 1\n"
+
+    def test_the_detail_view_lists_assets_without_returning_them(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """Assets are arbitrary bytes of arbitrary size; a listing is what an
+        editor needs to show a tree."""
+        path = write_module_dir(module_root, "tidy", MANIFEST)
+        (path / "assets" / "sub").mkdir(parents=True)
+        (path / "assets" / "sub" / "logo.png").write_bytes(b"\x89PNG")
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        payload = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        assert payload["assets"] == ["sub/logo.png"]
+
+    def test_an_unknown_module_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.get("/modules/nope", headers=auth(mtoken))
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
+
+    def test_state_counts_the_modules(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """/state is what the UI polls, so it carries the summary rather than
+        making every client list and count."""
+        write_module_dir(module_root, "tidy", MANIFEST)
+        write_module_dir(
+            module_root, "quiet", MANIFEST.replace("tidy", "quiet").replace("true", "false")
+        )
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        summary = mclient.get("/state", headers=auth(mtoken)).json()["modules"]
+        assert summary == {"loaded": 2, "enabled": 1, "quarantined": 0, "errors": []}
+
+
+class TestCreatingAModule:
+    """REQ MCP-030 — writing a module is not deploying it."""
+
+    def create(self, client: TestClient, token: str, manifest: str = MANIFEST) -> Any:
+        return client.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": manifest}},
+            headers=auth(token),
+        )
+
+    def test_creating_returns_the_new_module(self, mclient: TestClient, mtoken: str) -> None:
+        response = self.create(mclient, mtoken)
+        assert response.status_code == 201
+        assert response.json()["name"] == "tidy"
+
+    def test_creating_writes_the_files_to_disk(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        self.create(mclient, mtoken)
+        assert (module_root / "tidy" / "module.yaml").read_text() == MANIFEST
+
+    def test_creating_never_enables_even_when_the_manifest_asks(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """The one review step an agent-authored module gets is being read
+        before it touches traffic. Honouring `enabled: true` here removes it."""
+        assert self.create(mclient, mtoken).json()["enabled"] is False
+
+    def test_a_created_module_contributes_no_rules_until_enabled(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        self.create(mclient, mtoken, BLOCK_MANIFEST)
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 0
+
+    def test_creating_over_an_existing_module_is_refused(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """POST creates. Silently replacing would let an agent overwrite a
+        module the user wrote."""
+        self.create(mclient, mtoken)
+        assert self.create(mclient, mtoken).status_code == 400
+
+    def test_a_path_shaped_name_is_refused(self, mclient: TestClient, mtoken: str) -> None:
+        """The name becomes a directory under the module root."""
+        response = mclient.post(
+            "/modules",
+            json={"name": "../escape", "files": {"module.yaml": MANIFEST}},
+            headers=auth(mtoken),
+        )
+        assert response.status_code == 400
+
+    def test_a_file_the_loader_never_reads_is_refused(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """A file that does nothing is a file whose author believes it does
+        something."""
+        response = mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": MANIFEST, "setup.py": "x"}},
+            headers=auth(mtoken),
+        )
+        assert response.status_code == 400
+        assert "setup.py" in response.json()["error"]["message"]
+
+    def test_a_manifest_is_required(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.py": "X = 1\n"}},
+            headers=auth(mtoken),
+        )
+        assert response.status_code == 400
+
+    def test_files_must_not_be_empty(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.post(
+            "/modules", json={"name": "tidy", "files": {}}, headers=auth(mtoken)
+        )
+        assert response.status_code == 400
+
+    def test_a_module_that_does_not_compile_is_created_with_its_error(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """Written but not loaded: the author needs the file on disk to fix, and
+        the error to know what to fix."""
+        response = self.create(mclient, mtoken, "name: tidy\npporlock_api: '99'\n")
+        assert response.status_code == 201
+        assert response.json()["state"] == "load_error"
+        assert response.json()["error"]["code"] == "module_api_unsupported"
+
+    def test_creating_is_audited(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MCP-031 — an agent that can write modules is one whose writes
+        have to be reviewable afterwards."""
+        self.create(mclient, mtoken)
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "write_module"
+        assert entries[0].detail["module"] == "tidy"
+
+
+class TestReplacingAModule:
+    def setup_module_files(self, client: TestClient, token: str, python: str | None = None) -> None:
+        files = {"module.yaml": MANIFEST}
+        if python is not None:
+            files["module.py"] = python
+        client.post("/modules", json={"name": "tidy", "files": files}, headers=auth(token))
+
+    def test_put_rewrites_the_manifest(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        self.setup_module_files(mclient, mtoken)
+        mclient.put(
+            "/modules/tidy",
+            json={"files": {"module.yaml": BLOCK_MANIFEST}},
+            headers=auth(mtoken),
+        )
+        assert (module_root / "tidy" / "module.yaml").read_text() == BLOCK_MANIFEST
+
+    def test_put_removes_a_file_the_caller_left_out(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """A replace that left the old module.py behind would keep running code
+        the author believes they deleted."""
+        self.setup_module_files(mclient, mtoken, python="X = 1\n")
+        mclient.put(
+            "/modules/tidy", json={"files": {"module.yaml": MANIFEST}}, headers=auth(mtoken)
+        )
+        assert not (module_root / "tidy" / "module.py").exists()
+
+    def test_put_never_enables_a_disabled_module(self, mclient: TestClient, mtoken: str) -> None:
+        """REQ MCP-030 — enablement is API state, not manifest state. An update
+        that flipped a module on would be a write turning into a deployment."""
+        self.setup_module_files(mclient, mtoken)
+        response = mclient.put(
+            "/modules/tidy", json={"files": {"module.yaml": MANIFEST}}, headers=auth(mtoken)
+        )
+        assert response.json()["enabled"] is False
+
+    def test_put_leaves_an_enabled_module_enabled(self, mclient: TestClient, mtoken: str) -> None:
+        """Editing a running module should not turn it off underneath the user."""
+        self.setup_module_files(mclient, mtoken)
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        response = mclient.put(
+            "/modules/tidy", json={"files": {"module.yaml": MANIFEST}}, headers=auth(mtoken)
+        )
+        assert response.json()["enabled"] is True
+
+    def test_put_reloads_so_the_change_takes_effect(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MOD-004 — no daemon restart."""
+        self.setup_module_files(mclient, mtoken)
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        mclient.put(
+            "/modules/tidy", json={"files": {"module.yaml": BLOCK_MANIFEST}}, headers=auth(mtoken)
+        )
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 1
+
+
+class TestModulePatching:
+    """Enable, disable, reprioritise. Nothing that could change behaviour."""
+
+    @pytest.fixture(autouse=True)
+    def _installed(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": BLOCK_MANIFEST}},
+            headers=auth(mtoken),
+        )
+
+    def test_enabling_puts_the_modules_rules_in_force(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        response = mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        assert response.json()["enabled"] is True
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 1
+
+    def test_disabling_withdraws_them_again(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        mclient.patch("/modules/tidy", json={"enabled": False}, headers=auth(mtoken))
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 0
+
+    def test_priority_is_settable(self, mclient: TestClient, mtoken: str) -> None:
+        """REQ MOD-023 — priority is how a user resolves a conflict between two
+        modules that both want to act on the same flow."""
+        response = mclient.patch("/modules/tidy", json={"priority": 5}, headers=auth(mtoken))
+        assert response.json()["priority"] == 5
+
+    def test_a_priority_change_reorders_the_rules_in_force(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.post(
+            "/modules",
+            json={
+                "name": "other",
+                "files": {"module.yaml": BLOCK_MANIFEST.replace("tidy", "other")},
+            },
+            headers=auth(mtoken),
+        )
+        for name in ("tidy", "other"):
+            mclient.patch(f"/modules/{name}", json={"enabled": True}, headers=auth(mtoken))
+        mclient.patch("/modules/other", json={"priority": 1}, headers=auth(mtoken))
+        assert modular.interceptor is not None
+        ordered = [r.module for r in modular.interceptor.evaluator.ruleset.short_circuit]
+        assert ordered == ["other", "tidy"]
+
+    def test_anything_but_enabled_and_priority_is_refused(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """A PATCH that could rewrite behaviour would bypass the reload that
+        makes a change visible in the module's load state."""
+        response = mclient.patch("/modules/tidy", json={"rules": []}, headers=auth(mtoken))
+        assert response.status_code == 400
+        assert "rules" in response.json()["error"]["message"]
+
+    def test_a_non_numeric_priority_is_refused(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.patch("/modules/tidy", json={"priority": "high"}, headers=auth(mtoken))
+        assert response.status_code == 400
+
+    def test_patching_an_unknown_module_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.patch("/modules/nope", json={"enabled": True}, headers=auth(mtoken))
+        assert response.status_code == 404
+
+    def test_enabling_is_audited(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MCP-031 — enabling a module changes what happens to traffic."""
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken, "mcp"))
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "patch_module"
+        assert entries[0].origin == "mcp"
+        assert entries[0].detail["enabled"] is True
+
+    def test_enabling_tells_connected_clients(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """A UI showing a module as off after someone else turned it on is
+        showing a lie."""
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        hub = modular.events
+        assert isinstance(hub, RecordingHub)
+        assert any(t == "state.changed" and "modules" in d for t, d in hub.seen)
+
+
+class TestDeletingAModule:
+    def test_deleting_removes_the_directory(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": MANIFEST}},
+            headers=auth(mtoken),
+        )
+        assert mclient.delete("/modules/tidy", headers=auth(mtoken)).status_code == 204
+        assert not (module_root / "tidy").exists()
+
+    def test_a_deleted_modules_rules_stop_applying(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": BLOCK_MANIFEST}},
+            headers=auth(mtoken),
+        )
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        mclient.delete("/modules/tidy", headers=auth(mtoken))
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 0
+
+    def test_deleting_an_unknown_module_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        assert mclient.delete("/modules/nope", headers=auth(mtoken)).status_code == 404
+
+    def test_deleting_is_audited(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": MANIFEST}},
+            headers=auth(mtoken),
+        )
+        mclient.delete("/modules/tidy", headers=auth(mtoken))
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "delete_module"
+
+
+class TestModuleReload:
+    def test_reload_picks_up_a_module_written_outside_the_api(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        """Editing a module in an editor is the normal way to write one; the
+        API is not the only door."""
+        write_module_dir(module_root, "tidy", MANIFEST)
+        payload = mclient.post("/modules/reload", headers=auth(mtoken)).json()
+        assert payload["loaded"] == 1
+
+    def test_reload_reports_load_errors_with_the_module_named(
+        self, mclient: TestClient, mtoken: str, module_root: Path
+    ) -> None:
+        write_module_dir(
+            module_root,
+            "boom",
+            MANIFEST.replace("tidy", "boom"),
+            python="raise ValueError('nope')\n",
+        )
+        payload = mclient.post("/modules/reload", headers=auth(mtoken)).json()
+        assert payload["errors"][0]["module"] == "boom"
+        assert payload["errors"][0]["trace"]
+
+    def test_reload_is_not_read_as_a_module_named_reload(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """Route order: /modules/{name} would happily match 'reload'."""
+        assert mclient.post("/modules/reload", headers=auth(mtoken)).status_code == 200
+
+    def test_reload_is_audited(self, mclient: TestClient, mtoken: str, modular: ControlApp) -> None:
+        mclient.post("/modules/reload", headers=auth(mtoken))
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "reload_modules"
+
+
+class TestModuleRoutesWithoutARegistry:
+    """A daemon with no module root is a legitimate state, not an error one."""
+
+    def test_listing_is_empty_rather_than_failing(self, client: TestClient, token: str) -> None:
+        assert client.get("/modules", headers=auth(token)).json() == []
+
+    def test_a_named_module_is_404(self, client: TestClient, token: str) -> None:
+        assert client.get("/modules/tidy", headers=auth(token)).status_code == 404
+
+    def test_creating_is_404_rather_than_writing_somewhere_arbitrary(
+        self, client: TestClient, token: str
+    ) -> None:
+        response = client.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": MANIFEST}},
+            headers=auth(token),
+        )
+        assert response.status_code == 404
+
+    def test_reload_is_404(self, client: TestClient, token: str) -> None:
+        assert client.post("/modules/reload", headers=auth(token)).status_code == 404
+
+    def test_state_still_reports_a_module_summary(self, client: TestClient, token: str) -> None:
+        assert client.get("/state", headers=auth(token)).json()["modules"]["loaded"] == 0
+
+
+class TestProfileRoutes:
+    """REQ API-024, MOD-040-044."""
+
+    def test_the_default_profile_is_always_listed(self, mclient: TestClient, mtoken: str) -> None:
+        """REQ MOD-041 — there is never a state with no profile at all."""
+        assert [p["name"] for p in mclient.get("/profiles", headers=auth(mtoken)).json()] == [
+            "default"
+        ]
+
+    def test_creating_a_profile(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.post(
+            "/profiles",
+            json={"name": "debug", "modules": ["tidy"], "description": "for site x"},
+            headers=auth(mtoken),
+        )
+        assert response.status_code == 201
+        assert response.json()["modules"] == ["tidy"]
+
+    def test_a_created_profile_persists(
+        self, mclient: TestClient, mtoken: str, tmp_path: Path
+    ) -> None:
+        """Profiles are settings, not session state."""
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        assert (tmp_path / "profiles" / "debug.yaml").is_file()
+
+    def test_an_unknown_profile_key_is_refused(self, mclient: TestClient, mtoken: str) -> None:
+        """Strict for the same reason module manifests are: a silently ignored
+        key is a setting its author believes is in force."""
+        response = mclient.post(
+            "/profiles", json={"name": "debug", "modules_add": []}, headers=auth(mtoken)
+        )
+        assert response.status_code == 400
+
+    def test_writing_the_default_profile_is_refused(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.post("/profiles", json={"name": "default"}, headers=auth(mtoken))
+        assert response.status_code == 400
+
+    def test_reading_one_profile(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        assert mclient.get("/profiles/debug", headers=auth(mtoken)).json()["name"] == "debug"
+
+    def test_an_unknown_profile_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        assert mclient.get("/profiles/nope", headers=auth(mtoken)).status_code == 404
+
+    def test_put_replaces_the_profile(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post("/profiles", json={"name": "debug", "modules": ["a"]}, headers=auth(mtoken))
+        response = mclient.put(
+            "/profiles/debug", json={"name": "debug", "modules": ["b"]}, headers=auth(mtoken)
+        )
+        assert response.json()["modules"] == ["b"]
+
+    def test_the_path_names_the_profile_a_disagreeing_body_does_not(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """Otherwise a PUT to one profile could quietly create another."""
+        mclient.put("/profiles/debug", json={"name": "elsewhere"}, headers=auth(mtoken))
+        assert mclient.get("/profiles/elsewhere", headers=auth(mtoken)).status_code == 404
+        assert mclient.get("/profiles/debug", headers=auth(mtoken)).status_code == 200
+
+    def test_deleting_a_profile(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        assert mclient.delete("/profiles/debug", headers=auth(mtoken)).status_code == 204
+        assert mclient.get("/profiles/debug", headers=auth(mtoken)).status_code == 404
+
+    def test_deleting_the_default_profile_is_a_conflict(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """REQ MOD-041 — it conflicts with an invariant, rather than being a
+        malformed request the caller could rephrase."""
+        response = mclient.delete("/profiles/default", headers=auth(mtoken))
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "config_invalid"
+
+    def test_deleting_an_unknown_profile_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        assert mclient.delete("/profiles/nope", headers=auth(mtoken)).status_code == 404
+
+    def test_saving_is_audited(self, mclient: TestClient, mtoken: str, modular: ControlApp) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken, "ui"))
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "save_profile"
+
+
+class TestProfileActivation:
+    """REQ MOD-042 — a profile switch is a working context switch."""
+
+    @pytest.fixture(autouse=True)
+    def _modules(self, mclient: TestClient, mtoken: str) -> None:
+        for name in ("tidy", "other"):
+            mclient.post(
+                "/modules",
+                json={
+                    "name": name,
+                    "files": {"module.yaml": BLOCK_MANIFEST.replace("tidy", name)},
+                },
+                headers=auth(mtoken),
+            )
+            mclient.patch(f"/modules/{name}", json={"enabled": True}, headers=auth(mtoken))
+
+    def test_activating_returns_the_new_state(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        payload = mclient.post("/profiles/debug/activate", headers=auth(mtoken)).json()
+        assert payload["active_profile"] == "debug"
+
+    def test_activating_narrows_the_rules_to_the_profiles_modules(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MOD-043 — this is the whole point of a profile: the same
+        installed modules, a different subset running."""
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 2
+        mclient.post("/profiles", json={"name": "debug", "modules": ["tidy"]}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        assert [r.module for r in modular.interceptor.evaluator.ruleset.short_circuit] == ["tidy"]
+
+    def test_the_profiles_dev_toggles_come_with_it(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """Applying them separately is the step an operator forgets, and then
+        spends an hour wondering why the page is still cached."""
+        mclient.post(
+            "/profiles",
+            json={"name": "debug", "dev_toggles": {"anticache": True}},
+            headers=auth(mtoken),
+        )
+        payload = mclient.post("/profiles/debug/activate", headers=auth(mtoken)).json()
+        assert payload["dev_toggles"]["anticache"] is True
+        assert modular.interceptor is not None
+        assert modular.interceptor.dev_toggles["anticache"] is True
+
+    def test_switching_back_to_default_clears_the_toggles_again(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """A context that outlived the profile it came from is a setting nobody
+        can account for."""
+        mclient.post(
+            "/profiles",
+            json={"name": "debug", "dev_toggles": {"anticache": True}},
+            headers=auth(mtoken),
+        )
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        payload = mclient.post("/profiles/default/activate", headers=auth(mtoken)).json()
+        assert payload["dev_toggles"]["anticache"] is False
+
+    def test_switching_back_to_default_restores_every_enabled_module(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.post("/profiles", json={"name": "debug", "modules": ["tidy"]}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        mclient.post("/profiles/default/activate", headers=auth(mtoken))
+        assert modular.interceptor is not None
+        assert len(modular.interceptor.evaluator.ruleset) == 2
+
+    def test_activating_an_unknown_profile_is_404(self, mclient: TestClient, mtoken: str) -> None:
+        assert mclient.post("/profiles/nope/activate", headers=auth(mtoken)).status_code == 404
+
+    def test_a_failed_activation_leaves_the_previous_profile_in_force(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        mclient.post("/profiles/nope/activate", headers=auth(mtoken))
+        assert mclient.get("/state", headers=auth(mtoken)).json()["active_profile"] == "debug"
+
+    def test_activation_is_audited(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MCP-031 — a profile switch changes what happens to traffic."""
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken, "mcp"))
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "activate_profile"
+        assert entries[0].detail["profile"] == "debug"
+
+    def test_activation_tells_connected_clients(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.post("/profiles", json={"name": "debug"}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        hub = modular.events
+        assert isinstance(hub, RecordingHub)
+        assert ("state.changed", {"active_profile": "debug"}) in hub.seen
+
+    def test_deleting_the_active_profile_falls_back_to_default(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """Otherwise the daemon points at a profile that no longer exists."""
+        mclient.post("/profiles", json={"name": "debug", "modules": []}, headers=auth(mtoken))
+        mclient.post("/profiles/debug/activate", headers=auth(mtoken))
+        mclient.delete("/profiles/debug", headers=auth(mtoken))
+        assert mclient.get("/state", headers=auth(mtoken)).json()["active_profile"] == "default"
+
+
+class TestProfileRoutesWithoutAStore:
+    def test_listing_is_empty_rather_than_failing(self, client: TestClient, token: str) -> None:
+        assert client.get("/profiles", headers=auth(token)).json() == []
+
+    def test_a_named_profile_is_404(self, client: TestClient, token: str) -> None:
+        assert client.get("/profiles/default", headers=auth(token)).status_code == 404
+
+    def test_activation_is_404(self, client: TestClient, token: str) -> None:
+        assert client.post("/profiles/default/activate", headers=auth(token)).status_code == 404
+
+
+class TestModuleAndProfileRoutesAreGuarded:
+    """The security layer applies to the routes that can change behaviour."""
+
+    def test_listing_modules_needs_a_token(self, mclient: TestClient) -> None:
+        assert mclient.get("/modules").status_code == 401
+
+    def test_creating_a_module_needs_the_client_header(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """REQ API-013 — a page you are visiting must not be able to install a
+        module on your proxy."""
+        response = mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": MANIFEST}},
+            headers={"Authorization": f"Bearer {mtoken}"},
+        )
+        assert response.status_code == 403
+
+    def test_activating_a_profile_from_a_web_page_is_refused(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        response = mclient.post(
+            "/profiles/default/activate",
+            headers={**auth(mtoken), "Origin": "https://evil.example"},
+        )
+        assert response.status_code == 403

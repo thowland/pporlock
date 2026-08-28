@@ -9,7 +9,10 @@ holds.
 from __future__ import annotations
 
 import asyncio
+import re
+import shutil
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from starlette.applications import Starlette
@@ -23,9 +26,22 @@ from starlette.staticfiles import StaticFiles
 from ..capture.attribution import AttributionIndex, coverage_of, entry_from_dict
 from ..capture.filters import FlowFilter
 from ..config import Config
+from ..engine.modules.loader import (
+    ASSETS_DIR,
+    MANIFEST_NAME,
+    MODULE_NAME_PATTERN,
+    PYTHON_NAME,
+)
+from ..engine.profiles import DEFAULT_PROFILE, Profile
 from ..engine.rules_file import rules_to_dicts
 from ..engine.ruleset import RuleSet
-from ..errors import AuthError, PairingError, PporlockError, RuleValidationError
+from ..errors import (
+    AuthError,
+    ConfigError,
+    PairingError,
+    PporlockError,
+    RuleValidationError,
+)
 from .audit import AuditLog
 from .auth import (
     CLIENT_HEADER,
@@ -47,6 +63,8 @@ from .serialize import (
 if TYPE_CHECKING:
     from ..addon.interceptor import Interceptor
     from ..capture.ring import RingBuffer
+    from ..engine.modules.registry import ModuleRegistry, ReloadResult
+    from ..engine.profiles import ProfileManager
 
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -76,7 +94,27 @@ PUBLIC_ROUTES: frozenset[str] = frozenset({"/state/health", "/pair"})
 #: Routes that touch the filesystem, SQLite, or module import. These MUST
 #: offload to the executor: on the proxy's own event loop, blocking here stalls
 #: every connection the browser has open (SPEC-1 §7.1).
-OFFLOAD_ROUTES: frozenset[str] = frozenset({"/config", "/"})
+#:
+#: Classification is per path, not per method, because a path is what the
+#: router knows. A path whose mutating methods write files is listed here even
+#: where its GET only reads memory.
+OFFLOAD_ROUTES: frozenset[str] = frozenset(
+    {
+        "/config",
+        "/",
+        "/modules",
+        "/modules/reload",
+        "/modules/{name}",
+        "/profiles",
+        "/profiles/{name}",
+        "/profiles/{name}/activate",
+    }
+)
+
+#: Files a module write may contain. Anything else is refused rather than
+#: written: a file the loader never reads is a file whose author believes it
+#: does something it does not.
+WRITABLE_MODULE_FILES: frozenset[str] = frozenset({MANIFEST_NAME, PYTHON_NAME})
 
 #: Path prefixes served without a token. The web UI's own assets: the page has
 #: to load before it can present a token, and the assets are ours, not data.
@@ -85,6 +123,47 @@ PUBLIC_PREFIXES: tuple[str, ...] = ("/assets/", "/favicon", "/vite.svg")
 
 def error_response(exc: PporlockError, status: int) -> JSONResponse:
     return JSONResponse({"error": exc.to_dict()}, status_code=status)
+
+
+def _read_module_files(path: Path) -> dict[str, Any]:
+    """A module's source and its asset listing, for the editor.
+
+    Assets are listed rather than returned: they are arbitrary bytes of
+    arbitrary size, and a listing is what an editor needs to show a tree.
+    """
+    files = {
+        name: (path / name).read_text()
+        for name in sorted(WRITABLE_MODULE_FILES)
+        if (path / name).is_file()
+    }
+    assets_dir = path / ASSETS_DIR
+    assets = (
+        sorted(str(p.relative_to(assets_dir)) for p in assets_dir.rglob("*") if p.is_file())
+        if assets_dir.is_dir()
+        else []
+    )
+    return {"files": files, "assets": assets}
+
+
+def _remove_module_dir(directory: Path) -> None:
+    """Delete a module's directory. Already absent counts as done — the caller
+    asked for it to be gone, and it is."""
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def _write_module_files(directory: Path, files: dict[str, str]) -> None:
+    """Write a module's files, removing any the caller left out.
+
+    A replace that left the old ``module.py`` behind would keep running code the
+    author believes they deleted.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in sorted(WRITABLE_MODULE_FILES):
+        target = directory / name
+        if name in files:
+            target.write_text(str(files[name]))
+        elif target.is_file():
+            target.unlink()
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
@@ -151,14 +230,19 @@ class ControlApp:
         pairing: PairingWindow | None = None,
         audit: AuditLog | None = None,
         events: EventHub | None = None,
+        registry: ModuleRegistry | None = None,
+        profiles: ProfileManager | None = None,
         static_dir: Any = None,
         version: str = "0.1.0",
     ) -> None:
-        from pathlib import Path
-
         self.config = config
         self.ring = ring
         self.interceptor = interceptor
+        # Both optional: the CLI wires them, but a daemon with no module root —
+        # and every test that only cares about flows — is a legitimate state,
+        # and the module routes answer "nothing here" rather than failing.
+        self.registry = registry
+        self.profiles = profiles
         self.version = version
         self.tokens = tokens or TokenStore(Path(config.state_dir))
         self.policy = policy or OriginPolicy(config.control.listen_host, config.control.listen_port)
@@ -172,7 +256,7 @@ class ControlApp:
         # at startup that does not yet exist is worse than no path at all.
         self.tokens.ensure()
         self.dev_toggles = {"anticache": False, "anticomp": False}
-        self.active_profile = "default"
+        self.active_profile = profiles.active_name if profiles else DEFAULT_PROFILE
         self.asgi = self._build()
 
     # -- helpers ---------------------------------------------------------
@@ -180,6 +264,76 @@ class ControlApp:
     async def offload(self, fn: Callable[..., Any], *args: Any) -> Any:
         """Run blocking work off the proxy's event loop (REQ API-002)."""
         return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+    @staticmethod
+    def _not_found(message: str) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"code": "not_found", "message": message, "detail": {}}},
+            status_code=404,
+        )
+
+    def _registry_or_raise(self) -> ModuleRegistry:
+        """The registry, or a loud failure.
+
+        Not an ``assert``: asserts are stripped under ``python -O``, which would
+        turn this invariant into an ``AttributeError`` on ``None`` several
+        frames away from the cause. Every public caller checks for ``None`` and
+        returns 404 first, so reaching here means a route was wired up without
+        that check — a programming error, and it should say so.
+        """
+        if self.registry is None:
+            raise RuntimeError("module route reached with no registry configured")
+        return self.registry
+
+    def _profiles_or_raise(self) -> ProfileManager:
+        """The profile store, or a loud failure. See _registry_or_raise."""
+        if self.profiles is None:
+            raise RuntimeError("profile route reached with no profile store configured")
+        return self.profiles
+
+    def _client(self, request: Request) -> str:
+        return str(request.scope.get("pporlock_client", "cli"))
+
+    def _module_summary(self) -> dict[str, Any]:
+        modules = self.registry.modules if self.registry is not None else ()
+        return {
+            "loaded": len(modules),
+            "enabled": sum(1 for m in modules if m.enabled),
+            "quarantined": sum(1 for m in modules if m.state == "quarantined"),
+            "errors": [m.error.to_dict() | {"module": m.name} for m in modules if m.error],
+        }
+
+    def _module_dir(self, name: str) -> Path:
+        """The directory a module named ``name`` lives in.
+
+        The name is validated against the loader's own pattern before it is
+        joined to the root, which is also what keeps ``../`` out of a path the
+        caller supplies.
+        """
+        if not re.match(MODULE_NAME_PATTERN, name):
+            raise ConfigError(f"{name!r} is not a valid module name", module=name)
+        return Path(self.config.modules.root) / name
+
+    def reload_modules(self) -> ReloadResult:
+        """Rebuild the module set from disk. Blocking — always offloaded."""
+        registry = self._registry_or_raise()
+        transforms = self.interceptor.evaluator.transforms if self.interceptor else None
+        return registry.reload(transforms, self.active_profile)
+
+    def apply_modules(self) -> None:
+        """Install the active modules' rules on the running proxy.
+
+        A whole new snapshot, so an in-flight flow finishes against the module
+        set it started with (REQ MOD-004). The active profile narrows which
+        modules contribute (REQ MOD-043).
+        """
+        if self.registry is None or self.interceptor is None:
+            return
+        module_filter = self.profiles.module_filter() if self.profiles else None
+        self.interceptor.replace_ruleset(self.registry.build_ruleset(module_filter))
+        # The evaluator interleaves Python hooks with declarative rules, so it
+        # needs the registry as well as the rules built from it (REQ MOD-023).
+        self.interceptor.evaluator.registry = self.registry
 
     def _state_payload(self) -> dict[str, Any]:
         from mitmproxy import version as mitm_version
@@ -200,7 +354,7 @@ class ControlApp:
             },
             "active_profile": self.active_profile,
             "dev_toggles": dict(self.dev_toggles),
-            "modules": {"loaded": 0, "enabled": 0, "quarantined": 0, "errors": []},
+            "modules": self._module_summary(),
             "capture": {
                 "ring_flows": stats.flows,
                 "ring_bytes": stats.bytes,
@@ -255,10 +409,7 @@ class ControlApp:
         flow_id = request.path_params["flow_id"]
         record = self.ring.get(flow_id)
         if record is None:
-            return JSONResponse(
-                {"error": {"code": "not_found", "message": f"no flow {flow_id}", "detail": {}}},
-                status_code=404,
-            )
+            return self._not_found(f"no flow {flow_id}")
         detail = parse_detail(request.query_params.get("detail"), DEFAULT_ITEM_DETAIL)
         return JSONResponse(serialize_flow(record, detail))
 
@@ -347,6 +498,243 @@ class ControlApp:
         )
         self.events.publish("state.changed", {"rules": len(ruleset)})
         return JSONResponse({"rules": rules_to_dicts(ruleset), "count": len(ruleset)})
+
+    # -- modules (REQ API-023) -------------------------------------------
+
+    async def get_modules(self, _: Request) -> JSONResponse:
+        """Every module the daemon knows about, loaded or failed.
+
+        Failures are listed rather than omitted: a module missing from the list
+        because it would not parse is how an author concludes the daemon never
+        saw it (REQ MOD-005).
+        """
+        if self.registry is None:
+            return JSONResponse([])
+        return JSONResponse([m.to_dict() for m in self.registry.modules])
+
+    async def get_module(self, request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        module = self.registry.get(name) if self.registry is not None else None
+        if module is None:
+            return self._not_found(f"no module {name}")
+        payload = module.to_dict()
+        payload.update(await self.offload(_read_module_files, module.path))
+        return JSONResponse(payload)
+
+    async def post_modules(self, request: Request) -> JSONResponse:
+        """Create a module — disabled (REQ MCP-030).
+
+        A module that ran the moment it was written would make "write it, then
+        read what it does before letting it near your traffic" impossible, which
+        is the one review step an agent-authored module gets.
+        """
+        if self.registry is None:
+            return self._not_found("no module registry is configured")
+        body = await request.json()
+        name = str(body.get("name") or "")
+        if self.registry.get(name) is not None:
+            raise ConfigError(f"module {name!r} already exists", module=name)
+        return await self._install_module(
+            request, name, body.get("files"), enabled=False, status=201
+        )
+
+    async def put_module(self, request: Request) -> JSONResponse:
+        """Replace a module's files. Never enables it (REQ MCP-030).
+
+        Enablement is API state, not manifest state: an update that flipped a
+        module on because the new manifest said ``enabled: true`` would be a
+        write turning into a deployment.
+        """
+        if self.registry is None:
+            return self._not_found("no module registry is configured")
+        name = request.path_params["name"]
+        existing = self.registry.get(name)
+        body = await request.json()
+        return await self._install_module(
+            request,
+            name,
+            body.get("files"),
+            enabled=bool(existing.enabled) if existing else False,
+            status=200,
+        )
+
+    async def _install_module(
+        self, request: Request, name: str, files: Any, *, enabled: bool, status: int
+    ) -> JSONResponse:
+        registry = self._registry_or_raise()
+        directory = self._module_dir(name)
+        if not isinstance(files, dict) or not files:
+            raise ConfigError("'files' must be a non-empty mapping of filename to contents")
+        unknown = set(files) - WRITABLE_MODULE_FILES
+        if unknown:
+            raise ConfigError(f"cannot write {', '.join(sorted(unknown))}", module=name)
+        if MANIFEST_NAME not in files:
+            raise ConfigError(f"{MANIFEST_NAME} is required", module=name)
+
+        await self.offload(_write_module_files, directory, dict(files))
+        await self.offload(self.reload_modules)
+        registry.set_enabled(name, enabled)
+        self.apply_modules()
+
+        module = registry.get(name)
+        if module is None:
+            return self._not_found(f"no module {name}")
+        self.audit.record(self._client(request), "write_module", module=name, enabled=enabled)
+        self.events.publish("state.changed", {"modules": self._module_summary()})
+        return JSONResponse(module.to_dict(), status_code=status)
+
+    async def patch_module(self, request: Request) -> JSONResponse:
+        """Set enabled and/or priority. Nothing else.
+
+        Narrow on purpose: everything else about a module lives in files, and a
+        PATCH that could rewrite behaviour would bypass the reload that makes a
+        change visible in the module's load state.
+        """
+        name = request.path_params["name"]
+        module = self.registry.get(name) if self.registry is not None else None
+        if module is None or self.registry is None:
+            return self._not_found(f"no module {name}")
+
+        body = await request.json()
+        unknown = set(body) - {"enabled", "priority"}
+        if unknown:
+            raise ConfigError(f"cannot patch {', '.join(sorted(unknown))}", module=name)
+
+        if "enabled" in body:
+            self.registry.set_enabled(name, bool(body["enabled"]))
+        if "priority" in body:
+            try:
+                self.registry.set_priority(name, int(body["priority"]))
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(f"priority must be an integer: {body['priority']!r}") from exc
+
+        self.apply_modules()
+        # REQ MCP-031 — enabling a module changes what happens to traffic, so
+        # who did it and when is recorded.
+        self.audit.record(
+            self._client(request),
+            "patch_module",
+            module=name,
+            enabled=module.enabled,
+            priority=module.priority,
+        )
+        self.events.publish("state.changed", {"modules": self._module_summary()})
+        return JSONResponse(module.to_dict())
+
+    async def delete_module(self, request: Request) -> Response:
+        name = request.path_params["name"]
+        module = self.registry.get(name) if self.registry is not None else None
+        if module is None or self.registry is None:
+            return self._not_found(f"no module {name}")
+        await self.offload(_remove_module_dir, self._module_dir(name))
+        await self.offload(self.reload_modules)
+        self.apply_modules()
+        self.audit.record(self._client(request), "delete_module", module=name)
+        self.events.publish("state.changed", {"modules": self._module_summary()})
+        return Response(status_code=204)
+
+    async def post_modules_reload(self, request: Request) -> JSONResponse:
+        """Reload every module from disk (REQ MOD-024).
+
+        The whole set, not one module: modules are ordered against each other by
+        priority, so a partial reload would leave an ordering nobody declared.
+        """
+        if self.registry is None:
+            return self._not_found("no module registry is configured")
+        result: ReloadResult = await self.offload(self.reload_modules)
+        self.apply_modules()
+        self.audit.record(
+            self._client(request),
+            "reload_modules",
+            loaded=result.loaded,
+            errors=len(result.errors),
+        )
+        self.events.publish("state.changed", {"modules": self._module_summary()})
+        return JSONResponse(result.to_dict())
+
+    # -- profiles (REQ API-024) ------------------------------------------
+
+    async def get_profiles(self, _: Request) -> JSONResponse:
+        if self.profiles is None:
+            return JSONResponse([])
+        profiles = await self.offload(self.profiles.all_profiles)
+        return JSONResponse([p.to_dict() for p in profiles])
+
+    async def get_profile(self, request: Request) -> JSONResponse:
+        name = request.path_params["name"]
+        if self.profiles is None:
+            return self._not_found(f"no profile {name}")
+        profile = await self.offload(self.profiles.get, name)
+        if profile is None:
+            return self._not_found(f"no profile {name}")
+        return JSONResponse(profile.to_dict())
+
+    async def post_profiles(self, request: Request) -> JSONResponse:
+        if self.profiles is None:
+            return self._not_found("no profile store is configured")
+        body = await request.json()
+        return await self._save_profile(request, Profile.from_dict(dict(body)), status=201)
+
+    async def put_profile(self, request: Request) -> JSONResponse:
+        """Replace a profile. The path names it; a body that disagrees loses."""
+        if self.profiles is None:
+            return self._not_found("no profile store is configured")
+        body = dict(await request.json())
+        body["name"] = request.path_params["name"]
+        return await self._save_profile(request, Profile.from_dict(body), status=200)
+
+    async def _save_profile(
+        self, request: Request, profile: Profile, *, status: int
+    ) -> JSONResponse:
+        profiles = self._profiles_or_raise()
+        saved = await self.offload(profiles.save, profile)
+        self.audit.record(self._client(request), "save_profile", profile=saved.name)
+        return JSONResponse(saved.to_dict(), status_code=status)
+
+    async def delete_profile(self, request: Request) -> Response:
+        """Delete a profile. Refuses ``default`` (REQ MOD-041)."""
+        name = request.path_params["name"]
+        if self.profiles is None:
+            return self._not_found(f"no profile {name}")
+        try:
+            deleted = await self.offload(self.profiles.delete, name)
+        except ConfigError as exc:
+            # There must always be a profile to fall back to, so this is a
+            # conflict with an invariant rather than a malformed request.
+            return error_response(exc, 409)
+        if not deleted:
+            return self._not_found(f"no profile {name}")
+        self.active_profile = self.profiles.active_name
+        self.apply_modules()
+        self.audit.record(self._client(request), "delete_profile", profile=name)
+        self.events.publish("state.changed", {"active_profile": self.active_profile})
+        return Response(status_code=204)
+
+    async def post_profile_activate(self, request: Request) -> JSONResponse:
+        """Switch profiles without restarting the daemon (REQ MOD-042).
+
+        A profile is a working context, not just a module list, so its dev
+        toggles come with it — applying them separately is the step an operator
+        forgets.
+        """
+        name = request.path_params["name"]
+        if self.profiles is None:
+            return self._not_found(f"no profile {name}")
+        try:
+            profile = await self.offload(self.profiles.activate, name)
+        except ConfigError:
+            return self._not_found(f"no profile {name}")
+
+        self.active_profile = profile.name
+        for toggle, value in profile.dev_toggles.items():
+            self.dev_toggles[toggle] = bool(value)
+            if self.interceptor is not None:
+                self.interceptor.dev_toggles[toggle] = bool(value)
+        self.apply_modules()
+
+        self.audit.record(self._client(request), "activate_profile", profile=profile.name)
+        self.events.publish("state.changed", {"active_profile": profile.name})
+        return JSONResponse(self._state_payload())
 
     async def post_attribution(self, request: Request) -> JSONResponse:
         """Batched (request -> tab) associations from the extension.
@@ -502,6 +890,21 @@ class ControlApp:
             Route("/events", self.get_events, methods=["GET"]),
             Route("/rules", self.get_rules, methods=["GET"]),
             Route("/rules", self.put_rules, methods=["PUT"]),
+            # Registered before /modules/{name}, or a reload would be read as a
+            # module called "reload".
+            Route("/modules/reload", self.post_modules_reload, methods=["POST"]),
+            Route("/modules", self.get_modules, methods=["GET"]),
+            Route("/modules", self.post_modules, methods=["POST"]),
+            Route("/modules/{name}", self.get_module, methods=["GET"]),
+            Route("/modules/{name}", self.put_module, methods=["PUT"]),
+            Route("/modules/{name}", self.patch_module, methods=["PATCH"]),
+            Route("/modules/{name}", self.delete_module, methods=["DELETE"]),
+            Route("/profiles", self.get_profiles, methods=["GET"]),
+            Route("/profiles", self.post_profiles, methods=["POST"]),
+            Route("/profiles/{name}/activate", self.post_profile_activate, methods=["POST"]),
+            Route("/profiles/{name}", self.get_profile, methods=["GET"]),
+            Route("/profiles/{name}", self.put_profile, methods=["PUT"]),
+            Route("/profiles/{name}", self.delete_profile, methods=["DELETE"]),
             Route("/attribution", self.post_attribution, methods=["POST"]),
             Route("/pair/begin", self.post_pair_begin, methods=["POST"]),
             Route("/pair", self.post_pair, methods=["POST"]),

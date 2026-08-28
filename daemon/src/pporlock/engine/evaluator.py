@@ -29,6 +29,7 @@ from .models import (
     Scheme,
     SyntheticResponse,
 )
+from .modules.registry import ModuleRegistry
 from .provenance import Action, NoteCode, Outcome, Phase, Provenance, ProvenanceBuilder
 from .ruleset import CompiledRule, RuleSet
 from .stubs import StubLibrary
@@ -134,6 +135,7 @@ class Evaluator:
         "exclusions",
         "max_buffer_bytes",
         "offload_threshold",
+        "registry",
         "ruleset",
         "stubs",
         "transforms",
@@ -150,6 +152,7 @@ class Evaluator:
         max_buffer_bytes: int = 2 * 1024 * 1024,
         offload_threshold: int = DEFAULT_OFFLOAD_THRESHOLD_BYTES,
         transforms: TransformRegistry | None = None,
+        registry: ModuleRegistry | None = None,
     ) -> None:
         self.ruleset = ruleset if ruleset is not None else RuleSet()
         self.exclusions = exclusions if exclusions is not None else ExclusionList()
@@ -159,6 +162,11 @@ class Evaluator:
         self.max_buffer_bytes = max_buffer_bytes
         self.offload_threshold = offload_threshold
         self.transforms = transforms if transforms is not None else build_registry()
+        # The module registry, when there is one. Python hooks are interleaved
+        # with declarative rules by module priority (REQ MOD-023) rather than
+        # run as a separate stage — a module that both strips CSP declaratively
+        # and injects via Python must see one consistent ordering.
+        self.registry = registry
 
     # -- phase 1: ClientHello -------------------------------------------
 
@@ -204,6 +212,10 @@ class Evaluator:
             self._apply_header_rule(
                 header_rule, "request", decision.mutation, builder, Phase.REQUEST_HEADERS
             )
+
+        self._run_python_hooks(
+            "on_request", builder, decision.mutation, request=request, decision=decision
+        )
 
         decision.wants_body = self.ruleset.wants_body(request)
 
@@ -604,6 +616,10 @@ class Evaluator:
                 reason="a rewritten document must not fail its own integrity checks",
             )
 
+        self._run_python_hooks(
+            "on_response", builder, decision.mutation, request=request, response=response
+        )
+
         for code, message, note_detail in context.notes:
             builder.note(NoteCode(code), message, **note_detail)
 
@@ -631,6 +647,81 @@ class Evaluator:
         if body.mutation.body is not None:
             decision.mutation.body = body.mutation.body
         return decision
+
+    def _run_python_hooks(
+        self,
+        hook: str,
+        builder: ProvenanceBuilder,
+        mutation: Any,
+        *,
+        request: NormalizedRequest,
+        response: NormalizedResponse | None = None,
+        decision: Any = None,
+    ) -> None:
+        """Run each active module's hook, isolated from every other.
+
+        An exception is caught, attributed to the module, and does not affect
+        the flow (REQ MOD-024). N consecutive failures quarantine the module
+        (REQ MOD-025): a module failing on every flow produces noise that would
+        bury real findings.
+        """
+        if self.registry is None:
+            return
+
+        for module in self.registry.active(
+            None if not self.ruleset.modules else list(self.ruleset.modules)
+        ):
+            fn = module.hooks().get(hook)
+            context = self.registry.context(module.name)
+            if fn is None or context is None:
+                continue
+
+            started = time.perf_counter()
+            try:
+                result = (
+                    fn(request, context) if response is None else fn(request, response, context)
+                )
+                outcome = Outcome.NO_CHANGE
+                if result is not None:
+                    _merge_mutation(mutation, result)
+                    outcome = Outcome.APPLIED
+                    if decision is not None and getattr(result, "short_circuit", None):
+                        decision.short_circuit = result.short_circuit
+                self.registry.record_success(module.name)
+            except Exception as exc:
+                outcome = Outcome.ERROR
+                builder.note(
+                    NoteCode.MODULE_ERROR,
+                    f"{module.name}.{hook} raised: {exc}",
+                    module=module.name,
+                    hook=hook,
+                )
+                self.registry.record_failure(module.name, builder)
+                builder.record(
+                    phase=Phase.REQUEST_HEADERS if response is None else Phase.RESPONSE_BODY,
+                    module=module.name,
+                    rule_id=f"{module.name}:python",
+                    rule_name=hook,
+                    action=Action.HEADERS if response is None else Action.BODY,
+                    outcome=outcome,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    error=str(exc),
+                )
+                continue
+
+            for code, severity, message, detail in context.notes:
+                builder.note(code, message, severity=severity, module=module.name, **detail)
+            context.drain()
+
+            builder.record(
+                phase=Phase.REQUEST_HEADERS if response is None else Phase.RESPONSE_BODY,
+                module=module.name,
+                rule_id=f"{module.name}:python",
+                rule_name=hook,
+                action=Action.HEADERS if response is None else Action.BODY,
+                outcome=outcome,
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
 
     def _apply_header_rule(
         self,
@@ -708,3 +799,34 @@ def _charset(response: NormalizedResponse) -> str:
     if "charset=" in raw:
         return raw.split("charset=", 1)[1].split(";")[0].strip() or "utf-8"
     return "utf-8"
+
+
+def _merge_mutation(target: Any, source: Any) -> None:
+    """Fold a module's returned mutation into the accumulated one.
+
+    Modules contribute to the same mutation declarative rules do, rather than
+    getting their own application pass — which is what makes ordering between
+    the two meaningful (REQ MOD-023).
+    """
+    for name, value in getattr(source, "set_headers", {}).items():
+        target.set(name, value)
+    for name, value in getattr(source, "add_headers", []):
+        target.add(name, value)
+    for name in getattr(source, "remove_headers", []):
+        target.remove(name)
+
+    body = getattr(source, "body", None)
+    if body is not None:
+        target.body = body
+
+    status = getattr(source, "status", None)
+    if status is not None and hasattr(target, "status"):
+        target.status = status
+
+    redirect = getattr(source, "redirect", None)
+    if redirect is not None and hasattr(target, "redirect"):
+        target.redirect = redirect
+
+    short_circuit = getattr(source, "short_circuit", None)
+    if short_circuit is not None and hasattr(target, "short_circuit"):
+        target.short_circuit = short_circuit

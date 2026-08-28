@@ -42,6 +42,12 @@ KNOWN_MANIFEST_KEYS = frozenset(
     }
 )
 
+#: Files a module write may contain, and the only files this loader reads
+#: besides ``assets/``. Anything else is refused rather than written: a file the
+#: loader never reads is a file whose author believes it does something it does
+#: not.
+WRITABLE_FILES = frozenset({MANIFEST_NAME, PYTHON_NAME})
+
 #: Hooks a module may define (SPEC-0 §8.3).
 HOOK_NAMES = ("on_load", "on_unload", "on_request", "on_response", "on_websocket_message")
 
@@ -328,6 +334,7 @@ __all__ = [
     "HOOK_NAMES",
     "MANIFEST_NAME",
     "PYTHON_NAME",
+    "WRITABLE_FILES",
     "LoadedModule",
     "ModuleApiVersionError",
     "ModuleError",

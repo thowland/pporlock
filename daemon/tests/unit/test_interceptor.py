@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -268,3 +268,78 @@ class TestLifecycle:
         sink.record_passthrough(None, None, None, {})
         sink.record_websocket_message(None)
         assert (sink.http, sink.passthrough, sink.websocket_messages) == (1, 1, 1)
+
+
+class TestProxyListenerControl:
+    """OI-3 — start/stop must report what actually happened, not what was asked.
+
+    The listener really moving is covered by
+    ``tests/integration/test_proxy_control.py`` against a real DumpMaster; what
+    is covered here is the failure path, which is the half that used to lie.
+    """
+
+    def test_reports_listening_when_there_is_no_master_to_ask(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pporlock.addon import interceptor as module
+
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: None)
+        assert Interceptor(Config()).proxy_listening is True
+
+    async def test_refuses_when_no_master_manages_the_listener(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pporlock.addon import interceptor as module
+        from pporlock.errors import ProxyControlError
+
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: None)
+        with pytest.raises(ProxyControlError):
+            await Interceptor(Config()).set_proxy_running(False)
+
+    async def test_reports_a_listener_that_never_reaches_the_asked_for_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timeout is a failure, not a 200. This is the exact shape of OI-3."""
+        from pporlock.addon import interceptor as module
+        from pporlock.errors import ProxyControlError
+
+        class StuckAddon:
+            def listen_addrs(self) -> list[str]:
+                return ["127.0.0.1:8080"]
+
+        class Options:
+            def update(self, **_: object) -> None:
+                return None
+
+        class Master:
+            options = Options()
+
+        interceptor = Interceptor(Config())
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: Master())
+        monkeypatch.setattr(module, "_proxyserver_addon", lambda master: StuckAddon())
+        monkeypatch.setattr(module, "PROXY_STATE_POLLS", 2)
+        monkeypatch.setattr(module, "PROXY_STATE_POLL_INTERVAL_S", 0.001)
+
+        with pytest.raises(ProxyControlError, match="did not stop"):
+            await interceptor.set_proxy_running(False)
+
+    def test_a_listen_addrs_property_is_read_as_well_as_a_method(self) -> None:
+        """mitmproxy 12 exposes it as a method; other releases as a property.
+        Absorbing that here is what the adapter is for (SPEC-1 §2.1)."""
+        from pporlock.addon.interceptor import _has_listeners
+
+        class AsProperty:
+            listen_addrs: ClassVar[list[str]] = ["127.0.0.1:8080"]
+
+        class AsMethod:
+            def listen_addrs(self) -> list[str]:
+                return []
+
+        assert _has_listeners(AsProperty()) is True
+        assert _has_listeners(AsMethod()) is False
+
+    def test_no_addon_means_no_control(self) -> None:
+        from pporlock.addon.interceptor import _proxyserver_addon
+
+        assert _proxyserver_addon(None) is None
+        assert _proxyserver_addon(object()) is None

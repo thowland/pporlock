@@ -30,6 +30,22 @@ from .errors import ConfigError, NonLoopbackBindError
 DEFAULT_STATE_DIR = Path.home() / ".pporlock"
 ENV_PREFIX = "PPORLOCK_"
 
+#: Path-valued settings whose default is *derived from* ``state_dir`` rather
+#: than fixed at import time, and the sub-path each derives (OI-10).
+#:
+#: ``ModulesConfig.root`` used to be a module-level constant built from
+#: ``DEFAULT_STATE_DIR``. Setting ``state_dir`` therefore moved the token, the
+#: sessions, the profiles, and ``rules.yaml``, and left modules loading from
+#: ``~/.pporlock/modules``. The split-brain layout that produced is not a
+#: cosmetic problem: an isolated test state directory silently read the
+#: developer's real modules.
+STATE_DIR_DERIVED: dict[str, str] = {"modules.root": "modules"}
+
+#: What each derived setting holds when nobody has chosen a value.
+_DEFAULT_DERIVED: dict[str, str] = {
+    setting: str(DEFAULT_STATE_DIR / relative) for setting, relative in STATE_DIR_DERIVED.items()
+}
+
 #: Hostnames accepted as loopback in addition to anything in 127.0.0.0/8 or ::1.
 LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
@@ -167,6 +183,24 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     state_dir: str = str(DEFAULT_STATE_DIR)
 
+    def __post_init__(self) -> None:
+        """Derive the state-dir-relative defaults for a directly-built Config.
+
+        ``load_config`` does this with real knowledge of which settings the
+        caller stated (see ``cascade_state_dir``). Here there is no such record,
+        so "still holds the import-time default" stands in for "nobody chose
+        it" — which is exactly the case ``Config(state_dir=tmp)`` in a test hits
+        (OI-10).
+        """
+        if self.state_dir == str(DEFAULT_STATE_DIR):
+            return
+        state_dir = Path(self.state_dir).expanduser()
+        for setting, relative in STATE_DIR_DERIVED.items():
+            section_name, _, key = setting.partition(".")
+            section = getattr(self, section_name)
+            if getattr(section, key) == _DEFAULT_DERIVED[setting]:
+                setattr(section, key, str(state_dir / relative))
+
     def validate(self) -> Config:
         """Enforce the invariants that must hold before anything binds a socket."""
         assert_loopback(self.proxy.listen_host, setting="proxy.listen_host")
@@ -216,7 +250,9 @@ def _coerce(value: Any, target: Any) -> Any:
     return value
 
 
-def _apply(section: Any, values: dict[str, Any], *, path: str) -> None:
+def _apply(
+    section: Any, values: dict[str, Any], *, path: str, explicit: set[str] | None = None
+) -> None:
     known = {f.name for f in fields(section)}
     for key, value in values.items():
         if key not in known:
@@ -228,19 +264,41 @@ def _apply(section: Any, values: dict[str, Any], *, path: str) -> None:
             raise ConfigError(
                 f"{path}.{key}: cannot interpret {value!r} — {exc}", setting=f"{path}.{key}"
             ) from exc
+        if explicit is not None:
+            explicit.add(f"{path}.{key}")
 
 
-def _from_mapping(cfg: Config, data: dict[str, Any], *, source: str) -> Config:
+def _from_mapping(
+    cfg: Config, data: dict[str, Any], *, source: str, explicit: set[str] | None = None
+) -> Config:
     for key, value in data.items():
         if not hasattr(cfg, key):
             raise ConfigError(f"unknown configuration section: {key} (from {source})", setting=key)
         current = getattr(cfg, key)
         if is_dataclass(current) and isinstance(value, dict):
-            _apply(current, value, path=key)
+            _apply(current, value, path=key, explicit=explicit)
         elif isinstance(value, dict):
             raise ConfigError(f"{key} does not take a mapping (from {source})", setting=key)
         else:
             setattr(cfg, key, _coerce(value, current))
+            if explicit is not None:
+                explicit.add(key)
+    return cfg
+
+
+def cascade_state_dir(cfg: Config, explicit: set[str]) -> Config:
+    """Move the paths derived from ``state_dir`` when it has been configured.
+
+    Only settings the caller did not set for themselves are moved. An explicit
+    ``modules.root`` outranks the cascade, because a value someone wrote down
+    is a decision and this is only a default.
+    """
+    state_dir = Path(cfg.state_dir).expanduser()
+    for setting, relative in STATE_DIR_DERIVED.items():
+        if setting in explicit:
+            continue
+        section_name, _, key = setting.partition(".")
+        setattr(getattr(cfg, section_name), key, str(state_dir / relative))
     return cfg
 
 
@@ -250,12 +308,18 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
     Section names contain no underscores, so the first segment is the section and
     the remainder is the key.
     """
+    top_level = {f.name for f in fields(Config)}
     out: dict[str, Any] = {}
     for raw_key, raw_value in env.items():
         if not raw_key.startswith(ENV_PREFIX):
             continue
         remainder = raw_key[len(ENV_PREFIX) :].lower()
-        if "_" not in remainder:
+        # A top-level setting whose own name contains an underscore — the only
+        # one today is ``state_dir`` — is matched whole before the split. It was
+        # otherwise read as section ``state``, key ``dir``, and rejected: the
+        # one setting the layout hangs off could not be set from the
+        # environment at all.
+        if remainder in top_level or "_" not in remainder:
             out[remainder] = raw_value
             continue
         section, _, key = remainder.partition("_")
@@ -275,6 +339,9 @@ def load_config(
     ``overrides`` carries CLI flags and wins over everything.
     """
     cfg = Config()
+    #: Which settings the caller stated for themselves, at any precedence level.
+    #: The state_dir cascade below moves only the ones nobody chose.
+    explicit: set[str] = set()
 
     if path is not None:
         config_path = Path(path)
@@ -285,12 +352,19 @@ def load_config(
                 raise ConfigError(f"{config_path}: invalid YAML — {exc}") from exc
             if not isinstance(raw, dict):
                 raise ConfigError(f"{config_path}: top level must be a mapping")
-            _from_mapping(cfg, raw, source=str(config_path))
+            _from_mapping(cfg, raw, source=str(config_path), explicit=explicit)
 
-    _from_mapping(cfg, _env_overrides(env if env is not None else dict(os.environ)), source="env")
+    _from_mapping(
+        cfg,
+        _env_overrides(env if env is not None else dict(os.environ)),
+        source="env",
+        explicit=explicit,
+    )
 
     if overrides:
-        _from_mapping(cfg, overrides, source="cli")
+        _from_mapping(cfg, overrides, source="cli", explicit=explicit)
+
+    cascade_state_dir(cfg, explicit)
 
     return cfg.validate() if validate else cfg
 

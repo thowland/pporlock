@@ -168,6 +168,36 @@ class Evaluator:
         # and injects via Python must see one consistent ordering.
         self.registry = registry
 
+    def clone_with(
+        self,
+        *,
+        ruleset: RuleSet,
+        registry: ModuleRegistry | None,
+        transforms: TransformRegistry | None = None,
+    ) -> Evaluator:
+        """A second evaluator configured exactly like this one.
+
+        This is how the dry runner gets "the same Evaluator as live" (REQ
+        CAP-031) without evaluating against the live rule set: same class, same
+        buffering bounds, same stub library, same asset root, same transforms —
+        only the rules and the module set differ. Enumerating the constructor
+        arguments in one place is deliberate; a new evaluator setting that the
+        dry run silently did not inherit would make dry-run output stop
+        predicting live behaviour, which is the only thing it is for. A test
+        asserts this covers every configured attribute.
+        """
+        return Evaluator(
+            ruleset,
+            exclusions=self.exclusions,
+            stubs=self.stubs,
+            asset_root=self.asset_root,
+            buffer_types=self.buffer_types,
+            max_buffer_bytes=self.max_buffer_bytes,
+            offload_threshold=self.offload_threshold,
+            transforms=transforms if transforms is not None else self.transforms,
+            registry=registry,
+        )
+
     # -- phase 1: ClientHello -------------------------------------------
 
     def evaluate_clienthello(
@@ -643,9 +673,12 @@ class Evaluator:
         """
         decision = self.evaluate_response_headers(request, response, builder)
         body = self.evaluate_response_body(request, response, builder, budget)
-        decision.mutation.status = body.mutation.status
-        if body.mutation.body is not None:
-            decision.mutation.body = body.mutation.body
+        # The whole mutation, not just status and body. The body phase is where
+        # ``on_response`` runs, and a Python hook setting a header writes it
+        # here — live applies that mutation in full, so folding only two fields
+        # in would have made the dry run under-report the exact case REQ CAP-032
+        # exists to cover.
+        _merge_mutation(decision.mutation, body.mutation)
         return decision
 
     def _run_python_hooks(

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from pporlock.config import (
+    DEFAULT_STATE_DIR,
     Config,
+    ModulesConfig,
     assert_loopback,
     is_loopback,
     load_config,
@@ -268,3 +270,59 @@ class TestStrictness:
         assert cfg.control.listen_host == "0.0.0.0"
         with pytest.raises(NonLoopbackBindError):
             cfg.validate()
+
+
+class TestStateDirCascade:
+    """OI-10 — a configured state_dir must move the paths derived from it.
+
+    Setting ``state_dir`` used to move the token, the sessions, the profiles and
+    ``rules.yaml`` while leaving modules loading from ``~/.pporlock/modules``.
+    The E2E test that found it was reading the developer's real modules while
+    believing it had an isolated state directory.
+    """
+
+    def test_a_configured_state_dir_moves_the_modules_root(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(f"state_dir: {tmp_path / 'state'}\n")
+        cfg = load_config(path, env={})
+        assert cfg.modules.root == str(tmp_path / "state" / "modules")
+
+    def test_an_explicit_modules_root_outranks_the_cascade(self, tmp_path: Path) -> None:
+        """A value someone wrote down is a decision; the cascade is a default."""
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            f"state_dir: {tmp_path / 'state'}\nmodules:\n  root: {tmp_path / 'elsewhere'}\n"
+        )
+        cfg = load_config(path, env={})
+        assert cfg.modules.root == str(tmp_path / "elsewhere")
+
+    def test_an_explicit_modules_root_equal_to_the_default_is_still_explicit(
+        self, tmp_path: Path
+    ) -> None:
+        default_root = str(DEFAULT_STATE_DIR / "modules")
+        path = tmp_path / "config.yaml"
+        path.write_text(f"state_dir: {tmp_path / 'state'}\nmodules:\n  root: {default_root}\n")
+        assert load_config(path, env={}).modules.root == default_root
+
+    def test_the_env_can_set_the_state_dir_and_the_cascade_follows(self, tmp_path: Path) -> None:
+        cfg = load_config(env={"PPORLOCK_STATE_DIR": str(tmp_path / "envstate")})
+        assert cfg.modules.root == str(tmp_path / "envstate" / "modules")
+
+    def test_a_cli_override_of_modules_root_wins(self, tmp_path: Path) -> None:
+        cfg = load_config(
+            env={"PPORLOCK_STATE_DIR": str(tmp_path / "envstate")},
+            overrides={"modules": {"root": str(tmp_path / "cli")}},
+        )
+        assert cfg.modules.root == str(tmp_path / "cli")
+
+    def test_the_default_state_dir_leaves_the_default_root_alone(self) -> None:
+        assert load_config(env={}).modules.root == str(DEFAULT_STATE_DIR / "modules")
+
+    def test_constructing_a_config_with_a_state_dir_cascades_too(self, tmp_path: Path) -> None:
+        """``Config(state_dir=...)`` is what most tests do, and it was the
+        shape that silently read the developer's real modules."""
+        assert Config(state_dir=str(tmp_path)).modules.root == str(tmp_path / "modules")
+
+    def test_an_explicit_root_passed_to_the_constructor_is_kept(self, tmp_path: Path) -> None:
+        cfg = Config(state_dir=str(tmp_path), modules=ModulesConfig(root=str(tmp_path / "custom")))
+        assert cfg.modules.root == str(tmp_path / "custom")

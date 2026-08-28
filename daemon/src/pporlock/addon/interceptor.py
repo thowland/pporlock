@@ -23,8 +23,15 @@ from ..engine.evaluator import Evaluator, TimeBudget
 from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.provenance import NoteCode, Provenance, ProvenanceBuilder
 from ..engine.ruleset import RuleSet
+from ..errors import ProxyControlError
 from . import apply as apply_mod
 from . import normalize
+
+#: How long to wait for mitmproxy to actually bind or release the listener.
+#: Twenty polls of 50ms — long enough for a local bind, short enough that a
+#: caller is not left hanging on a listener that is never going to change.
+PROXY_STATE_POLLS = 20
+PROXY_STATE_POLL_INTERVAL_S = 0.05
 
 
 class FlowSink(Protocol):
@@ -126,6 +133,9 @@ class Interceptor:
         # make normal behaviour unreproducible, so both default off and every
         # flow processed while one is on carries a note saying so.
         self.dev_toggles: dict[str, bool] = {"anticache": False, "anticomp": False}
+        # Last commanded listener state. Corroborated against mitmproxy's own
+        # listener addresses whenever there is a master to ask.
+        self._proxy_running = True
         self.evaluator = (
             evaluator if evaluator is not None else Evaluator(RuleSet(), exclusions=self.exclusions)
         )
@@ -404,16 +414,71 @@ class Interceptor:
         here would silently stop every Python hook and every module-registered
         transform the first time anyone edited a rule.
         """
-        self.evaluator = Evaluator(
-            ruleset,
-            exclusions=self.exclusions,
-            stubs=self.evaluator.stubs,
-            asset_root=self.evaluator.asset_root,
-            buffer_types=self.evaluator.buffer_types,
-            max_buffer_bytes=self.evaluator.max_buffer_bytes,
-            offload_threshold=self.evaluator.offload_threshold,
-            transforms=self.evaluator.transforms,
-            registry=self.evaluator.registry,
+        self.evaluator = self.evaluator.clone_with(
+            ruleset=ruleset, registry=self.evaluator.registry
+        )
+
+    # -- proxy listener control (SPEC-0 §6.4, OI-3) ----------------------
+
+    def _proxyserver(self) -> Any:
+        """mitmproxy's own listener addon, or None when we are not under a master.
+
+        This — and ``mitmproxy.ctx`` — is the whole of the version-churn surface
+        for start/stop, and it is confined to this adapter by design (SPEC-1
+        §2.1). ``options.server`` is what mitmproxy itself uses to decide
+        whether to hold listeners open; setting it is not a back door.
+        """
+        try:
+            from mitmproxy import ctx
+        except ImportError:  # pragma: no cover - mitmproxy is a hard dependency
+            return None
+        master = getattr(ctx, "master", None)
+        if master is None:
+            return None
+        return master
+
+    @property
+    def proxy_listening(self) -> bool:
+        """Whether the proxy listener is currently accepting connections.
+
+        The last commanded state, corroborated by mitmproxy's own listener
+        addresses when there is a master to ask. ``/state`` reports this rather
+        than "an Interceptor object exists", which is what made OI-3's silent
+        discard invisible.
+        """
+        addon = _proxyserver_addon(self._proxyserver())
+        if addon is None:
+            return self._proxy_running
+        return _has_listeners(addon)
+
+    async def set_proxy_running(self, running: bool) -> bool:
+        """Start or stop the proxy listener, and report what actually happened.
+
+        mitmproxy applies the option change on a task of its own, so this waits
+        for the listener to reach the requested state rather than assuming it.
+        Returning before that would reproduce exactly the bug this closes: a
+        200 for an effect that had not happened.
+        """
+        master = self._proxyserver()
+        addon = _proxyserver_addon(master)
+        if master is None or addon is None:
+            raise ProxyControlError(
+                "the proxy listener is not managed by this process, so it "
+                "cannot be started or stopped through the control API",
+                requested=running,
+            )
+
+        master.options.update(server=running)
+        for _ in range(PROXY_STATE_POLLS):
+            if _has_listeners(addon) == running:
+                self._proxy_running = running
+                return True
+            await asyncio.sleep(PROXY_STATE_POLL_INTERVAL_S)
+
+        raise ProxyControlError(
+            f"the proxy listener did not {'start' if running else 'stop'} within "
+            f"{PROXY_STATE_POLLS * PROXY_STATE_POLL_INTERVAL_S:.1f}s",
+            requested=running,
         )
 
     # -- state -----------------------------------------------------------
@@ -421,6 +486,32 @@ class Interceptor:
     @property
     def uptime_s(self) -> float:
         return time.time() - self.started_at
+
+
+def _has_listeners(addon: Any) -> bool:
+    """Whether mitmproxy currently holds a listening socket.
+
+    ``listen_addrs`` is a method in mitmproxy 12 and has been a property in
+    other releases, so both are accepted here — this is the adapter, and that is
+    what it is for (SPEC-1 §2.1).
+    """
+    addrs = getattr(addon, "listen_addrs", None)
+    if callable(addrs):
+        addrs = addrs()
+    return bool(addrs)
+
+
+def _proxyserver_addon(master: Any) -> Any:
+    """mitmproxy's proxyserver addon, or None if it is not loaded."""
+    if master is None:
+        return None
+    addons = getattr(master, "addons", None)
+    if addons is None:
+        return None
+    try:
+        return addons.get("proxyserver")
+    except Exception:  # pragma: no cover - defensive across mitmproxy versions
+        return None
 
 
 def _flow_id(flow: Any) -> str:

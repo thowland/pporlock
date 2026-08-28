@@ -7,6 +7,7 @@ console output and its buffering.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -269,6 +270,135 @@ class TestStartupWiring:
         assert error is None
         assert registry.modules == ()
         assert len(evaluator.ruleset.response_headers) == 0
+
+    def test_the_dry_run_route_is_reachable_from_a_daemon_started_by_pporlock_run(
+        self, tmp_path: Any
+    ) -> None:
+        """REQ CAP-030/031/032 — and OI-11's lesson.
+
+        Two sprints closed with a fully unit-tested module system that the
+        running daemon never built. So this drives the dry run through the same
+        ControlApp ``_run`` assembles, from the same ``build_evaluator`` output,
+        and asserts a candidate module actually fires on a flow. A unit test
+        that constructed its own ControlApp could not notice the wiring missing.
+        """
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.records import FlowRecord
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+        from pporlock.engine.models import NormalizedRequest, NormalizedResponse
+
+        config = self._config(tmp_path)
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+
+        ring = RingBuffer()
+        ring.add(
+            FlowRecord(
+                flow_id="f0",
+                kind="http",
+                started_at="2026-08-27T14:00:00.000Z",
+                request=NormalizedRequest(
+                    flow_id="f0",
+                    timestamp="2026-08-27T14:00:00.000Z",
+                    scheme="https",
+                    method="GET",
+                    host="app.example.com",
+                    port=443,
+                    path="/index.html",
+                    url="https://app.example.com/index.html",
+                ),
+                response=NormalizedResponse(
+                    flow_id="f0",
+                    timestamp="2026-08-27T14:00:01.000Z",
+                    status=200,
+                    headers=(
+                        ("content-type", "text/html"),
+                        ("content-security-policy", "default-src 'self'"),
+                    ),
+                    body=b"<html><head></head></html>",
+                ),
+            )
+        )
+
+        control = build_control_app(config, ring, EventHub(), registry, profiles, base_ruleset)
+        client = TestClient(control.asgi)
+        response = client.post(
+            "/sessions/live/dryrun",
+            headers={
+                "Authorization": f"Bearer {control.tokens.ensure()}",
+                "X-Pporlock-Client": "ui",
+            },
+            json={
+                "modules": [
+                    {
+                        "name": "csp-strip",
+                        "files": {
+                            "module.yaml": (
+                                "name: csp-strip\npporlock_api: '1'\n"
+                                "rules:\n"
+                                "  - name: strip\n"
+                                "    action: headers\n"
+                                "    match: {host: app.example.com}\n"
+                                "    response: {remove: [content-security-policy]}\n"
+                            )
+                        },
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["summary"]["matched"] == 1
+        assert body["results"][0]["diff"]["headers"][0]["name"] == "content-security-policy"
+
+    def test_the_validate_route_is_reachable_from_the_daemons_control_app(
+        self, tmp_path: Any
+    ) -> None:
+        """REQ API-027 — the route the web UI's editor already calls."""
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+        client = TestClient(control.asgi)
+        response = client.post(
+            "/validate",
+            headers={
+                "Authorization": f"Bearer {control.tokens.ensure()}",
+                "X-Pporlock-Client": "ui",
+            },
+            json={"name": "tidy", "files": {"module.yaml": "name: tidy\npporlock_api: '1'\n"}},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    def test_the_dry_runner_uses_the_running_proxys_evaluator(self, tmp_path: Any) -> None:
+        """REQ CAP-031 — the guarantee is worthless if the route builds its own
+        evaluator instead of cloning the one live traffic is using."""
+        from pporlock.addon.interceptor import Interceptor
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+        control.interceptor = Interceptor(config, evaluator=evaluator)
+
+        runner = control.dry_runner()
+        assert runner._evaluator is control.interceptor.evaluator
+        assert runner.installed_root == Path(config.modules.root)
+        assert runner.redactor is control.redactor
 
 
 class TestApplyModulesKeepsFileRules:

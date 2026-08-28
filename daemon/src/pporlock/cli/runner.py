@@ -24,6 +24,10 @@ from ..config import Config
 from ..control.app import ControlApp
 from ..control.events import EventHub
 from ..control.serialize import serialize_flow
+from ..engine.evaluator import Evaluator
+from ..engine.exclusions import load_exclusions
+from ..engine.rules_file import load_rules_file
+from ..engine.ruleset import RuleSet
 
 
 def web_assets_dir() -> Path | None:
@@ -112,7 +116,46 @@ class ConsoleSink(NullSink):
         emit(f"  {'TUNNEL':6} ---  {'':>9}   {'':>8}  {host or ip}  [{reason}]")
 
 
-async def _run(config: Config, sink: Any) -> int:
+def build_evaluator(config: Config) -> tuple[Evaluator, Path, str | None]:
+    """Load exclusions and rules from disk.
+
+    Deliberately synchronous, and called *before* the event loop exists. The
+    control server shares the proxy's loop, so filesystem work must not land on
+    it (REQ DD-3, API-002) — and startup is the one moment when doing it
+    off-loop costs nothing.
+
+    A broken rules file does not stop the daemon: it is still useful for
+    inspection, and the alternative is a user who cannot browse because of a
+    typo. The failure is returned so the caller can report it loudly.
+    """
+    exclusions = load_exclusions()
+    rules_path = Path(config.state_dir).expanduser() / "rules.yaml"
+    ruleset = RuleSet()
+    error: str | None = None
+
+    if rules_path.exists():
+        try:
+            ruleset = load_rules_file(rules_path)
+        except Exception as exc:
+            error = str(exc)
+
+    evaluator = Evaluator(
+        ruleset,
+        exclusions=exclusions,
+        asset_root=rules_path.parent,
+        buffer_types=tuple(config.buffering.content_types),
+        max_buffer_bytes=config.buffering.max_body_bytes,
+    )
+    return evaluator, rules_path, error
+
+
+async def _run(
+    config: Config,
+    sink: Any,
+    evaluator: Evaluator,
+    rules_path: Path,
+    rules_error: str | None,
+) -> int:
     from mitmproxy.options import Options
     from mitmproxy.tools.dump import DumpMaster
 
@@ -168,7 +211,9 @@ async def _run(config: Config, sink: Any) -> int:
     console = sink if isinstance(sink, ConsoleSink) else ConsoleSink(quiet=True)
     tee = TeeSink(ring_sink, console)
 
-    interceptor = Interceptor(config, sink=tee)
+    interceptor = Interceptor(
+        config, sink=tee, exclusions=evaluator.exclusions, evaluator=evaluator
+    )
     control.interceptor = interceptor
     interceptor.control = control
     master.addons.add(interceptor)  # type: ignore[no-untyped-call]
@@ -179,6 +224,13 @@ async def _run(config: Config, sink: Any) -> int:
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     emit(f"  exclusions: {len(interceptor.exclusions)} entries")
+    if rules_error is not None:
+        emit(f"  rules:      FAILED to load {rules_path}: {rules_error}")
+    else:
+        emit(
+            f"  rules:      {len(evaluator.ruleset)} active"
+            + (f" from {rules_path}" if len(evaluator.ruleset) else " (no rules.yaml)")
+        )
     assets = web_assets_dir()
     emit(
         f"  control API on http://{config.control.listen_host}:"
@@ -204,8 +256,10 @@ async def _run(config: Config, sink: Any) -> int:
 
 def run_foreground(config: Config, *, quiet: bool = False) -> int:
     sink: Any = ConsoleSink(quiet=quiet)
+    # Loaded before the loop exists, so no filesystem work lands on it.
+    evaluator, rules_path, rules_error = build_evaluator(config)
     try:
-        return asyncio.run(_run(config, sink))
+        return asyncio.run(_run(config, sink, evaluator, rules_path, rules_error))
     except KeyboardInterrupt:
         return 130
     except OSError as exc:

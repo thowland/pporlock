@@ -22,8 +22,10 @@ import pytest
 
 from pporlock.addon.interceptor import Interceptor, NullSink
 from pporlock.config import Config
+from pporlock.engine.evaluator import Evaluator
 from pporlock.engine.exclusions import ExclusionEntry, ExclusionList
 from pporlock.engine.provenance import NoteCode
+from pporlock.engine.ruleset import RuleSet
 
 pytestmark = pytest.mark.integration
 
@@ -52,7 +54,12 @@ def _free_port() -> int:
 class ProxyHarness:
     """Runs a real DumpMaster on its own thread and event loop."""
 
-    def __init__(self, exclusions: ExclusionList | None = None) -> None:
+    def __init__(
+        self,
+        exclusions: ExclusionList | None = None,
+        rules: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.rules = rules or []
         self.port = _free_port()
         self.sink = CollectingSink()
         self.interceptor: Interceptor | None = None
@@ -92,7 +99,16 @@ class ProxyHarness:
             config.proxy.listen_port = self.port
             options = Options(listen_host="127.0.0.1", listen_port=self.port, mode=["regular"])
             self._master = DumpMaster(options, with_termlog=False, with_dumper=False)
-            self.interceptor = Interceptor(config, sink=self.sink, exclusions=self._exclusions)
+            evaluator = Evaluator(
+                RuleSet.from_rules(self.rules, module="test"),
+                exclusions=self._exclusions or ExclusionList(),
+            )
+            self.interceptor = Interceptor(
+                config,
+                sink=self.sink,
+                exclusions=self._exclusions,
+                evaluator=evaluator,
+            )
             self._master.addons.add(self.interceptor)
             self._ready.set()
             await self._master.run()
@@ -143,7 +159,18 @@ def proxy() -> Any:
     harness = ProxyHarness(
         exclusions=ExclusionList(
             [ExclusionEntry("excluded.example", "test: excluded host", "default")]
-        )
+        ),
+        # A body rule for the CSP fixture, so the buffering guard has something
+        # to buffer for. Without a rule that wants a body, the guard streams —
+        # which is correct, and is asserted separately.
+        rules=[
+            {
+                "name": "wants-csp-body",
+                "action": "body",
+                "match": {"path": "^/csp/"},
+                "transform": {"kind": "strip_integrity_attributes"},
+            }
+        ],
     ).start()
     try:
         yield harness
@@ -180,30 +207,39 @@ class TestBaselineInterception:
         assert provenance is not None
         assert provenance.profile == "default"
 
-    def test_response_body_is_available_for_transformation(
+    def test_body_is_buffered_when_a_rule_wants_it(
         self, proxy: ProxyHarness, fixture_origin: Any
     ) -> None:
-        """Body buffering is what makes rewriting possible at all (SPEC-1 §3.4)."""
+        """Buffering is what makes rewriting possible at all (SPEC-1 §3.4).
+
+        The guard only pays that cost when a rule could actually use the body —
+        here, the body rule matching /csp/.
+        """
         before = len(proxy.sink.flows)
         with proxy.get(f"{fixture_origin.base_url}/csp/nonce"):
             pass
         proxy.wait_for_flows(before + 1)
         response = proxy.sink.flows[-1][1]
+        assert not response.streamed
         assert response.body is not None
         assert b"csp nonce" in response.body
 
-    def test_gzip_body_is_decoded_transparently(
+    def test_encoding_is_recorded_even_when_streamed(
         self, proxy: ProxyHarness, fixture_origin: Any
     ) -> None:
-        """REQ PXY-023 — the engine sees plaintext regardless of encoding."""
+        """With no rule wanting the body, the guard streams it (REQ PXY-021).
+
+        That is the cheapest optimisation available and applies to the
+        overwhelming majority of flows on any real page. The encoding is still
+        recorded, so the UI can say what would have been decoded.
+        """
         before = len(proxy.sink.flows)
         with proxy.get(f"{fixture_origin.base_url}/encoded?enc=gzip"):
             pass
         proxy.wait_for_flows(before + 1)
-        _request, response, _prov = proxy.sink.flows[-1]
+        _request, response, provenance = proxy.sink.flows[-1]
         assert response.encoding == "gzip"
-        assert response.body is not None
-        assert b"pporlock encoded fixture body" in response.body
+        assert provenance.has_note(NoteCode.RESPONSE_STREAMED)
 
     def test_sec_fetch_dest_reaches_the_engine(
         self, proxy: ProxyHarness, fixture_origin: Any

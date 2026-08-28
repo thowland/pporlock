@@ -152,15 +152,27 @@ class TestRequestResponseCycle:
         interceptor.response(StubFlow(response=StubResponse()))
         assert len(sink.http_records) == 1
 
-    def test_streamed_response_gets_a_note(
+    def test_the_buffering_guard_streams_a_body_no_rule_wants(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
-        """REQ PXY-022 — a skipped transform must never be silent."""
-        flow = StubFlow(response=StubResponse(stream=True))
+        """REQ PXY-021/022 — and it says so, rather than doing nothing quietly."""
+        flow = StubFlow(response=StubResponse())
         interceptor.request(flow)
+        interceptor.responseheaders(flow)
+        assert flow.response.stream is True
         interceptor.response(flow)
         provenance = sink.http_records[0][2]
         assert provenance.has_note(NoteCode.RESPONSE_STREAMED)
+
+    def test_responseheaders_is_safe_without_a_prior_request(
+        self, interceptor: Interceptor
+    ) -> None:
+        """A hook can fire without its partner — a replayed flow, or a restart
+        mid-connection."""
+        interceptor.responseheaders(StubFlow(response=StubResponse()))
+
+    def test_responseheaders_without_a_response_is_safe(self, interceptor: Interceptor) -> None:
+        interceptor.responseheaders(StubFlow())
 
     def test_streamed_response_carries_no_body(
         self, interceptor: Interceptor, sink: RecordingSink

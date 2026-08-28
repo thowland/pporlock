@@ -16,6 +16,7 @@ than producing a quietly exposed daemon.
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
@@ -292,3 +293,67 @@ def load_config(
         _from_mapping(cfg, overrides, source="cli")
 
     return cfg.validate() if validate else cfg
+
+
+#: Sections ``PUT /config`` may change (REQ CAP-044). Deliberately excludes
+#: ``proxy``, ``control``, and ``state_dir``: a listener is already bound by the
+#: time the API is reachable, so accepting a new bind address would either be a
+#: lie or a way to move a loopback-only listener at runtime. Both are worse than
+#: refusing.
+SETTABLE_SECTIONS: frozenset[str] = frozenset(
+    {"redaction", "buffering", "capture", "budget", "logging"}
+)
+
+
+def update_config(cfg: Config, data: dict[str, Any]) -> Config:
+    """A validated copy of ``cfg`` with ``data`` applied.
+
+    A copy rather than an in-place edit so a rejected update leaves the running
+    configuration exactly as it was — the same reasoning as compiling a rule set
+    before swapping it in.
+    """
+    unknown = set(data) - SETTABLE_SECTIONS
+    if unknown:
+        raise ConfigError(
+            f"cannot set {', '.join(sorted(unknown))} at runtime",
+            setting=sorted(unknown)[0],
+        )
+    candidate = copy.deepcopy(cfg)
+    _from_mapping(candidate, data, source="api")
+    return candidate.validate()
+
+
+def _plain(value: Any) -> Any:
+    """Tuples to lists, recursively, so PyYAML can dump the result."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, tuple | list):
+        return [_plain(v) for v in value]
+    return value
+
+
+def save_config(cfg: Config, path: Path, sections: frozenset[str] = SETTABLE_SECTIONS) -> None:
+    """Persist the settable sections so a change survives a restart.
+
+    Only the settable sections are written. Rewriting the whole file would turn
+    every default this build happens to carry into an explicit pin, and the next
+    upgrade would silently keep the old values.
+    """
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = yaml.safe_load(path.read_text())
+            if isinstance(loaded, dict):
+                existing = loaded
+        except yaml.YAMLError:
+            # A file we cannot parse is replaced rather than merged into: the
+            # alternative is refusing to save because of unrelated damage.
+            existing = {}
+    full = cfg.to_dict()
+    for name in sorted(sections):
+        # Tuples are how the dataclasses hold ordered, immutable lists; YAML has
+        # no tuple, and safe_dump refuses one rather than guessing.
+        existing[name] = _plain(full[name])
+    path.write_text(yaml.safe_dump(existing, sort_keys=True, default_flow_style=False))

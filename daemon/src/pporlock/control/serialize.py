@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from ..capture.records import FlowRecord
+from ..capture.redact import Redactor
 from ..capture.ring import encode_body
 from ..engine.models import NormalizedRequest, NormalizedResponse, WebSocketMessage
 
@@ -106,7 +107,11 @@ def serialize_ws_message(message: WebSocketMessage, detail: DetailLevel) -> dict
     return payload
 
 
-def serialize_flow(record: FlowRecord, detail: DetailLevel = "full") -> dict[str, Any]:
+def serialize_flow(
+    record: FlowRecord,
+    detail: DetailLevel = "full",
+    redactor: Redactor | None = None,
+) -> dict[str, Any]:
     """One flow, at the requested detail level.
 
     Provenance travels at every level (REQ CAP-013). At ``summary`` the entries
@@ -114,6 +119,13 @@ def serialize_flow(record: FlowRecord, detail: DetailLevel = "full") -> dict[str
     dominate a list response — but the note codes survive, since those are what
     the flag icons in the flow table are drawn from.
     """
+    # Redaction at serialization time (SPEC-0 §9, REQ CAP-040). Applied to a
+    # copy, never in place: the ring buffer must keep the unredacted values or
+    # unmasking has nothing to reveal (REQ CAP-043).
+    redacted = redactor is not None and redactor.enabled
+    if redacted:
+        record = redactor.redact_record(record)  # type: ignore[union-attr]
+
     payload: dict[str, Any] = {
         "flow_id": record.flow_id,
         "kind": record.kind,
@@ -122,7 +134,7 @@ def serialize_flow(record: FlowRecord, detail: DetailLevel = "full") -> dict[str
         "tab_id": record.tab_id,
         "modified": record.modified,
         "blocked": record.blocked,
-        "redacted": False,  # redaction lands in Sprint 13 (REQ CAP-040)
+        "redacted": redacted,
     }
 
     if record.request is not None:
@@ -184,9 +196,10 @@ def serialize_flow_page(
     next_cursor: str | None,
     total_estimate: int,
     detail: DetailLevel = "summary",
+    redactor: Redactor | None = None,
 ) -> dict[str, Any]:
     return {
-        "flows": [serialize_flow(r, detail) for r in records],
+        "flows": [serialize_flow(r, detail, redactor) for r in records],
         "next_cursor": next_cursor,
         "total_estimate": total_estimate,
     }

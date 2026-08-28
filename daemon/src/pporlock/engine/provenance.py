@@ -171,6 +171,61 @@ class Provenance:
             "short_circuited_by": self.short_circuited_by,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Provenance:
+        """Rebuild from the ``to_dict`` form.
+
+        Needed because a session stores provenance as JSON and a session flow
+        must come back out as the same FlowRecord the live pipeline produced —
+        provenance travels with every flow into every consumer (REQ CAP-013),
+        and a session flow whose provenance was a bare dict would be the one
+        place that stopped being true.
+
+        Unknown enum members are tolerated: a session recorded by a newer
+        daemon should still open, with the unrecognised value carried through
+        as its string rather than taking the whole file down.
+        """
+        entries = tuple(
+            ProvenanceEntry(
+                seq=int(e.get("seq", index)),
+                phase=Phase(e["phase"]) if e.get("phase") in set(Phase) else Phase.REQUEST_HEADERS,
+                module=str(e.get("module", "")),
+                rule_id=str(e.get("rule_id", "")),
+                action=Action(e["action"]) if e.get("action") in set(Action) else Action.HEADERS,
+                outcome=(
+                    Outcome(e["outcome"]) if e.get("outcome") in set(Outcome) else Outcome.NO_CHANGE
+                ),
+                duration_ms=float(e.get("duration_ms", 0.0)),
+                rule_name=e.get("rule_name"),
+                detail=dict(e.get("detail") or {}),
+            )
+            for index, e in enumerate(data.get("entries") or [])
+        )
+        notes = tuple(
+            ProvenanceNote(
+                code=(
+                    NoteCode(n["code"]) if n.get("code") in set(NoteCode) else NoteCode.MODULE_ERROR
+                ),
+                severity=(
+                    Severity(n["severity"])
+                    if n.get("severity") in set(Severity)
+                    else Severity.WARNING
+                ),
+                message=str(n.get("message", "")),
+                module=n.get("module"),
+                detail=dict(n.get("detail") or {}),
+            )
+            for n in data.get("notes") or []
+        )
+        return cls(
+            profile=str(data.get("profile", "default")),
+            evaluated_modules=tuple(data.get("evaluated_modules") or ()),
+            entries=entries,
+            notes=notes,
+            total_ms=float(data.get("total_ms", 0.0)),
+            short_circuited_by=data.get("short_circuited_by"),
+        )
+
     # -- queries the UI and the API filter vocabulary rely on ----------------
 
     def modules_fired(self) -> list[str]:

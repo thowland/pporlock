@@ -23,7 +23,7 @@ class RingSink:
     flagged so a shortened body is never mistaken for a complete one.
     """
 
-    __slots__ = ("max_body_bytes", "on_flow", "resolve_tab", "ring")
+    __slots__ = ("max_body_bytes", "on_flow", "resolve_tab", "ring", "session")
 
     def __init__(
         self,
@@ -32,9 +32,14 @@ class RingSink:
         max_body_bytes: int = 512 * 1024,
         on_flow: Any = None,
         resolve_tab: Any = None,
+        session: Any = None,
     ) -> None:
         self.ring = ring
         self.max_body_bytes = max_body_bytes
+        # Sprint 13: the session store, when one is recording. Its ``enqueue``
+        # is a non-blocking put onto a bounded queue — recording must never be
+        # able to slow the loop that is serving the browser (REQ CAP-023).
+        self.session = session
         # Sprint 4 hangs the SSE hub off this.
         self.on_flow = on_flow
         # Sprint 6: the attribution join, applied as the flow is recorded.
@@ -48,6 +53,8 @@ class RingSink:
 
     def _emit(self, record: FlowRecord) -> None:
         self.ring.add(record)
+        if self.session is not None:
+            self.session.enqueue(record)
         if self.on_flow is not None:
             self.on_flow(record)
 
@@ -147,6 +154,26 @@ class RingSink:
                 truncated=cut,
             )
         )
+        # Re-enqueued whole rather than appended to: the session's flows row is
+        # the record, and a frame that only reached the ring would leave the
+        # recorded flow claiming fewer messages than actually crossed the wire.
+        if self.session is not None:
+            self.session.enqueue(record)
+
+    def record_websocket_close(self, flow_id: str, close_code: int | None) -> None:
+        """Mark a WebSocket flow closed (REQ PXY-050).
+
+        Without this a recorded socket is indistinguishable from one still
+        open, which is exactly the question being asked when a page stops
+        receiving updates.
+        """
+        record = self.ring.get(flow_id)
+        if record is None:
+            return
+        record.ws_closed = True
+        record.ws_close_code = close_code
+        if self.session is not None:
+            self.session.enqueue(record)
 
 
 #: Actions that change an existing message rather than replacing it.

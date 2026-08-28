@@ -24,8 +24,11 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from ..capture.attribution import AttributionIndex, coverage_of, entry_from_dict
+from ..capture.export import EXPORT_FORMATS, export_session
 from ..capture.filters import FlowFilter
-from ..config import Config
+from ..capture.redact import FieldPathError, Redactor, resolve_field
+from ..capture.session import SessionMeta, SessionStore
+from ..config import Config, save_config, update_config
 from ..engine.modules.loader import (
     ASSETS_DIR,
     MANIFEST_NAME,
@@ -41,6 +44,7 @@ from ..errors import (
     PairingError,
     PporlockError,
     RuleValidationError,
+    SessionError,
 )
 from .audit import AuditLog
 from .auth import (
@@ -62,6 +66,7 @@ from .serialize import (
 
 if TYPE_CHECKING:
     from ..addon.interceptor import Interceptor
+    from ..capture.records import FlowRecord
     from ..capture.ring import RingBuffer
     from ..engine.modules.registry import ModuleRegistry, ReloadResult
     from ..engine.profiles import ProfileManager
@@ -108,6 +113,11 @@ OFFLOAD_ROUTES: frozenset[str] = frozenset(
         "/profiles",
         "/profiles/{name}",
         "/profiles/{name}/activate",
+        "/sessions",
+        "/sessions/{session_id}",
+        "/sessions/{session_id}/stop",
+        "/sessions/{session_id}/flows",
+        "/sessions/{session_id}/export",
     }
 )
 
@@ -233,6 +243,8 @@ class ControlApp:
         registry: ModuleRegistry | None = None,
         profiles: ProfileManager | None = None,
         static_dir: Any = None,
+        base_ruleset: RuleSet | None = None,
+        sessions: SessionStore | None = None,
         version: str = "0.1.0",
     ) -> None:
         self.config = config
@@ -243,6 +255,10 @@ class ControlApp:
         # and the module routes answer "nothing here" rather than failing.
         self.registry = registry
         self.profiles = profiles
+        # The rules from rules.yaml, kept so reinstalling the module rules does
+        # not delete them. They are the user's own and nothing in the module
+        # lifecycle owns them.
+        self.base_ruleset = base_ruleset if base_ruleset is not None else RuleSet()
         self.version = version
         self.tokens = tokens or TokenStore(Path(config.state_dir))
         self.policy = policy or OriginPolicy(config.control.listen_host, config.control.listen_port)
@@ -251,6 +267,17 @@ class ControlApp:
         self.events = events or EventHub()
         self.attribution = AttributionIndex()
         self.static_dir = static_dir
+        # One Redactor, shared by the serializer and the session writer. Sharing
+        # it is what makes PUT /config's effect immediate in both places rather
+        # than in whichever one happened to be rebuilt (REQ CAP-044).
+        self.redactor = Redactor(config.redaction)
+        self.sessions = sessions or SessionStore(
+            Path(config.state_dir).expanduser() / "sessions",
+            self.redactor,
+            max_bytes=config.capture.session_max_bytes,
+            max_body_bytes=config.capture.max_body_bytes,
+            version=version,
+        )
         # Generate the token now rather than on first verify. It is per-install
         # state the user and the CLI need to be able to find, and a path printed
         # at startup that does not yet exist is worse than no path at all.
@@ -330,7 +357,9 @@ class ControlApp:
         if self.registry is None or self.interceptor is None:
             return
         module_filter = self.profiles.module_filter() if self.profiles else None
-        self.interceptor.replace_ruleset(self.registry.build_ruleset(module_filter))
+        self.interceptor.replace_ruleset(
+            RuleSet.combine(self.base_ruleset, self.registry.build_ruleset(module_filter))
+        )
         # The evaluator interleaves Python hooks with declarative rules, so it
         # needs the registry as well as the rules built from it (REQ MOD-023).
         self.interceptor.evaluator.registry = self.registry
@@ -358,7 +387,7 @@ class ControlApp:
             "capture": {
                 "ring_flows": stats.flows,
                 "ring_bytes": stats.bytes,
-                "recording_session": None,
+                "recording_session": self.sessions.recording_session,
             },
             "counters": counters,
             "clients": {"mcp_connected": 0, "mcp_read_only": False},
@@ -402,6 +431,7 @@ class ControlApp:
                 next_cursor=result.next_cursor,
                 total_estimate=result.total_estimate,
                 detail=detail,
+                redactor=self.redactor,
             )
         )
 
@@ -410,8 +440,60 @@ class ControlApp:
         record = self.ring.get(flow_id)
         if record is None:
             return self._not_found(f"no flow {flow_id}")
+
+        unmask = request.query_params.get("unmask")
+        if unmask:
+            return self._unmask(request, record, unmask)
+
         detail = parse_detail(request.query_params.get("detail"), DEFAULT_ITEM_DETAIL)
-        return JSONResponse(serialize_flow(record, detail))
+        return JSONResponse(serialize_flow(record, detail, self.redactor))
+
+    def _unmask(self, request: Request, record: FlowRecord, field_path: str) -> JSONResponse:
+        """Reveal one masked value from the live ring buffer (REQ CAP-043).
+
+        Three constraints, and each one is doing separate work:
+
+        * **Live only.** This handler is reachable from ``/flows/{id}`` and
+          nothing else. A session flow cannot arrive here — and if one somehow
+          did, there would be nothing to reveal, because the value was masked
+          before it reached the file (REQ CAP-045).
+        * **UI only.** The client header is required and must say ``ui``. The
+          MCP interface has no unmask capability by construction (REQ MCP-003);
+          this is the server-side half of that, so a future MCP build cannot
+          acquire one by calling a URL.
+        * **One value.** A field path names a single header occurrence or a
+          single JSON field. There is no bulk form.
+        """
+        try:
+            client = require_client(request.headers.get(CLIENT_HEADER))
+        except AuthError as exc:
+            return error_response(exc, 403)
+        if client != "ui":
+            return error_response(
+                AuthError(
+                    "unmasking is available only from the pporlock web UI",
+                    client=client,
+                    reason="unmask_ui_only",
+                ),
+                403,
+            )
+
+        try:
+            value = resolve_field(record, field_path)
+        except FieldPathError as exc:
+            return JSONResponse(
+                {"error": {"code": "not_found", "message": str(exc), "detail": {}}},
+                status_code=404,
+            )
+
+        # REQ MCP-031. The field path is recorded; the value never is. An audit
+        # log that quoted what it protected would be the leak it exists to make
+        # visible.
+        self.audit.record(client, "unmask", flow_id=record.flow_id, field_path=field_path)
+        return JSONResponse(
+            {"flow_id": record.flow_id, "field_path": field_path, "value": value},
+            headers={"cache-control": "no-store"},
+        )
 
     async def delete_flows(self, request: Request) -> Response:
         self.ring.clear()
@@ -441,6 +523,190 @@ class ControlApp:
         # the proxy's event loop (REQ API-002).
         payload: dict[str, Any] = await self.offload(self.config.to_dict)
         return JSONResponse(payload)
+
+    def _config_path(self) -> Path:
+        return Path(self.config.state_dir).expanduser() / "config.yaml"
+
+    async def put_config(self, request: Request) -> JSONResponse:
+        """Change the settable configuration sections (REQ CAP-044).
+
+        The redaction pattern lists are the reason this route exists: they must
+        be editable, and the effective configuration must be readable back, or
+        "redaction is configurable" is a claim nobody can check. ``GET /config``
+        returns the full effective configuration, so the UI can show exactly
+        what is in force.
+
+        Redaction takes effect immediately, because the Redactor is shared.
+        Buffering, capture, budget, and logging are persisted and applied at
+        next start — the proxy's guards are built when it starts and rebuilding
+        them under live traffic is a Sprint 16 concern, not a silent one.
+        """
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ConfigError("the request body must be a mapping of sections")
+
+        updated = await self.offload(update_config, self.config, dict(body))
+        self.config = updated
+        # Swapped whole rather than mutated field by field: the writer thread
+        # reads this object, and a half-applied pattern list is a window in
+        # which a header is neither on the old list nor the new one.
+        self.redactor.cfg = updated.redaction
+        self.sessions.max_bytes = updated.capture.session_max_bytes
+
+        await self.offload(save_config, updated, self._config_path())
+        self.audit.record(self._client(request), "put_config", sections=sorted(body))
+        self.events.publish("state.changed", {"config": sorted(body)})
+        payload: dict[str, Any] = await self.offload(self.config.to_dict)
+        return JSONResponse(payload)
+
+    # -- sessions (REQ CAP-020, CAP-021, CAP-024) ------------------------
+
+    async def get_sessions(self, _: Request) -> JSONResponse:
+        sessions: list[SessionMeta] = await self.offload(self.sessions.list)
+        return JSONResponse([s.to_dict() for s in sessions])
+
+    async def post_sessions(self, request: Request) -> JSONResponse:
+        """Start recording. Opt-in and off by default (REQ CAP-020)."""
+        body = await request.json()
+        name = str(body.get("name") or "")
+        try:
+            meta: SessionMeta = await self.offload(self._start_session, name)
+        except SessionError as exc:
+            return error_response(exc, 409)
+        self.audit.record(self._client(request), "start_session", session_id=meta.session_id)
+        self.events.publish("session.changed", {"session_id": meta.session_id, "state": meta.state})
+        return JSONResponse(meta.to_dict(), status_code=201)
+
+    def _start_session(self, name: str) -> SessionMeta:
+        return self.sessions.start(name, profile=self.active_profile)
+
+    async def get_session(self, request: Request) -> JSONResponse:
+        session_id = request.path_params["session_id"]
+        meta = await self._session_meta(session_id)
+        if meta is None:
+            return self._not_found(f"no session {session_id}")
+        return JSONResponse(meta.to_dict())
+
+    async def _session_meta(self, session_id: str) -> SessionMeta | None:
+        try:
+            return await self.offload(self.sessions.get, session_id)  # type: ignore[no-any-return]
+        except SessionError:
+            return None
+
+    async def patch_session(self, request: Request) -> JSONResponse:
+        """Rename a session (REQ CAP-021). Nothing else is patchable: a session
+        is a recording, and everything else about it is a fact about what
+        happened."""
+        session_id = request.path_params["session_id"]
+        body = await request.json()
+        unknown = set(body) - {"name"}
+        if unknown:
+            raise ConfigError(f"cannot patch {', '.join(sorted(unknown))}")
+        try:
+            meta = await self.offload(self.sessions.rename, session_id, str(body.get("name") or ""))
+        except SessionError:
+            meta = None
+        if meta is None:
+            return self._not_found(f"no session {session_id}")
+        self.audit.record(self._client(request), "rename_session", session_id=session_id)
+        return JSONResponse(meta.to_dict())
+
+    async def post_session_stop(self, request: Request) -> JSONResponse:
+        session_id = request.path_params["session_id"]
+        try:
+            meta = await self.offload(self.sessions.stop, session_id)
+        except SessionError as exc:
+            return error_response(exc, 409)
+        self.audit.record(
+            self._client(request),
+            "stop_session",
+            session_id=session_id,
+            flows=meta.flow_count,
+            dropped=meta.dropped,
+        )
+        self.events.publish("session.changed", {"session_id": session_id, "state": "stopped"})
+        return JSONResponse(meta.to_dict())
+
+    async def delete_session(self, request: Request) -> Response:
+        session_id = request.path_params["session_id"]
+        try:
+            deleted = await self.offload(self.sessions.delete, session_id)
+        except SessionError:
+            deleted = False
+        if not deleted:
+            return self._not_found(f"no session {session_id}")
+        self.audit.record(self._client(request), "delete_session", session_id=session_id)
+        self.events.publish("session.changed", {"session_id": session_id, "state": "deleted"})
+        return Response(status_code=204)
+
+    async def get_session_flows(self, request: Request) -> JSONResponse:
+        """A page of a session's flows, same filter vocabulary as /flows.
+
+        No ``unmask`` parameter is accepted, and adding one here would have
+        nothing to reveal: these records were redacted before they reached the
+        file (REQ CAP-045).
+        """
+        session_id = request.path_params["session_id"]
+        params = dict(request.query_params)
+        detail = parse_detail(params.get("detail"), DEFAULT_LIST_DETAIL)
+        try:
+            limit = int(params.get("limit", 100))
+        except ValueError:
+            limit = 100
+        try:
+            result = await self.offload(
+                self._session_query,
+                session_id,
+                FlowFilter.from_query(params),
+                limit,
+                params.get("cursor"),
+            )
+        except SessionError as exc:
+            return error_response(exc, 404)
+        return JSONResponse(
+            serialize_flow_page(
+                result.flows,
+                next_cursor=result.next_cursor,
+                total_estimate=result.total_estimate,
+                detail=detail,
+            )
+        )
+
+    def _session_query(
+        self, session_id: str, flow_filter: FlowFilter, limit: int, cursor: str | None
+    ) -> Any:
+        return self.sessions.reader(session_id).query(flow_filter, limit=limit, cursor=cursor)
+
+    async def get_session_export(self, request: Request) -> JSONResponse:
+        """HAR or pporlock-native export (REQ CAP-024).
+
+        Reads the session file, which is already redacted, so an export cannot
+        carry a raw secret regardless of who asks for it.
+        """
+        session_id = request.path_params["session_id"]
+        fmt = (request.query_params.get("format") or "pporlock").strip().lower()
+        if fmt not in EXPORT_FORMATS:
+            raise ConfigError(
+                f"unknown export format {fmt!r}; expected one of "
+                f"{', '.join(sorted(EXPORT_FORMATS))}"
+            )
+        try:
+            payload = await self.offload(self._export, session_id, fmt)
+        except SessionError as exc:
+            return error_response(exc, 404)
+        self.audit.record(
+            self._client(request), "export_session", session_id=session_id, format=fmt
+        )
+        return JSONResponse(
+            payload,
+            headers={
+                "content-disposition": f'attachment; filename="{session_id}.{fmt}.json"',
+                "cache-control": "no-store",
+            },
+        )
+
+    def _export(self, session_id: str, fmt: str) -> dict[str, Any]:
+        return export_session(self.sessions.reader(session_id), fmt)
 
     async def get_audit(self, request: Request) -> JSONResponse:
         try:
@@ -885,6 +1151,17 @@ class ControlApp:
             Route("/exclusions", self.get_exclusions, methods=["GET"]),
             Route("/exclusions", self.put_exclusions, methods=["PUT"]),
             Route("/config", self.get_config, methods=["GET"]),
+            Route("/config", self.put_config, methods=["PUT"]),
+            # Registered before /sessions/{session_id} so "stop", "flows", and
+            # "export" are never read as session ids.
+            Route("/sessions/{session_id}/stop", self.post_session_stop, methods=["POST"]),
+            Route("/sessions/{session_id}/flows", self.get_session_flows, methods=["GET"]),
+            Route("/sessions/{session_id}/export", self.get_session_export, methods=["GET"]),
+            Route("/sessions", self.get_sessions, methods=["GET"]),
+            Route("/sessions", self.post_sessions, methods=["POST"]),
+            Route("/sessions/{session_id}", self.get_session, methods=["GET"]),
+            Route("/sessions/{session_id}", self.patch_session, methods=["PATCH"]),
+            Route("/sessions/{session_id}", self.delete_session, methods=["DELETE"]),
             Route("/audit", self.get_audit, methods=["GET"]),
             Route("/metrics", self.get_metrics, methods=["GET"]),
             Route("/events", self.get_events, methods=["GET"]),

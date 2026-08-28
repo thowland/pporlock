@@ -45,6 +45,8 @@ class FlowSink(Protocol):
 
     def record_websocket_message(self, message: Any) -> None: ...
 
+    def record_websocket_close(self, flow_id: str, close_code: Any) -> None: ...
+
 
 class NullSink:
     """Counts flows and discards them. Replaced by the ring buffer in Sprint 3."""
@@ -66,6 +68,9 @@ class NullSink:
 
     def record_websocket_message(self, message: Any) -> None:
         self.websocket_messages += 1
+
+    def record_websocket_close(self, flow_id: str, close_code: Any) -> None:
+        """No-op: there is nothing to close on a sink that discards."""
 
 
 class Counters:
@@ -380,7 +385,12 @@ class Interceptor:
         self.sink.record_websocket_message(message)
 
     def websocket_end(self, flow: Any) -> None:
-        self._ws_indexes.pop(_flow_id(flow), None)
+        flow_id = _flow_id(flow)
+        self._ws_indexes.pop(flow_id, None)
+        close_code = getattr(getattr(flow, "websocket", None), "close_code", None)
+        recorder = getattr(self.sink, "record_websocket_close", None)
+        if recorder is not None:
+            recorder(flow_id, close_code)
 
     def replace_ruleset(self, ruleset: RuleSet) -> None:
         """Swap in a new rule set without restarting the proxy (REQ MOD-004).

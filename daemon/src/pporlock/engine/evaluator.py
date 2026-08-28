@@ -734,16 +734,36 @@ class Evaluator:
         started = time.perf_counter()
         ops = rule.params.get(side) or {}
         changed = False
+        # Headers this rule touches that carry a security meaning. A CSP removed
+        # or rewritten by a plain headers rule weakens the page exactly as much
+        # as one removed by strip_csp, and until this existed only the latter
+        # said so — so the in-page banner, which exists precisely to stop a page
+        # being weakened invisibly, never appeared for the former. The note is
+        # attached to the act, not to the transform that happens to perform it.
+        touched_csp: list[str] = []
 
         for name in ops.get("remove", []) or []:
             mutation.remove(str(name))
             changed = True
+            if _is_csp_header(str(name)):
+                touched_csp.append(str(name).lower())
         for name, value in (ops.get("set") or {}).items():
             mutation.set(str(name), str(value))
             changed = True
+            if _is_csp_header(str(name)):
+                touched_csp.append(str(name).lower())
         for name, value in (ops.get("add") or {}).items():
             mutation.add(str(name), str(value))
             changed = True
+
+        if touched_csp and side == "response":
+            builder.note(
+                NoteCode.CSP_MODIFIED,
+                f"a headers rule changed {', '.join(sorted(set(touched_csp)))}",
+                module=rule.module,
+                headers=sorted(set(touched_csp)),
+                rule=rule.name,
+            )
 
         builder.record(
             phase=phase,
@@ -756,6 +776,14 @@ class Evaluator:
             side=side,
             operations=ops,
         )
+
+
+#: Content-Security-Policy and its report-only sibling, lowercased.
+CSP_HEADERS = frozenset({"content-security-policy", "content-security-policy-report-only"})
+
+
+def _is_csp_header(name: str) -> bool:
+    return name.lower() in CSP_HEADERS
 
 
 def _guess_content_type(path: Path) -> str:

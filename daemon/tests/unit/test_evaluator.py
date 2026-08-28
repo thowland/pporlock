@@ -697,6 +697,71 @@ class TestResponsePhasesAreSeparate:
         assert "content-security-policy" in decision.mutation.remove_headers
         assert b.build().has_note(NoteCode.CSP_MODIFIED)
 
+    def test_a_headers_rule_removing_csp_says_so(self) -> None:
+        """REQ EXT-020. A CSP removed by a headers rule weakens the page exactly
+        as much as one removed by strip_csp.
+
+        Only the transform used to emit the note, so a rule written the other
+        way relaxed CSP with no note, no banner, and nothing in the panel — the
+        precise invisible weakening the banner exists to prevent.
+        """
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "relax",
+                    "action": "headers",
+                    "response": {"remove": ["Content-Security-Policy"]},
+                }
+            ]
+        )
+        ev.evaluate_response_headers(
+            req(), resp(headers=(("content-security-policy", "default-src 'self'"),)), b
+        )
+        prov = b.build()
+        assert prov.has_note(NoteCode.CSP_MODIFIED)
+        # Reported under its canonical lowercase name whatever the rule wrote.
+        assert any("content-security-policy" in n.message for n in prov.notes)
+
+    def test_a_headers_rule_replacing_csp_also_says_so(self) -> None:
+        """Loosening a policy is a modification, not merely removing one."""
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "loosen",
+                    "action": "headers",
+                    "response": {"set": {"content-security-policy": "default-src *"}},
+                }
+            ]
+        )
+        ev.evaluate_response_headers(req(), resp(), b)
+        assert b.build().has_note(NoteCode.CSP_MODIFIED)
+
+    def test_a_headers_rule_touching_other_headers_says_nothing(self) -> None:
+        """The note means something specific. A note on every header rule would
+        make the banner appear constantly and teach people to ignore it."""
+        b = builder()
+        ev = evaluator([{"name": "h", "action": "headers", "response": {"set": {"x-thing": "1"}}}])
+        ev.evaluate_response_headers(req(), resp(), b)
+        assert not b.build().has_note(NoteCode.CSP_MODIFIED)
+
+    def test_a_request_side_csp_header_is_not_reported(self) -> None:
+        """CSP is a response header. A request-side rule naming it is doing
+        something else, and claiming the page was weakened would be wrong."""
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "req",
+                    "action": "headers",
+                    "request": {"set": {"content-security-policy": "x"}},
+                }
+            ]
+        )
+        ev.evaluate_request(req(), b)
+        assert not b.build().has_note(NoteCode.CSP_MODIFIED)
+
     def test_body_evaluation_does_not_touch_header_rules(self) -> None:
         b = builder()
         ev = evaluator([{"name": "h", "action": "headers", "response": {"remove": ["x"]}}])

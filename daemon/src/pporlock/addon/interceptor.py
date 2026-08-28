@@ -18,7 +18,7 @@ import time
 from typing import Any, Protocol
 
 from ..config import Config
-from ..engine.cost import decide_offload
+from ..engine.cost import ModuleCostIndex, decide_offload
 from ..engine.evaluator import Evaluator, TimeBudget
 from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.provenance import NoteCode, Provenance, ProvenanceBuilder
@@ -120,6 +120,10 @@ class Interceptor:
         self.exclusions = exclusions if exclusions is not None else load_exclusions()
         self.profile = profile
         self.counters = Counters()
+        # Per-module timing for GET /metrics (REQ PRF-007). Accumulated as flows
+        # complete so the inline-classified metrics route never has to walk the
+        # ring buffer to answer.
+        self.module_cost = ModuleCostIndex()
         self.started_at = time.time()
         self._ws_indexes: dict[str, int] = {}
         # Set by the runner when the control server should be started from
@@ -374,9 +378,16 @@ class Interceptor:
         _unstash(flow, "wants_body")
 
         elapsed_ms = (time.perf_counter() - started) * 1000 if started is not None else 0.0
-        self.sink.record_http(
-            request, response, builder.build(elapsed_ms), {"pporlock_ms": elapsed_ms}
-        )
+        provenance = builder.build(elapsed_ms)
+        # Two consumers, two shapes. `/metrics` wants every module that spent
+        # time, including the pseudo-modules that file rules carry; the module
+        # library wants the four columns its contract declares, per installed
+        # module. One walk each, both O(entries), in the same place the flow
+        # counters already increment (REQ PRF-007).
+        self.module_cost.record(provenance)
+        if self.evaluator.registry is not None:
+            self.evaluator.registry.record_provenance(provenance)
+        self.sink.record_http(request, response, provenance, {"pporlock_ms": elapsed_ms})
 
     def error(self, flow: Any) -> None:
         """An upstream or client error. Counted, not swallowed."""

@@ -627,6 +627,13 @@ class Evaluator:
                     **detail,
                 )
 
+                # Drained here, per transform, so each note carries the module
+                # that caused it. One context is shared across every rule in this
+                # phase; draining once at the end would leave every SRI_STRIPPED
+                # and SCRIPT_INJECTED with a null module, which is the wrong
+                # answer to "which module weakened this page" (§2.5, A03).
+                self._drain_transform_notes(context, builder, module=rule.module)
+
         # Any document whose body we rewrote must have its integrity attributes
         # stripped, whether or not a rule asked (REQ PXY-040). The breakage is
         # invisible from the proxy's side — a successful response the browser
@@ -646,17 +653,45 @@ class Evaluator:
                 reason="a rewritten document must not fail its own integrity checks",
             )
 
+        # The implicit strip is the engine's own act, not a module's, so what is
+        # left in the context after it belongs to nobody in particular.
+        self._drain_transform_notes(context, builder, module=None)
+
         self._run_python_hooks(
             "on_response", builder, decision.mutation, request=request, response=response
         )
-
-        for code, message, note_detail in context.notes:
-            builder.note(NoteCode(code), message, **note_detail)
 
         if text != original:
             decision.mutation.body = text.encode(_charset(response))
 
         return decision
+
+    @staticmethod
+    def _drain_transform_notes(
+        context: TransformContext, builder: ProvenanceBuilder, *, module: str | None
+    ) -> None:
+        """Move a transform's notes into provenance, attributed.
+
+        An unrecognised code becomes a MODULE_ERROR rather than a ValueError.
+        Built-in transforms only emit codes from the taxonomy, but a
+        module-registered transform (REQ MOD-021) calling ``ctx.note`` with
+        anything else would otherwise take down evaluation of the whole body
+        phase from inside a note — a reporting mechanism that can destroy the
+        thing it is reporting on.
+        """
+        for code, message, detail in context.drain():
+            try:
+                note_code = NoteCode(code)
+            except ValueError:
+                builder.note(
+                    NoteCode.MODULE_ERROR,
+                    f"transform emitted an unknown note code {code!r}: {message}",
+                    module=module,
+                    note_code=code,
+                    **detail,
+                )
+                continue
+            builder.note(note_code, message, module=module, **detail)
 
     def evaluate_response(
         self,

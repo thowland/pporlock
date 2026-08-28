@@ -1,0 +1,98 @@
+{
+  "id": "14-request-headers-still-run-on-a-blocked-request",
+  "description": "A short-circuited request still runs its header rules: a rule adding a header the synthesised response should carry is legitimate, and skipping them silently would be surprising. The ordering of the two entries is the behaviour under test.",
+  "requirements": [
+    "PXY-020",
+    "PXY-036",
+    "MOD-012"
+  ],
+  "rules": [
+    {
+      "name": "block the tracker",
+      "action": "block",
+      "match": {
+        "host": "t.example.test"
+      }
+    },
+    {
+      "name": "label everything we touch",
+      "action": "headers",
+      "match": {
+        "host": "t.example.test"
+      },
+      "request": {
+        "set": {
+          "x-pporlock-seen": "1"
+        },
+        "remove": [
+          "cookie"
+        ]
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c14",
+    "host": "t.example.test",
+    "path": "/px.gif",
+    "dest": "image",
+    "headers": [
+      [
+        "cookie",
+        "sid=abc"
+      ],
+      [
+        "accept",
+        "image/*"
+      ]
+    ]
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "block the tracker",
+        "action": "block",
+        "outcome": "applied",
+        "detail": {
+          "stub": "auto",
+          "derived_from_dest": "image",
+          "synthesized_status": 200,
+          "synthesized_content_type": "image/gif"
+        },
+        "duration_ms": "<timing>"
+      },
+      {
+        "seq": 1,
+        "phase": "request_headers",
+        "module": "corpus",
+        "rule_id": "corpus:1",
+        "rule_name": "label everything we touch",
+        "action": "headers",
+        "outcome": "applied",
+        "detail": {
+          "side": "request",
+          "operations": {
+            "set": {
+              "x-pporlock-seen": "1"
+            },
+            "remove": [
+              "cookie"
+            ]
+          }
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

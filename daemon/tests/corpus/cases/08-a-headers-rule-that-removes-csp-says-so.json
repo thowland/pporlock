@@ -1,0 +1,85 @@
+{
+  "id": "08-a-headers-rule-that-removes-csp-says-so",
+  "description": "A plain headers rule removing Content-Security-Policy weakens the page exactly as much as strip_csp does, so the note is attached to the act rather than to the transform that happens to perform it.",
+  "requirements": [
+    "PXY-036",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "loosen the policy by hand",
+      "action": "headers",
+      "match": {
+        "host": "app.example.test"
+      },
+      "response": {
+        "remove": [
+          "content-security-policy"
+        ]
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c08",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c08",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ],
+      [
+        "content-security-policy",
+        "default-src 'self'"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_headers",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "loosen the policy by hand",
+        "action": "headers",
+        "outcome": "applied",
+        "detail": {
+          "side": "response",
+          "operations": {
+            "remove": [
+              "content-security-policy"
+            ]
+          }
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "csp_modified",
+        "severity": "warning",
+        "module": "corpus",
+        "message": "a headers rule changed content-security-policy",
+        "detail": {
+          "headers": [
+            "content-security-policy"
+          ],
+          "rule": "loosen the policy by hand"
+        }
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

@@ -1,0 +1,215 @@
+{
+  "id": "16-dry-run-diff-for-a-candidate-module",
+  "description": "REQ CAP-030..033. An uninstalled module is materialised, loaded through the ordinary loader and replayed over two recorded flows: one it changes, one it does not match. The golden pins the unified body diff, the header ops and the aggregate tallies \u2014 the three things a dry run is read for.",
+  "requirements": [
+    "CAP-030",
+    "CAP-031",
+    "CAP-032",
+    "CAP-033",
+    "TST-004"
+  ],
+  "kind": "dryrun",
+  "rules": [],
+  "dry_run": {
+    "modules": [
+      {
+        "name": "corpus-injector",
+        "files": {
+          "module.yaml": "name: corpus-injector\nversion: 1.0.0\npporlock_api: \"1\"\nrules:\n  - name: strip the csp\n    action: headers\n    match:\n      host: app.example.test\n    response:\n      remove: [content-security-policy]\n  - name: inject the shim\n    action: body\n    match:\n      host: app.example.test\n      content_type: text/html\n    transform:\n      kind: inject_script\n      inline: window.__pporlock=1\n      position: head_end\n"
+        }
+      }
+    ],
+    "include_diffs": true
+  },
+  "flows": [
+    {
+      "flow_id": "d01",
+      "request": {
+        "flow_id": "d01",
+        "host": "app.example.test",
+        "path": "/",
+        "dest": "document"
+      },
+      "response": {
+        "flow_id": "d01",
+        "status": 200,
+        "headers": [
+          [
+            "content-type",
+            "text/html; charset=utf-8"
+          ],
+          [
+            "content-security-policy",
+            "default-src 'self'"
+          ]
+        ],
+        "body": "<html><head><script src=\"https://cdn.vendor.example/a.js\" integrity=\"sha384-abc\" crossorigin=\"anonymous\"></script></head><body><h1>hello</h1></body></html>"
+      }
+    },
+    {
+      "flow_id": "d02",
+      "request": {
+        "flow_id": "d02",
+        "host": "other.example.test",
+        "path": "/x.json",
+        "dest": "empty"
+      },
+      "response": {
+        "flow_id": "d02",
+        "status": 200,
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "body": "{\"a\":1}"
+      }
+    }
+  ],
+  "expected_dry_run": {
+    "summary": {
+      "flows_evaluated": 2,
+      "flows_skipped": 0,
+      "matched": 1,
+      "modified": 1,
+      "blocked": 0,
+      "errors": 0,
+      "avg_ms": "<timing>",
+      "p95_ms": "<timing>",
+      "by_module": {
+        "corpus-injector": 1
+      },
+      "by_rule": {
+        "corpus-injector:0": 1,
+        "corpus-injector:1": 1
+      },
+      "by_note": {
+        "csp_modified": 1,
+        "script_injected": 1,
+        "sri_stripped": 1
+      }
+    },
+    "results": [
+      {
+        "flow_id": "d01",
+        "url": "https://app.example.test/",
+        "method": "GET",
+        "status": 200,
+        "blocked": false,
+        "modified": true,
+        "provenance": {
+          "profile": "default",
+          "evaluated_modules": [
+            "corpus-injector"
+          ],
+          "entries": [
+            {
+              "seq": 0,
+              "phase": "response_headers",
+              "module": "corpus-injector",
+              "rule_id": "corpus-injector:0",
+              "rule_name": "strip the csp",
+              "action": "headers",
+              "outcome": "applied",
+              "detail": {
+                "side": "response",
+                "operations": {
+                  "remove": [
+                    "content-security-policy"
+                  ]
+                }
+              },
+              "duration_ms": "<timing>"
+            },
+            {
+              "seq": 1,
+              "phase": "response_body",
+              "module": "corpus-injector",
+              "rule_id": "corpus-injector:1",
+              "rule_name": "inject the shim",
+              "action": "body",
+              "outcome": "applied",
+              "detail": {
+                "transform": "inject_script",
+                "offload": true,
+                "cost": "expensive",
+                "offload_reason": "expensive transform"
+              },
+              "duration_ms": "<timing>"
+            },
+            {
+              "seq": 2,
+              "phase": "response_body",
+              "module": "",
+              "rule_id": "",
+              "rule_name": "implicit SRI strip",
+              "action": "body",
+              "outcome": "applied",
+              "detail": {
+                "reason": "a rewritten document must not fail its own integrity checks"
+              },
+              "duration_ms": "<timing>"
+            }
+          ],
+          "notes": [
+            {
+              "code": "csp_modified",
+              "severity": "warning",
+              "module": "corpus-injector",
+              "message": "a headers rule changed content-security-policy",
+              "detail": {
+                "headers": [
+                  "content-security-policy"
+                ],
+                "rule": "strip the csp"
+              }
+            },
+            {
+              "code": "script_injected",
+              "severity": "warning",
+              "module": "corpus-injector",
+              "message": "injected a script tag",
+              "detail": {
+                "nonce_reused": false,
+                "position": "head_end",
+                "src": null
+              }
+            },
+            {
+              "code": "sri_stripped",
+              "severity": "warning",
+              "module": null,
+              "message": "removed 2 integrity/crossorigin attribute(s)",
+              "detail": {
+                "count": 2
+              }
+            }
+          ],
+          "total_ms": "<timing>",
+          "short_circuited_by": null
+        },
+        "diff": {
+          "headers": [
+            {
+              "op": "remove",
+              "name": "content-security-policy",
+              "value": null,
+              "phase": "response"
+            }
+          ],
+          "body": {
+            "kind": "unified",
+            "text": "--- before\n+++ after\n@@ -1 +1 @@\n-<html><head><script src=\"https://cdn.vendor.example/a.js\" integrity=\"sha384-abc\" crossorigin=\"anonymous\"></script></head><body><h1>hello</h1></body></html>+<html><head><script src=\"https://cdn.vendor.example/a.js\"></script><script>window.__pporlock=1</script></head><body><h1>hello</h1></body></html>",
+            "truncated": false
+          }
+        }
+      }
+    ],
+    "modules": {
+      "loaded": 1,
+      "errors": [],
+      "rules": 2
+    }
+  }
+}

@@ -151,6 +151,32 @@ class RedactionConfig:
         "x-api-key",
         "x-auth-token",
     )
+    #: Query-string parameter names whose values are secrets (SPEC-0 §9.2).
+    #:
+    #: A separate list from ``json_key_patterns`` because the failure modes
+    #: differ: a JSON key is matched by substring against a document nobody
+    #: navigates to, while a query parameter appears in a URL that is displayed
+    #: in the flow table, written into a session file, and echoed in a
+    #: ``Referer``. The defaults are the names that actually carry bearer
+    #: credentials in a URL — OAuth implicit flows, presigned URLs, and the long
+    #: tail of analytics endpoints — rather than everything that could be a key.
+    query_patterns: tuple[str, ...] = (
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "token",
+        "api_key",
+        "apikey",
+        "auth",
+        "signature",
+        "sig",
+        "password",
+        "secret",
+        "code",
+        "session",
+        "x-amz-security-token",
+        "x-amz-signature",
+    )
     json_key_patterns: tuple[str, ...] = (
         "password",
         "token",
@@ -167,8 +193,16 @@ class RedactionConfig:
 
 @dataclass(slots=True)
 class LoggingConfig:
+    """Where the daemon's own diagnostics go, and how large they may get.
+
+    Rotation is by size with a retained-file count (REQ PXY-007); see
+    ``cli/logs.py`` for why it is copy-and-truncate rather than rename.
+    """
+
     level: str = "info"
     dir: str = str(Path.home() / "Library" / "Logs" / "pporlock")
+    max_bytes: int = 8 * 1024 * 1024
+    retain: int = 5
 
 
 @dataclass(slots=True)
@@ -226,6 +260,10 @@ class Config:
             raise ConfigError("modules.quarantine_after_failures must be at least 1")
         if self.logging.level.lower() not in {"debug", "info", "warning", "error"}:
             raise ConfigError(f"logging.level={self.logging.level!r} is not a known level")
+        if self.logging.max_bytes <= 0:
+            raise ConfigError("logging.max_bytes must be positive", setting="logging.max_bytes")
+        if self.logging.retain < 1:
+            raise ConfigError("logging.retain must be at least 1", setting="logging.retain")
         return self
 
     def to_dict(self) -> dict[str, Any]:

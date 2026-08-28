@@ -179,3 +179,104 @@ Two consequences, both now standing practice:
   anything new that must run in the daemon gets a case there.
 - A sprint's exit demo is not optional and is not a formality. Both the sprints
   that shipped this passed every automated gate.
+
+---
+
+## OI-12 — PRF-001 is not met, and not by tuning
+
+**Found:** Sprint 16, measuring it.
+
+```
+PRF-002  PASS   0.0057 ms p95 engine overhead    budget 2 ms    (~350x headroom)
+PRF-001  FAIL   +327% p50 added page latency     budget 15% p50
+```
+
+The benchmark was not adjusted until it passed. The decomposition says where
+the time goes and it is not the rules engine:
+
+| | |
+|---|---|
+| engine decision path | 0.004 ms/flow |
+| total added | 1.54 ms/request |
+| over one reused connection | 0.70 ms/request |
+| against a 30 ms-RTT origin | +16.4% p50 |
+
+**99.7% of the added latency is mitmproxy's per-request pipeline**, not
+pporlock's. The loopback figure is unfairly harsh — a 0.4 ms baseline makes any
+fixed cost look enormous — but even corrected for realistic origin latency the
+15% p50 budget is missed.
+
+**To close:** this is a scoping decision, not an optimisation task. Either
+PRF-001 is restated in terms the architecture can meet (a per-flow overhead
+budget, which PRF-002 already covers with enormous margin), or it is measured
+the way it is written — Chrome against a real origin — which needs a harness
+this project does not have. Making the rules engine faster cannot move it.
+
+---
+
+## OI-13 — `Outcome.SKIPPED_SHORT_CIRCUIT` is declared and never emitted
+
+**Found:** Sprint 16.
+
+It is in the SPEC-0 §4.3 taxonomy, in the contract, and in the completeness
+tests every client renders against — for a state nothing in `src/` produces.
+
+Not removed, because removing a value from a published enum is a contract
+decision rather than a tidy-up. Either the engine should emit it (a rule skipped
+*because* an earlier one short-circuited is arguably worth distinguishing from
+never being reached) or it should leave the taxonomy.
+
+---
+
+## OI-14 — three routes the OpenAPI does not describe
+
+**Found:** Sprint 16, by TST-005.
+
+- `GET /rules` and `PUT /rules` — served, implemented, tested, used by the web
+  UI's rule editor, described in SPEC-0 §6, absent from `contracts/openapi.yaml`.
+- `POST /pair/begin` — served, and driven by `pporlock pair`. `/pair`
+  (redemption) is declared; the half that mints the code is not.
+- `POST /flows/{flow_id}/suggest-rule` declares only `200` but validates
+  `intent` and answers `400`, so a generated client has no error case.
+
+The first two sit in a named `UNDECLARED_ROUTES` allowlist with a test that
+**fails once the OpenAPI catches up**, so the exemption cannot quietly become
+permanent.
+
+---
+
+## OI-15 — should a module be able to extend the note taxonomy?
+
+**Found:** Sprint 16.
+
+`ctx.note("some_new_code", …)` from a module-registered transform used to raise
+`ValueError` and take down the entire body phase — one module's typo breaking
+every rule after it. That is fixed: an unrecognised code degrades to a
+`MODULE_ERROR` note carrying the requested code.
+
+The design question underneath is open. Every client renders notes from a closed
+vocabulary with a completeness test, so a module-invented code has nowhere to be
+described. Either modules are confined to the taxonomy (current behaviour) or
+the taxonomy gains an explicit extension mechanism with a rendering fallback.
+
+---
+
+## A note on process
+
+Three of this project's most serious defects were invisible to a full, green
+test suite, and each was found by running the real thing:
+
+- **OI-11** — two sprints shipped a module system the daemon never constructed.
+  Found by an end-to-end banner test.
+- **The wire-shape bugs** — `GET /modules` returned an array the client did not
+  expect, and the module library threw on first contact with a real daemon.
+  Found by taking a screenshot.
+- **Query-string secrets written to disk unredacted** — the header path was
+  masked, the query path was not. Found by walking the security checklist by
+  hand rather than trusting the scanners.
+
+The common shape: a test that constructs its own subject cannot notice the
+subject is never built, and a test that stubs its own client agrees with
+whatever the client already believed. Exit demos, real-system screenshots, and
+hand-walked security review are not ceremony here — they are the only things
+that have ever found this class of bug.

@@ -1,0 +1,77 @@
+{
+  "id": "13-a-failing-transform-is-attributed-not-fatal",
+  "description": "A transform that raises is recorded as an error against its own rule and raises MODULE_ERROR; the flow continues and the body is left alone (REQ MOD-024). The message is part of the golden because a change to it changes what the operator reads in the UI.",
+  "requirements": [
+    "MOD-024",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "a rule with a bad regex flag",
+      "action": "body",
+      "match": {
+        "host": "app.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "regex_sub",
+        "pattern": "app",
+        "repl": "APP",
+        "flags": "z"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c13",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c13",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_body",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "a rule with a bad regex flag",
+        "action": "body",
+        "outcome": "error",
+        "detail": {
+          "transform": "regex_sub",
+          "offload": false,
+          "cost": "sized",
+          "offload_reason": "body 29 < 262144",
+          "error": "unknown regex flag 'z'; valid flags are ims x"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "module_error",
+        "severity": "error",
+        "module": "corpus",
+        "message": "regex_sub failed: unknown regex flag 'z'; valid flags are ims x",
+        "detail": {}
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

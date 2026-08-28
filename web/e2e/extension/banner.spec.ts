@@ -149,39 +149,32 @@ async function startDaemon(): Promise<void> {
 }
 
 /**
- * Drive the worker from an extension page rather than from the worker itself:
- * chrome.runtime.sendMessage does not dispatch to the sender's own listener, so
- * a worker cannot message itself. A page is also what the popup really does.
+ * One long-lived extension page, used for both messaging and state reads.
+ *
+ * Two things went wrong before this existed. Reading state through the service
+ * worker handle captured in beforeAll breaks when MV3 evicts the worker, and a
+ * stale handle reads nothing rather than something old. Opening a fresh page
+ * per read instead — inside a poll — churned a page every few hundred
+ * milliseconds, which destabilised the worker on its own.
+ *
+ * So: one page, opened once, reused. It is an extension page, so
+ * chrome.runtime and chrome.storage are both available on it, and messaging
+ * from a page is what the popup really does anyway.
  */
+let extPage: import('@playwright/test').Page;
+
 async function sw<T>(message: unknown): Promise<T> {
-  const page = await context.newPage();
-  try {
-    await page.goto(`chrome-extension://${extensionId}/src/popup/options.html`);
-    return (await page.evaluate(
-      async (msg) => (await chrome.runtime.sendMessage(msg)) as unknown,
-      message,
-    )) as T;
-  } finally {
-    await page.close();
-  }
+  return (await extPage.evaluate(
+    async (msg) => (await chrome.runtime.sendMessage(msg)) as unknown,
+    message,
+  )) as T;
 }
 
 async function extState(): Promise<Record<string, unknown>> {
-  return worker.evaluate(
-    async () =>
-      ((await chrome.storage.local.get('pporlock.state'))['pporlock.state'] ?? {}) as Record<
-        string,
-        unknown
-      >,
-  );
+  return (await extPage.evaluate(
+    async () => (await chrome.storage.local.get('pporlock.state'))['pporlock.state'] ?? {},
+  )) as Record<string, unknown>;
 }
-
-// Without a non-loopback interface this suite cannot prove anything, and a
-// suite that silently proves nothing is worse than one that says so.
-test.skip(
-  FIXTURE_HOST === null,
-  'no non-loopback interface: the fixture would be bypassed and nothing would route through the proxy',
-);
 
 test.beforeAll(async () => {
   test.setTimeout(240_000);
@@ -202,6 +195,8 @@ test.beforeAll(async () => {
 
   worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
   extensionId = new URL(worker.url()).host;
+  extPage = await context.newPage();
+  await extPage.goto(`chrome-extension://${extensionId}/src/popup/options.html`);
 
   await worker.evaluate(
     async ([origin, tok]) => {
@@ -295,7 +290,9 @@ test('the banner is in a closed shadow root, unreachable from the page', async (
 test('suppressing the host silences the banner', async () => {
   const reply = await sw<{ ok: boolean }>({ type: 'suppress_host', host: FIXTURE_HOST });
   expect(reply.ok).toBe(true);
-  expect((await extState()).suppressedHosts).toContain(FIXTURE_HOST);
+  await expect
+    .poll(async () => (await extState()).suppressedHosts as string[], { timeout: 10_000 })
+    .toContain(FIXTURE_HOST);
 
   const page = await context.newPage();
   await page.goto(`http://${FIXTURE_HOST}:${fixturePort}/csp/nonce`, {
@@ -324,19 +321,42 @@ test('suppression silences the warning, not the fact', async () => {
 
 test('unsuppressing brings it back', async () => {
   await sw({ type: 'unsuppress_host', host: FIXTURE_HOST });
-  expect((await extState()).suppressedHosts).not.toContain(FIXTURE_HOST);
+  // Settled before navigating, for the same reason as the other direction:
+  // asserting a banner appears while the suppression might still be in place
+  // is a coin toss, and it lands wrong under load.
+  await expect
+    .poll(async () => (await extState()).suppressedHosts as string[], { timeout: 10_000 })
+    .not.toContain(FIXTURE_HOST);
 
+  // Reloading rather than a single load: the worker warns on tab-complete
+  // after reading provenance from the daemon, and one navigation gives it one
+  // chance. A reload gives it another without weakening the assertion — the
+  // banner still has to appear.
   const page = await context.newPage();
-  await page.goto(`http://${FIXTURE_HOST}:${fixturePort}/csp/nonce`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30_000,
-  });
-  await expect.poll(async () => bannerHostPresent(page), { timeout: 20_000 }).toBe(true);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.goto(`http://${FIXTURE_HOST}:${fixturePort}/csp/nonce`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    try {
+      await expect.poll(async () => bannerHostPresent(page), { timeout: 8000 }).toBe(true);
+      break;
+    } catch {
+      if (attempt === 2) throw new Error('no banner after three navigations');
+    }
+  }
+  expect(await bannerHostPresent(page)).toBe(true);
   await page.close();
 });
 
 test('turning the banner off entirely silences every host', async () => {
   await sw({ type: 'set_banner_enabled', enabled: false });
+  // Confirm the setting actually landed before navigating. The reply comes
+  // back when the handler returns, but an MV3 worker can be evicted and
+  // restarted between messages, and asserting on a banner's absence while the
+  // setting might not have persisted tests nothing. This failed only in a full
+  // suite run, which is where that timing is worst.
+  await expect.poll(async () => (await extState()).bannerEnabled, { timeout: 10_000 }).toBe(false);
 
   const page = await context.newPage();
   await page.goto(`http://${FIXTURE_HOST}:${fixturePort}/csp/nonce`, {
@@ -348,4 +368,5 @@ test('turning the banner off entirely silences every host', async () => {
   await page.close();
 
   await sw({ type: 'set_banner_enabled', enabled: true });
+  await expect.poll(async () => (await extState()).bannerEnabled, { timeout: 10_000 }).toBe(true);
 });

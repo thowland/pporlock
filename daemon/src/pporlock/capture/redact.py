@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import quote_plus
 
 from ..config import RedactionConfig
 from ..engine.models import NormalizedRequest, NormalizedResponse, WebSocketMessage
@@ -72,6 +73,28 @@ def _matches(name: str, patterns: tuple[str, ...]) -> bool:
         elif candidate == lowered:
             return True
     return False
+
+
+def _rebuild_url(url: str, query: tuple[tuple[str, str], ...]) -> str:
+    """Replace a URL's query string with ``query``, leaving the rest untouched.
+
+    Only the query component is rewritten, and the fragment is preserved. A URL
+    with no ``?`` is returned unchanged: there is nothing to rebuild, and
+    appending one would invent a query the request never carried.
+    """
+    if "?" not in url:
+        return url
+    base, _, remainder = url.partition("?")
+    _, hash_sep, fragment = remainder.partition("#")
+    # A mask is written through verbatim rather than percent-encoded. The whole
+    # purpose of the mask format (SPEC-0 §9.1) is that a human reading the flow
+    # table can see at a glance that a value was redacted; `%C2%ABredacted%3A…`
+    # is unreadable and looks like data rather than an absence.
+    parts = [
+        f"{quote_plus(name)}={value if is_masked(value) else quote_plus(value)}"
+        for name, value in query
+    ]
+    return f"{base}?{'&'.join(parts)}{hash_sep}{fragment}"
 
 
 def _key_matches(key: str, patterns: tuple[str, ...]) -> bool:
@@ -168,14 +191,51 @@ class Redactor:
             return mask(text), True
         return node, False
 
+    # -- query strings ---------------------------------------------------
+
+    def redact_query(
+        self, query: tuple[tuple[str, str], ...]
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        """Mask every query parameter whose name matches (REQ CAP-045).
+
+        A credential in a URL is not a hypothetical: OAuth implicit flows, S3
+        presigned URLs and a long tail of analytics endpoints all put one there.
+        Until Sprint 16 the same bearer token was masked in the ``Authorization``
+        header and written verbatim in ``request.query`` and ``request.url`` —
+        so a session file on disk contained the unredacted secret, which is
+        precisely what CAP-045 says must never happen, and the flow table
+        displayed it.
+
+        Matched by substring, like JSON keys and for the same reason: the names
+        that carry secrets are spelled every way a hundred APIs could spell them.
+        """
+        if not self.cfg.enabled or not query:
+            return query, False
+        out: list[tuple[str, str]] = []
+        changed = False
+        for name, value in query:
+            if value and not is_masked(value) and _key_matches(name, self.cfg.query_patterns):
+                out.append((name, mask(value)))
+                changed = True
+            else:
+                out.append((name, value))
+        return tuple(out), changed
+
     # -- whole records ---------------------------------------------------
 
     def redact_request(self, request: NormalizedRequest) -> tuple[NormalizedRequest, bool]:
         headers, header_changed = self.redact_headers(request.headers)
         body, body_changed = self.redact_json_body(request.body)
-        if not (header_changed or body_changed):
+        query, query_changed = self.redact_query(request.query)
+        if not (header_changed or body_changed or query_changed):
             return request, False
-        return dataclasses.replace(request, headers=headers, body=body), True
+        replacements: dict[str, Any] = {"headers": headers, "body": body, "query": query}
+        if query_changed:
+            # The URL is a second copy of the same secret, and it is the copy
+            # the flow table shows and the session file stores. Rebuilding it
+            # from the masked pairs is the only way the two agree.
+            replacements["url"] = _rebuild_url(request.url, query)
+        return dataclasses.replace(request, **replacements), True
 
     def redact_response(self, response: NormalizedResponse) -> tuple[NormalizedResponse, bool]:
         headers, header_changed = self.redact_headers(response.headers)

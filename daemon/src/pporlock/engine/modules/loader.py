@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from ...errors import ModuleApiVersionError, ModuleLoadError, PporlockError
+from ..cost import ModuleStat
 from ..ruleset import DEFAULT_PRIORITY, CompiledRule, compile_rule
 from .context import MODULE_API_VERSION, SUPPORTED_API_VERSIONS
 
@@ -89,6 +90,11 @@ class LoadedModule:
     python: Any = None
     state: str = "loaded"
     error: ModuleError | None = None
+    #: Live cost and effect, accumulated from provenance (REQ PRF-007). Mutable
+    #: and owned by the registry, which preserves it across reloads — the
+    #: question "is this module expensive" is about the module, not about the
+    #: particular load of it that happens to be resident.
+    stats: ModuleStat = field(default_factory=lambda: ModuleStat(module=""))
     #: Consecutive hook failures, for quarantine (REQ MOD-025).
     failures: int = 0
     quarantine_reason: str | None = None
@@ -124,6 +130,10 @@ class LoadedModule:
             "description": self.description,
             "author": self.author,
             "error": self.error.to_dict() if self.error else None,
+            # REQ PRF-007. Always present, never omitted: the module library
+            # renders these columns, and a field the contract declares but the
+            # daemon never sends is a field every client has to guess about.
+            "stats": self.stats.to_status_dict(),
             "quarantine": (
                 {
                     "reason": self.quarantine_reason,

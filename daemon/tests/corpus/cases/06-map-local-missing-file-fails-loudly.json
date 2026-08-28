@@ -1,0 +1,62 @@
+{
+  "id": "06-map-local-missing-file-fails-loudly",
+  "description": "A map_local pointing at a file that is not there looks exactly like a rule that did not match, so it is recorded as an error and raises MAP_LOCAL_MISSING rather than passing the request through quietly (REQ PXY-034).",
+  "requirements": [
+    "PXY-034",
+    "CAP-010"
+  ],
+  "asset_root": "assets",
+  "rules": [
+    {
+      "name": "serve a banner that was never installed",
+      "action": "map_local",
+      "match": {
+        "host": "cdn.vendor.example",
+        "path": "^/gone\\.html$"
+      },
+      "file": "not-installed.html"
+    }
+  ],
+  "request": {
+    "flow_id": "c06",
+    "host": "cdn.vendor.example",
+    "path": "/gone.html",
+    "dest": "iframe"
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "serve a banner that was never installed",
+        "action": "map_local",
+        "outcome": "error",
+        "detail": {
+          "file": "not-installed.html",
+          "error": "local file not found: not-installed.html"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [
+      {
+        "code": "map_local_missing",
+        "severity": "error",
+        "module": "corpus",
+        "message": "local file not found: not-installed.html",
+        "detail": {
+          "file": "not-installed.html"
+        }
+      }
+    ],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

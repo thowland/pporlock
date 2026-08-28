@@ -109,6 +109,12 @@ ignore = [
 # rule live everywhere it can catch a real mistake.
 "tests/**" = ["S105", "S106", "S108", "S104"]
 
+# The benchmark harness (REQ PRF-003) is not part of the shipped package, so it
+# reaches pporlock through an explicit sys.path insert. E402 fires on the
+# imports that follow it; the isort block ordering (I001) fires for the same
+# reason. Both are consequences of that one deliberate arrangement.
+"bench/**" = ["E402", "I001"]
+
 # ------------------------------------------------------------------ mypy ----
 [tool.mypy]
 python_version = "3.12"

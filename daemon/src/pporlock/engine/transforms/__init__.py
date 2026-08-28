@@ -42,6 +42,19 @@ class TransformContext:
     def note(self, code: str, message: str, **detail: Any) -> None:
         self.notes.append((code, message, detail))
 
+    def drain(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """Take the accumulated notes and clear them.
+
+        Draining per transform rather than once at the end is what lets the
+        evaluator attribute each note to the rule that produced it. One context
+        is shared across every rule in the body phase, so a single drain at the
+        end knows only that *something* stripped SRI — which is the question the
+        UI's "which module weakened this page" panel exists to answer.
+        """
+        taken = self.notes
+        self.notes = []
+        return taken
+
     def header(self, name: str) -> str | None:
         target = name.lower()
         for key, value in self.headers:

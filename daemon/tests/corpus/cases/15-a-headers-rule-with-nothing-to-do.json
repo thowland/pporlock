@@ -1,0 +1,64 @@
+{
+  "id": "15-a-headers-rule-with-nothing-to-do",
+  "description": "A headers rule whose operation lists are empty is valid and records no_change. Keeps the distinction between an inert rule and an absent one visible in the corpus.",
+  "requirements": [
+    "PXY-036",
+    "CAP-010"
+  ],
+  "rules": [
+    {
+      "name": "an inert header rule",
+      "action": "headers",
+      "match": {
+        "host": "app.example.test"
+      },
+      "response": {
+        "remove": []
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c15",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c15",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_headers",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "an inert header rule",
+        "action": "headers",
+        "outcome": "no_change",
+        "detail": {
+          "side": "response",
+          "operations": {
+            "remove": []
+          }
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

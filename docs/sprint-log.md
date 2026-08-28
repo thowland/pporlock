@@ -1187,3 +1187,187 @@ it — `docs/module-authoring.md` leads with the warning.
 - The module store is SQLite with a write-through cache so `ctx.store_get` never
   touches disk on the loop. Sprint 13's session store should follow the same
   shape rather than inventing a second one.
+
+---
+
+## Sprints 12–16
+
+These five ran with several agents working concurrently in one working tree,
+partitioned by directory. That worked, and it is why the branch structure below
+differs from one-branch-per-sprint: see *Branching*, at the end.
+
+---
+
+## Sprint 12 — Authoring UI
+
+**Requirements:** WUI-005–WUI-009, API-027 · **352 tests, 93.4% coverage**
+
+Module library, Monaco, rule builder, create-rule-from-flow, profiles.
+
+Monaco is bundled locally and lazily — a grep over `dist/` asserts nothing
+reaches a CDN, and the 3.24 MB editor chunk loads only when an editor opens, so
+the traffic view pays nothing for it.
+
+**Round-trip safety (WUI-007)** is the part worth reviewing. `writeRule` does
+not re-serialise: it parses for structure, takes the source range of the one
+rule being replaced, and splices text. Comments, blank lines and quoting style
+survive, and a semantically unchanged rule writes nothing at all.
+
+**Deliberately incomplete:** SPEC-2 §7.2's manifest JSON Schema attached to the
+YAML mode needs `monaco-yaml`, another heavy dependency. Shipped instead:
+instant local syntax markers plus authoritative errors from `POST /validate`.
+Completion and hover docs are therefore missing.
+
+**Drag-to-reorder is buttons plus an editable priority field.** Drag-only would
+have failed Sprint 16's keyboard pass.
+
+---
+
+## Sprint 13 — Sessions and redaction
+
+**Requirements:** CAP-020–CAP-025, CAP-040–CAP-045, PXY-050–PXY-052
+**1422 tests, 92.8% coverage**
+
+One SQLite file per session. `enqueue()` is a `put_nowait` that returns
+immediately; a full queue increments a dropped counter rather than
+backpressuring the proxy. Recording must never be able to slow the browser.
+
+**The exit criterion is tested, not asserted.** One test greps every byte of the
+`.db`, `-wal` and `-shm` files — byte-level because a value can survive in a
+freelist page long after its row was replaced, where a `SELECT` would not see
+it. A second runs a subprocess that asserts `"pporlock" not in sys.modules`
+before opening the file with plain `sqlite3`, so the check cannot pass merely
+because our own reader redacts.
+
+**Unmask is structurally unavailable, not merely refused.** For sessions the raw
+value is not in the file; `SessionReader` has no unmask method and no live
+buffer. For MCP it requires `X-Pporlock-Client: ui` — `mcp`, `cli`, `extension`
+and a missing header are all 403.
+
+**Bugs:** session paging skipped one flow per page boundary (22 of 25 returned,
+every one looking correct); `Provenance` had no `from_dict`, so nothing could
+reconstruct a persisted flow with provenance intact; `websocket_end` never wrote
+`ws_closed`/`ws_close_code`, so a recorded socket was indistinguishable from one
+still open.
+
+---
+
+## Sprint 14 — Dry run and MCP
+
+**Requirements:** CAP-030–CAP-033, MCP-001–MCP-033
+**daemon 1566 tests / 94% · mcp 134 tests / 98.9%**
+
+The MCP server is an HTTP client of the control API and nothing else. Its
+guardrails are enforced where they cannot be routed around: the four spellings
+of unmask are refused inside the HTTP client *before the network* and again at
+the tool layer; `create_module` sends `{name, files}` and a test drives it with
+`enabled=true` to prove the wire body is unchanged; `X-Pporlock-Client: mcp` is
+set once in the header builder so no tool can forget to be auditable.
+
+Dry run must predict live behaviour, so it must not be a second implementation.
+`Evaluator.clone_with` rebuilds from the live evaluator, and a test asserts
+`Evaluator.__slots__` equals its `__init__` parameters and that `clone_with`
+names every one — adding a setting without carrying it into the clone fails
+there rather than in production. What is isolated is *state*, not code: the
+transform registry is copied so a candidate's `on_load` cannot extend the live
+one.
+
+**Bug:** `evaluate_response` dropped Python-hook header mutations. It folded
+only `status` and `body` from the body-phase decision, but `on_response` runs in
+that phase and live applies the whole mutation. The one method the spec
+designates for the dry runner under-reported exactly the case CAP-032 exists to
+cover — a module whose hook sets a header would have dry-run as "does nothing".
+
+**Decision — OI-3 implemented rather than refused.** `POST /state` now really
+starts and stops the listener and polls until it observably has, 409 on timeout.
+Rejecting unknown keys with 400 was the cheaper close, but `proxy_start` and
+`proxy_stop` are in the MCP tool table and would have become dead tools.
+
+---
+
+## Sprint 15 — Extension completion
+
+**Requirements:** EXT-003, EXT-013, EXT-020, EXT-021, EXT-023, CAP-025, TST-006
+**245 tests, 93.2% coverage · 19 E2E**
+
+This sprint's end-to-end test found the worst bug in the project. See **OI-11**.
+
+The banner renders in a closed shadow root with an all-properties reset, via
+`textContent` throughout, and reads no page content.
+
+**Findings while building it:**
+
+- It reported only the document flow's notes, so a stripped integrity attribute
+  on a subresource — the invisible kind — would never have warned.
+- It queried by `tab_id`, which is null without the optional `<all_urls>` grant,
+  so the banner would never have appeared for anyone who declined a permission
+  they are told is optional. It falls back to host now.
+- A test asserted the shadow root was closed by checking `shadowRoot === null`,
+  which passes whether or not the content is correct. `buildContent` is separate
+  now so the role, accessible name and escaping are asserted directly.
+- `pacScript` interpolated the proxy target into executable PAC source
+  unescaped.
+
+**E2E infrastructure findings:** the fixture was on loopback, which the
+extension bypasses by design, so the suite would have tested nothing while
+reporting success. And ports were `base + random(400)` from overlapping ranges,
+which made the suite pass file-by-file and fail occasionally as a whole.
+
+---
+
+## Sprint 16 — Packaging and hardening
+
+**Requirements:** PXY-002/003/004/007, PRF-001–PRF-007, TST-004, TST-005, all DOC
+**1796 tests, 93.1% coverage, engine 96.7%**
+
+launchd user agent, never a system daemon. Rotation is copy-and-truncate, not
+rename: launchd holds the descriptors open, so a rename leaves it writing into
+the renamed inode while the live file stays empty forever.
+
+**PRF-002 passes with ~350× headroom. PRF-001 fails at +327% against a 15%
+budget and was not tuned until it passed.** 99.7% of the added latency is
+mitmproxy's per-request pipeline; the engine's own contribution is 0.004 ms per
+flow. Recorded as **OI-12**: it is a scoping decision, not an optimisation task.
+
+**Security review — two real findings:**
+
+1. **Query strings were not redacted at all.** `Authorization: Bearer X` was
+   masked while `?access_token=X` went verbatim into the flow table, the URL and
+   the session file on disk. A direct CAP-045 violation, and the common shape
+   for OAuth implicit flows and presigned URLs. Verified fixed end to end: the
+   secret no longer appears in any byte of the session file.
+2. **`SRI_STRIPPED` and `SCRIPT_INJECTED` were recorded but not attributed** —
+   both landed with `module: null`, so "which module weakened this page" could
+   not be answered from the note the banner is built on. One `TransformContext`
+   was shared across the body phase and drained once at the end.
+
+**A test deleted the real `~/.pporlock` during a full-suite run.** It
+monkeypatched `Path.home()` and relied on `uninstall` reading it at command
+time; when `--purge` began deleting the *configured* `state_dir`, and because
+`Config` binds `DEFAULT_STATE_DIR` at import (OI-10's open half), the test became
+import-order-dependent. Alone it passed. The test is fixed, and `tests/conftest.py`
+now refuses any `shutil.rmtree` outside a temp directory — autouse, so it cannot
+be forgotten by the test that needs it most. "We were careful" is not a control.
+
+**Three more bugs found by running rather than reading:** `install --service`
+silently dropped `--config` (installing with a custom config installed the
+defaults); `launchd.PLIST_PATH` was bound in default arguments at definition
+time; `cmd_status` read `/state` fields that do not exist and printed
+`running on ?:?`, while its unit test had invented the same shape and passed.
+
+---
+
+## Branching
+
+Sprints 0–11 each had their own branch, merged `--no-ff` and tagged.
+
+Sprints 12–16 ran with up to three agents working concurrently in a single
+working tree, partitioned by directory. Concurrent work in one tree cannot be
+split across simultaneous branches — a `checkout` or `stash` would have removed
+another agent's in-progress files from disk. (One `git stash -u` early in
+Sprint 12 did exactly that; nothing was lost, and it was not repeated.)
+
+The commits are path-scoped and chronological, so the sprint boundaries are
+preserved as branch points cut from the linear history and merged `--no-ff` in
+order. Granular history is intact — no squashing anywhere — which was the point
+of the rule.

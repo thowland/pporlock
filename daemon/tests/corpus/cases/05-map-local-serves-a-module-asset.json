@@ -1,0 +1,53 @@
+{
+  "id": "05-map-local-serves-a-module-asset",
+  "description": "map_local reads a file from the module's assets directory and short-circuits with it. The entry carries the byte count and the guessed content type, which is how a substitution that served the wrong file is diagnosed.",
+  "requirements": [
+    "PXY-033",
+    "PXY-034"
+  ],
+  "asset_root": "assets",
+  "rules": [
+    {
+      "name": "serve the local banner",
+      "action": "map_local",
+      "match": {
+        "host": "cdn.vendor.example",
+        "path": "^/banner\\.html$"
+      },
+      "file": "banner.html"
+    }
+  ],
+  "request": {
+    "flow_id": "c05",
+    "host": "cdn.vendor.example",
+    "path": "/banner.html",
+    "dest": "iframe"
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "serve the local banner",
+        "action": "map_local",
+        "outcome": "applied",
+        "detail": {
+          "file": "banner.html",
+          "bytes": 75,
+          "content_type": "text/html"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

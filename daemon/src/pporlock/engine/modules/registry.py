@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..cost import ModuleStat
 from ..provenance import NoteCode, ProvenanceBuilder, Severity
 from ..ruleset import CompiledRule, RuleSet
 from .context import ModuleContext, ModuleStore
@@ -98,6 +99,11 @@ class ModuleRegistry:
         API rather than by editing a file.
         """
         live = {name: (m.enabled, m.priority) for name, m in self._modules.items()}
+        # Cost statistics survive a reload for the same reason enablement does:
+        # they describe the module, not the particular load of it that happens
+        # to be resident, and zeroing them on every edit would make the column
+        # useless exactly while someone is iterating on a module (REQ PRF-007).
+        live_stats = {name: m.stats for name, m in self._modules.items()}
 
         for module in self._modules.values():
             self._call_lifecycle(module, "on_unload")
@@ -108,6 +114,7 @@ class ModuleRegistry:
 
         for module in load_all(self.root):
             self._modules[module.name] = module
+            module.stats = live_stats.get(module.name) or ModuleStat(module=module.name)
             if module.name in live:
                 module.enabled = live[module.name][0]
                 self.set_priority(module.name, live[module.name][1])
@@ -153,6 +160,43 @@ class ModuleRegistry:
 
     def get(self, name: str) -> LoadedModule | None:
         return self._modules.get(name)
+
+    def record_provenance(self, provenance: Any) -> None:
+        """Fold one completed flow's provenance into per-module stats.
+
+        REQ PRF-007. Called once per flow by the addon. Entries naming something
+        that is not a loaded module — a rule from ``rules.yaml``, whose module is
+        ``"api"`` or ``"file"`` — are ignored here on purpose: those have no row
+        in the module library. ``GET /metrics`` counts them, because there the
+        question is "where did the time go", not "which module".
+        """
+        entries = getattr(provenance, "entries", ()) or ()
+        matched: set[str] = set()
+        modified: set[str] = set()
+        for entry in entries:
+            name = getattr(entry, "module", "") or ""
+            module = self._modules.get(name)
+            if module is None:
+                continue
+            stat = module.stats
+            if not stat.module:
+                stat.module = name
+            stat.entries += 1
+            duration = float(getattr(entry, "duration_ms", 0.0) or 0.0)
+            stat.total_ms += duration
+            stat.max_ms = max(stat.max_ms, duration)
+            outcome = str(getattr(entry, "outcome", ""))
+            if outcome == "applied":
+                stat.applied += 1
+                modified.add(name)
+            elif outcome == "error":
+                stat.errors += 1
+            matched.add(name)
+
+        for name in matched:
+            self._modules[name].stats.flows_matched += 1
+        for name in modified:
+            self._modules[name].stats.flows_modified += 1
 
     def context(self, name: str) -> ModuleContext | None:
         return self._contexts.get(name)

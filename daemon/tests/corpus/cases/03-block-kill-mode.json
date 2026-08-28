@@ -1,0 +1,50 @@
+{
+  "id": "03-block-kill-mode",
+  "description": "block in kill mode drops the connection instead of synthesising. Opt-in only, because a page's JavaScript reacts badly to a failed fetch (REQ PXY-031) \u2014 so the distinction has to stay visible in provenance.",
+  "requirements": [
+    "PXY-030",
+    "PXY-031"
+  ],
+  "rules": [
+    {
+      "name": "kill the beacon",
+      "action": "block",
+      "mode": "kill",
+      "match": {
+        "host": "beacon.tracker.example"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c03",
+    "host": "beacon.tracker.example",
+    "path": "/collect",
+    "method": "POST",
+    "dest": "empty"
+  },
+  "response": null,
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "request_short_circuit",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "kill the beacon",
+        "action": "block",
+        "outcome": "applied",
+        "detail": {
+          "mode": "kill"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": "corpus:0"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "id": "10-a-transform-that-matches-nothing-is-no-change",
+  "description": "A rule that matched and changed nothing is a finding, not a non-event: it is the shape of a rule whose pattern is wrong. no_change is recorded so the difference between 'did not match' and 'matched and did nothing' survives.",
+  "requirements": [
+    "CAP-010",
+    "MOD-013"
+  ],
+  "rules": [
+    {
+      "name": "replace a string this page does not contain",
+      "action": "body",
+      "match": {
+        "host": "app.example.test",
+        "content_type": "text/html"
+      },
+      "transform": {
+        "kind": "replace_literal",
+        "find": "NEVER-PRESENT",
+        "replace": "x"
+      }
+    }
+  ],
+  "request": {
+    "flow_id": "c10",
+    "host": "app.example.test",
+    "path": "/",
+    "dest": "document"
+  },
+  "response": {
+    "flow_id": "c10",
+    "status": 200,
+    "headers": [
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ]
+    ],
+    "body": "<html><body>app</body></html>"
+  },
+  "expected_provenance": {
+    "profile": "default",
+    "evaluated_modules": [
+      "corpus"
+    ],
+    "entries": [
+      {
+        "seq": 0,
+        "phase": "response_body",
+        "module": "corpus",
+        "rule_id": "corpus:0",
+        "rule_name": "replace a string this page does not contain",
+        "action": "body",
+        "outcome": "no_change",
+        "detail": {
+          "transform": "replace_literal",
+          "offload": false,
+          "cost": "sized",
+          "offload_reason": "body 29 < 262144"
+        },
+        "duration_ms": "<timing>"
+      }
+    ],
+    "notes": [],
+    "total_ms": "<timing>",
+    "short_circuited_by": null
+  }
+}

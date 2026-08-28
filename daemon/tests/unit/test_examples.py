@@ -240,6 +240,22 @@ class TestCookieBanners:
         assert body.index(b"<style>") < body.index(b"<script>")
         assert builder.build().has_note(NoteCode.SCRIPT_INJECTED)
 
+    def test_it_still_runs_on_a_document_with_no_closing_body_tag(self, installed: Path) -> None:
+        """</body> is optional in HTML and real pages omit it. Requiring it
+        made the module do nothing at all on a valid document, silently —
+        found by running it against the fixture origin, which omits it."""
+        registry = registry_for(installed)
+        ev = Evaluator(registry.build_ruleset(["cookie-banners"]), registry=registry)
+        builder = ProvenanceBuilder("default")
+        decision = ev.evaluate_response_body(
+            request(),
+            response(b"<!doctype html>\n<meta charset=utf-8><p>no closing tags</p>\n"),
+            builder,
+        )
+        assert decision.mutation.body is not None
+        assert b"clearInterval" in decision.mutation.body
+        assert builder.build().has_note(NoteCode.SCRIPT_INJECTED)
+
     def test_it_leaves_a_json_response_alone(self, installed: Path) -> None:
         registry = registry_for(installed)
         ev = Evaluator(registry.build_ruleset(["cookie-banners"]), registry=registry)

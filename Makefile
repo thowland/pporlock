@@ -203,6 +203,26 @@ e2e-web: web
 e2e-extension: extension
 	cd $(WEB) && npx playwright test --project=extension
 
+.PHONY: examples
+examples:
+	@# Copies the example modules into the state directory, still disabled.
+	@# Never overwrites: a module you have edited is yours, and an install
+	@# step that silently replaces your work is not a convenience.
+	@mkdir -p $(HOME)/.pporlock/modules
+	@for d in examples/modules/*/; do \
+		name=$$(basename $$d); \
+		if [ -e "$(HOME)/.pporlock/modules/$$name" ]; then \
+			echo "  skip    $$name (already installed)"; \
+		else \
+			cp -R "$$d" "$(HOME)/.pporlock/modules/$$name"; \
+			echo "  install $$name"; \
+		fi; \
+	done
+	@echo ""
+	@echo "Installed disabled. Read them, then enable the ones you want."
+	@echo "  examples/README.md      what each one shows"
+	@echo "  docs/module-cookbook.md the reference they draw on"
+
 .PHONY: fixtures
 fixtures:
 	cd $(DAEMON) && $(UV) run python ../testfixtures/origin/server.py --port 8099 --verbose

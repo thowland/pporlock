@@ -257,6 +257,27 @@ class Evaluator:
             budget.consume((time.perf_counter() - started) * 1000)
         return decision
 
+    def _asset_root_for(self, rule: CompiledRule) -> Path | None:
+        """Where a rule's ``file:`` is resolved from.
+
+        A module's assets live in its own ``assets/`` directory — SPEC-0 §5.4
+        and the rule schema both say so, and it is the only place the module
+        author can put them.
+
+        This used to resolve every rule against one global asset root, which is
+        the state directory. A module's ``map_local`` could therefore never find
+        its own file: it reported ``map_local_missing`` and served the real
+        response instead, which looks exactly like a rule that did not match.
+        The documented primary mechanism did not work from the only place rules
+        come from.
+
+        Rules loaded from ``rules.yaml`` have no module and keep the old root,
+        which is the directory that file lives in.
+        """
+        if rule.module and self.registry is not None:
+            return Path(self.registry.root) / rule.module / "assets"
+        return self.asset_root
+
     def _apply_short_circuit(
         self,
         rule: CompiledRule,
@@ -340,7 +361,7 @@ class Evaluator:
         started: float,
     ) -> None:
         relative = str(rule.params.get("file", ""))
-        root = self.asset_root
+        root = self._asset_root_for(rule)
 
         def fail(message: str, code: NoteCode = NoteCode.MAP_LOCAL_MISSING) -> None:
             builder.record(

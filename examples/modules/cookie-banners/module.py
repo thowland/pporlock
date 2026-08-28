@@ -38,19 +38,32 @@ def on_response(request, response, ctx):
     """Add the unlock script to HTML documents only."""
     # ctx.matches takes the request positionally: the context is per-module and
     # long-lived, so it does not know which flow you mean.
-    if not ctx.matches(request, dest="document", response=response, content_type="text/html"):
+    # No dest= here, for the same reason the manifest rule omits it:
+    # Sec-Fetch-Dest is absent on insecure origins and in most command-line
+    # testing, and a hook that requires it does nothing there while looking
+    # like it ran. The </body> check below is the real guard.
+    if not ctx.matches(request, response=response, content_type="text/html"):
         return None
 
     text = response.text
-    if text is None or "</body>" not in text:
-        # Streamed, binary, or not a document we can safely edit. Reporting
-        # nothing is correct; guessing is not.
+    if text is None:
+        # Streamed or binary. Reporting nothing is correct; guessing is not.
         return None
+
+    # </body> is the right place, but it is optional in HTML and real pages
+    # omit it. An earlier version required it and therefore did nothing at all
+    # on a valid document — silently, which is the failure this system exists
+    # to prevent. Appending is a worse position and a much better outcome than
+    # not running.
+    if "</body>" in text:
+        patched = text.replace("</body>", UNLOCK + "</body>", 1)
+    else:
+        patched = text + UNLOCK
 
     ctx.note(
         "script_injected",
         "added a scroll-unlock shim after hiding consent overlays",
         severity="warning",
-        where="body_end",
+        where="body_end" if "</body>" in text else "document_end",
     )
-    return ResponseMutation(body=text.replace("</body>", UNLOCK + "</body>", 1).encode())
+    return ResponseMutation(body=patched.encode())

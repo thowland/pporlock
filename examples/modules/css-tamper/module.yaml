@@ -15,8 +15,15 @@ rules:
   - name: link-user-stylesheet
     action: body
     match:
+      # content_type alone, deliberately — no `dest: document`.
+      #
+      # Sec-Fetch-Dest is only sent on secure contexts. pporlock infers it from
+      # Accept otherwise, which works for a browser navigation and not for a
+      # plain `curl`, so a rule requiring it silently matches nothing on http://
+      # origins and in most command-line testing. content_type is enough here:
+      # inject_style needs a <head> and a fragment has none, so an HTML snippet
+      # fetched by XHR is a no-op rather than a surprise.
       content_type: "text/html"
-      dest: document
     transform:
       kind: inject_style
       href: "/__pporlock__/user.css"

@@ -814,7 +814,7 @@ class PporlockMCP:
 | `list_flows` | filter vocabulary (SPEC-0 §6.5), `limit` (default 50, max 200), `cursor`, `detail` (default `summary`) | Flow list |
 | `get_flow` | `flow_id`, `detail` (default `full`) | One flow with provenance |
 | `get_provenance` | `flow_id` | Provenance only — the cheapest way to answer "why did this break" |
-| `flow_stats` | `host` or `tab_id`, `since` | Aggregate counts, notes histogram |
+| `flow_stats` | the full §6.5 filter vocabulary, plus `sample` (how many flows to aggregate) | Aggregate counts, notes histogram |
 | `list_websocket_messages` | `flow_id`, `limit` | Frames |
 | `list_sessions` | — | Sessions |
 | `list_session_flows` | `session_id`, filter, `limit`, `cursor` | Flow list |
@@ -824,7 +824,7 @@ class PporlockMCP:
 | Tool | Arguments | Returns |
 |---|---|---|
 | `list_modules` | — | Modules with state, errors, quarantine, stats |
-| `read_module` | `name` | Manifest, rules, Python source |
+| `read_module` | `name`, `full` | Manifest, rules, Python source. Truncated unless `full` |
 | `create_module` | `name`, `files` | Created module status. **Does not enable it.** |
 | `update_module` | `name`, `files` | Updated status. **Does not enable it.** |
 | `delete_module` | `name` | — |
@@ -834,8 +834,8 @@ class PporlockMCP:
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `validate_module` | `files` | Schema and syntax errors with line numbers; installs nothing |
-| `dry_run` | `session_id`, `files` or `module_name`, `limit`, `include_diffs` | SPEC-0 §6.8 dry-run result |
+| `validate_module` | `files`, optional `name` | Schema and syntax errors with line numbers; installs nothing. Omit `name` and the manifest's own is used |
+| `dry_run` | `session_id` (required; `live` replays the ring), `files` or `module_name`, optional `name`, `profile`, `limit`, `include_diffs` | SPEC-0 §6.8 dry-run result |
 
 **Control (REQ MCP-013)** — suppressed in read-only mode:
 
@@ -846,9 +846,10 @@ class PporlockMCP:
 | `activate_profile` | `name` |
 | `list_profiles` | — |
 | `set_dev_toggle` | `anticache` and/or `anticomp` |
-| `start_recording` / `stop_recording` | `name` |
+| `start_recording` | `name` |
+| `stop_recording` | `session_id` |
 | `reload_modules` | — |
-| `edit_exclusions` | `add`, `remove` |
+| `edit_exclusions` | `add`, `remove`, `comment` |
 | `proxy_start` / `proxy_stop` | — |
 
 ### 11.3 Guardrails

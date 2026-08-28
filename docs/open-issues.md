@@ -280,3 +280,41 @@ subject is never built, and a test that stubs its own client agrees with
 whatever the client already believed. Exit demos, real-system screenshots, and
 hand-walked security review are not ceremony here — they are the only things
 that have ever found this class of bug.
+
+---
+
+## OI-16 — SPEC-0 §8 described a module API that did not exist
+
+**Found:** while writing the sample module library. **CLOSED** (spec corrected,
+one implementation gap fixed).
+
+SPEC-0 §8 is the module API *stability contract* — the thing user- and
+agent-authored modules are supposed to be written against and survive upgrades
+on. It disagreed with the implementation in six places, and a module written
+faithfully from the spec would have raised `TypeError` on its first flow:
+
+| Member | Spec said | Reality |
+|---|---|---|
+| `ctx.matches` | `matches(*, host, path, …)` | takes `request` positionally first — the context is per-module and long-lived, so it cannot know which request you mean |
+| `ctx.note` | `note(code, severity, message)` | `note(code, message, severity="warning")` |
+| `ctx.register_transform` | `(name, fn, schema)` | `(name, fn, cost="expensive")` — cost is what the scheduler needs; there is no schema validation for module transforms |
+| `ctx.asset_path` | returns `str` | returns `pathlib.Path` |
+| `ctx.stub_for` | `stub_for(dest)` | `stub_for(dest, request)` — the Accept-header fallback needs the request |
+| `ctx.asset_text` | absent | exists |
+
+In each case the implementation was right and the spec was wrong — two of the
+spec's signatures are not implementable as written. §8.2 and §8.3 now describe
+what actually exists, and additionally state what mutation objects hooks return,
+which the contract had never said at all.
+
+**One real gap, fixed:** `on_websocket_message` was listed in `HOOK_NAMES`, was
+loadable, and **was never invoked by anything**. A module defining it loaded
+cleanly, reported healthy, and did nothing. `Evaluator.observe_websocket_message`
+now dispatches it from the interceptor's WebSocket path, with the same error
+isolation and quarantine as the other hooks, and a returned value is explicitly
+ignored because frames are inspection-only in v1 (REQ PXY-051).
+
+**Why this matters more than a documentation slip.** SPEC-0 is the one document
+an agent authoring a module through MCP is pointed at. Every module written from
+it would have been broken in the same way, and the failure would have surfaced
+as a `module_error` note blaming the author's code.

@@ -28,6 +28,7 @@ from .models import (
     ResponseMutation,
     Scheme,
     SyntheticResponse,
+    WebSocketMessage,
 )
 from .modules.registry import ModuleRegistry
 from .provenance import Action, NoteCode, Outcome, Phase, Provenance, ProvenanceBuilder
@@ -715,6 +716,64 @@ class Evaluator:
         # exists to cover.
         _merge_mutation(decision.mutation, body.mutation)
         return decision
+
+    def observe_websocket_message(
+        self,
+        message: WebSocketMessage,
+        request: NormalizedRequest,
+        builder: ProvenanceBuilder,
+    ) -> None:
+        """Offer a WebSocket frame to every active module, read-only.
+
+        Frames are inspection-only in v1 (REQ PXY-051), so a returned value is
+        deliberately ignored rather than merged: a module that believes it can
+        rewrite a frame should find that it did not, rather than find
+        provenance claiming a change the wire never saw.
+
+        This exists because ``on_websocket_message`` was a declared hook name
+        that nothing ever called. A module defining it loaded cleanly, reported
+        healthy, and did nothing — the exact silent failure the provenance
+        design is built to prevent.
+        """
+        if self.registry is None:
+            return
+
+        for module in self.registry.active(
+            None if not self.ruleset.modules else list(self.ruleset.modules)
+        ):
+            fn = module.hooks().get("on_websocket_message")
+            context = self.registry.context(module.name)
+            if fn is None or context is None:
+                continue
+
+            started = time.perf_counter()
+            try:
+                fn(message, request, context)
+                self.registry.record_success(module.name)
+            except Exception as exc:
+                builder.note(
+                    NoteCode.MODULE_ERROR,
+                    f"{module.name}.on_websocket_message raised: {exc}",
+                    module=module.name,
+                    hook="on_websocket_message",
+                )
+                self.registry.record_failure(module.name, builder)
+                builder.record(
+                    phase=Phase.WEBSOCKET,
+                    module=module.name,
+                    rule_id=f"{module.name}:python",
+                    rule_name="on_websocket_message",
+                    action=Action.BODY,
+                    outcome=Outcome.ERROR,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    error=str(exc),
+                )
+                context.drain()
+                continue
+
+            for code, severity, note_message, detail in context.notes:
+                builder.note(code, note_message, severity=severity, module=module.name, **detail)
+            context.drain()
 
     def _run_python_hooks(
         self,

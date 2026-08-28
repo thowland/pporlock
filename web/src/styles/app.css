@@ -700,3 +700,324 @@ table.flows tbody tr:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* ------------------------------------------------------------------ *
+ * Sprint 12 — authoring UI: navigation, module library, editor,       *
+ * rule builder, profiles (SPEC-2 §3.1, §7, §8.1).                     *
+ * ------------------------------------------------------------------ */
+
+.nav {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  flex: 0 0 auto;
+}
+.navlink {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.navlink:hover {
+  color: var(--text);
+}
+.navlink.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.navlink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.viewbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.viewbar h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* The base .banner is styled as an error; these are the other severities. */
+.banner.ok {
+  background: color-mix(in srgb, var(--ok) 15%, transparent);
+  border-bottom-color: var(--ok);
+  color: var(--ok);
+}
+.banner.warn {
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  border-bottom-color: var(--warn);
+  color: var(--warn);
+}
+.banner.info {
+  background: color-mix(in srgb, var(--info) 15%, transparent);
+  border-bottom-color: var(--info);
+  color: var(--info);
+}
+.banner.ok,
+.banner.warn,
+.banner.info,
+.banner.error {
+  display: block;
+}
+.banner .trace {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.modulelib,
+.moduleeditor,
+.profiles,
+.rulefromflow {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+table.modules,
+table.profilelist {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+table.modules th,
+table.profilelist th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+}
+table.modules td,
+table.profilelist td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+table.modules td.num,
+table.profilelist td.num,
+table.modules th.num,
+table.profilelist th.num {
+  text-align: right;
+  font-family: var(--mono);
+}
+td.bad {
+  color: var(--error);
+  font-family: var(--mono);
+}
+input.prio {
+  width: 5em;
+  text-align: right;
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+/* State badges never rely on colour alone — each carries its own word. */
+.pill.state-loaded {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.pill.state-disabled {
+  color: var(--text-faint);
+}
+.pill.state-quarantined {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.pill.state-load_error {
+  color: var(--error);
+  border-color: var(--error);
+}
+.pill.devtoggle {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.editor {
+  flex: 1;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+.editor-area {
+  flex: 1;
+  min-height: 300px;
+  width: 100%;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+}
+.editor.monaco {
+  min-height: 420px;
+}
+.marker-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  max-height: 180px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+.marker {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+.marker.error {
+  color: var(--error);
+}
+.marker.warning {
+  color: var(--warn);
+}
+.marker-pos {
+  min-width: 5em;
+  color: var(--text-faint);
+}
+.marker-code {
+  color: var(--text-dim);
+}
+
+.rulebuilder {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.rb-columns {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .rb-columns {
+    grid-template-columns: 1fr;
+  }
+}
+.rb-column h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.rb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+.rb-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.rb-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.rb-error {
+  font-size: 11px;
+  color: var(--error);
+}
+.rb-field input,
+.rb-field select,
+.rb-field textarea,
+.rb-pair input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.rb-extra {
+  font-family: var(--mono);
+  min-height: 5em;
+}
+.rb-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.rb-pairs {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+}
+.rb-pairs legend {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.rb-pair {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 5px;
+}
+.rb-pair input {
+  flex: 1;
+  min-width: 0;
+}
+.rb-side h4 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.rb-preview pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow: auto;
+  margin: 0;
+}
+
+.rulemenu {
+  position: relative;
+  display: inline-flex;
+  gap: 4px;
+}
+.rulemenu-items {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+}

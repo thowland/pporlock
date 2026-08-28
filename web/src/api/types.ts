@@ -83,3 +83,115 @@ export function filterToParams(filter: FlowFilter): URLSearchParams {
   }
   return params;
 }
+
+/* ------------------------------------------------------------------ *
+ * Modules and profiles (SPEC-0 §6.6, §6.7)                            *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Manifest, rule and profile shapes come from the schemas — never restate them
+ * here. What follows is only the API *envelope* around them, which SPEC-0
+ * describes in prose rather than in `contracts/schemas/`.
+ */
+export type { Match, ModuleManifest, Profile, Rule } from '@contracts/types';
+
+/** SPEC-0 §6.6 module status `state`. */
+export type ModuleState = 'loaded' | 'disabled' | 'quarantined' | 'load_error';
+
+/** Present only when `state === 'load_error'`. `line` places an editor marker. */
+export interface ModuleLoadError {
+  code: string;
+  message: string;
+  trace?: string | null;
+  line?: number | null;
+}
+
+/** Present only when `state === 'quarantined'` (REQ MOD-025). */
+export interface ModuleQuarantine {
+  reason: string;
+  failures: number;
+  since: string;
+}
+
+export interface ModuleStats {
+  flows_matched: number;
+  flows_modified: number;
+  errors: number;
+  avg_ms: number;
+}
+
+export interface ModuleStatus {
+  name: string;
+  version: string;
+  enabled: boolean;
+  priority: number;
+  state: ModuleState;
+  has_python: boolean;
+  rule_count: number;
+  error: ModuleLoadError | null;
+  quarantine: ModuleQuarantine | null;
+  stats: ModuleStats;
+}
+
+/**
+ * `GET /modules/{name}`. Files are keyed by their on-disk name so the editor
+ * never has to know how many there are.
+ */
+export interface ModuleDetail extends ModuleStatus {
+  files: Record<string, string>;
+  assets?: string[];
+}
+
+export const MODULE_YAML = 'module.yaml';
+export const MODULE_PY = 'module.py';
+
+/** Read a module file, tolerating a daemon that omits an absent optional file. */
+export function moduleFile(detail: Pick<ModuleDetail, 'files'>, name: string): string {
+  return Object.prototype.hasOwnProperty.call(detail.files, name)
+    ? // eslint-disable-next-line security/detect-object-injection
+      (detail.files[name] ?? '')
+    : '';
+}
+
+/**
+ * One `POST /validate` finding (REQ API-027). `line`/`column` are 1-based when
+ * the daemon can place the error; absent when it cannot.
+ */
+export interface ValidationIssue {
+  code: string;
+  message: string;
+  file?: string | null;
+  line?: number | null;
+  column?: number | null;
+  severity?: 'error' | 'warning';
+}
+
+export interface ValidationResult {
+  ok: boolean;
+  errors: ValidationIssue[];
+  warnings?: ValidationIssue[];
+}
+
+/** `POST /modules/reload` (REQ MOD-004). */
+export interface ReloadResult {
+  loaded: number;
+  enabled: number;
+  quarantined: number;
+  errors: ModuleLoadError[];
+}
+
+export type ProfileSummary = import('@contracts/types').Profile & { active?: boolean };
+
+export interface ProfileList {
+  profiles: ProfileSummary[];
+  active: string;
+}
+
+/** The four intents SPEC-2 §7.4 offers from a flow. */
+export type RuleIntent = 'block' | 'map_local' | 'redirect' | 'headers';
+
+/** `POST /flows/{id}/suggest-rule` (REQ WUI-008, MCP-014). */
+export interface SuggestedRule {
+  rule: import('@contracts/types').Rule;
+  module?: string | null;
+}

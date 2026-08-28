@@ -32,6 +32,8 @@ from .models import (
 from .provenance import Action, NoteCode, Outcome, Phase, Provenance, ProvenanceBuilder
 from .ruleset import CompiledRule, RuleSet
 from .stubs import StubLibrary
+from .transforms import TransformContext, TransformRegistry, build_registry
+from .transforms.headers import csp_headers_to_remove
 
 #: Content types the buffering guard will hold in memory for transformation.
 DEFAULT_BUFFER_TYPES = (
@@ -134,6 +136,7 @@ class Evaluator:
         "offload_threshold",
         "ruleset",
         "stubs",
+        "transforms",
     )
 
     def __init__(
@@ -146,6 +149,7 @@ class Evaluator:
         buffer_types: tuple[str, ...] = DEFAULT_BUFFER_TYPES,
         max_buffer_bytes: int = 2 * 1024 * 1024,
         offload_threshold: int = DEFAULT_OFFLOAD_THRESHOLD_BYTES,
+        transforms: TransformRegistry | None = None,
     ) -> None:
         self.ruleset = ruleset if ruleset is not None else RuleSet()
         self.exclusions = exclusions if exclusions is not None else ExclusionList()
@@ -154,6 +158,7 @@ class Evaluator:
         self.buffer_types = buffer_types
         self.max_buffer_bytes = max_buffer_bytes
         self.offload_threshold = offload_threshold
+        self.transforms = transforms if transforms is not None else build_registry()
 
     # -- phase 1: ClientHello -------------------------------------------
 
@@ -464,6 +469,37 @@ class Evaluator:
             self._apply_header_rule(
                 rule, "response", decision.mutation, builder, Phase.RESPONSE_HEADERS
             )
+
+        # strip_csp is written as a body transform in the rule schema, but it
+        # operates on headers — so it is applied here, where a mutation can
+        # still reach the wire on a streamed response (Sprint 9's finding).
+        for rule in self.ruleset.matching_response_body(request, response):
+            for transform in _transforms_of(rule):
+                if str(transform.get("kind")) != "strip_csp":
+                    continue
+                started = time.perf_counter()
+                removed = csp_headers_to_remove(bool(transform.get("report_only", True)))
+                present = [h for h in removed if response.header(h) is not None]
+                for header in removed:
+                    decision.mutation.remove(header)
+                if present:
+                    builder.note(
+                        NoteCode.CSP_MODIFIED,
+                        f"removed {', '.join(present)}",
+                        module=rule.module,
+                        headers=present,
+                    )
+                builder.record(
+                    phase=Phase.RESPONSE_HEADERS,
+                    module=rule.module,
+                    rule_id=rule.rule_id,
+                    rule_name=rule.name,
+                    action=Action.BODY,
+                    outcome=Outcome.APPLIED if present else Outcome.NO_CHANGE,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    transform="strip_csp",
+                    removed=present,
+                )
         return decision
 
     def evaluate_response_body(
@@ -475,6 +511,11 @@ class Evaluator:
     ) -> ResponseDecision:
         """Response body rules (REQ PXY-020 phase 6)."""
         decision = ResponseDecision()
+        original = response.text or ""
+        text = original
+        context = TransformContext(
+            url="", content_type=response.content_type, headers=response.headers
+        )
 
         for rule in self.ruleset.matching_response_body(request, response):
             if response.streamed:
@@ -504,28 +545,70 @@ class Evaluator:
                 )
                 continue
 
-            # Transforms themselves land in Sprint 10. The phase, ordering,
-            # offload classification, and provenance are established here so
-            # nothing has to be retrofitted around them.
-            started = time.perf_counter()
-            transform = rule.params.get("transform") or {}
-            kind = str(transform.get("kind", "")) if isinstance(transform, dict) else ""
-            offload = decide_offload(kind, response.body_size, self.offload_threshold)
-            elapsed = (time.perf_counter() - started) * 1000
-            if budget is not None:
-                budget.consume(elapsed)
+            for transform in _transforms_of(rule):
+                kind = str(transform.get("kind", ""))
+                if kind == "strip_csp":
+                    # Already applied in the header phase, where it can take
+                    # effect. Recorded there too, so it is not counted twice.
+                    continue
 
+                started = time.perf_counter()
+                offload = decide_offload(kind, response.body_size, self.offload_threshold)
+                before = text
+                outcome = Outcome.NO_CHANGE
+                detail: dict[str, Any] = {"transform": kind, **offload.to_dict()}
+
+                try:
+                    text = self.transforms.apply(transform, text, context)
+                    outcome = Outcome.APPLIED if text != before else Outcome.NO_CHANGE
+                except Exception as exc:
+                    outcome = Outcome.ERROR
+                    detail["error"] = str(exc)
+                    builder.note(
+                        NoteCode.MODULE_ERROR,
+                        f"{kind} failed: {exc}",
+                        module=rule.module,
+                    )
+
+                elapsed = (time.perf_counter() - started) * 1000
+                if budget is not None:
+                    budget.consume(elapsed)
+
+                builder.record(
+                    phase=Phase.RESPONSE_BODY,
+                    module=rule.module,
+                    rule_id=rule.rule_id,
+                    rule_name=rule.name,
+                    action=Action.BODY,
+                    outcome=outcome,
+                    duration_ms=elapsed,
+                    **detail,
+                )
+
+        # Any document whose body we rewrote must have its integrity attributes
+        # stripped, whether or not a rule asked (REQ PXY-040). The breakage is
+        # invisible from the proxy's side — a successful response the browser
+        # silently drops — so leaving it to the operator to remember would
+        # guarantee it is eventually forgotten.
+        if text != original and _is_html(response.content_type):
+            started = time.perf_counter()
+            text = self.transforms.apply({"kind": "strip_integrity_attributes"}, text, context)
             builder.record(
                 phase=Phase.RESPONSE_BODY,
-                module=rule.module,
-                rule_id=rule.rule_id,
-                rule_name=rule.name,
+                module="",
+                rule_id="",
+                rule_name="implicit SRI strip",
                 action=Action.BODY,
-                outcome=Outcome.NO_CHANGE,
-                duration_ms=elapsed,
-                reason="transform registry lands in Sprint 10",
-                **offload.to_dict(),
+                outcome=Outcome.APPLIED if text != original else Outcome.NO_CHANGE,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                reason="a rewritten document must not fail its own integrity checks",
             )
+
+        for code, message, note_detail in context.notes:
+            builder.note(NoteCode(code), message, **note_detail)
+
+        if text != original:
+            decision.mutation.body = text.encode(_charset(response))
 
         return decision
 
@@ -595,3 +678,33 @@ def _guess_content_type(path: Path) -> str:
 def empty_provenance(profile: str = "default") -> Provenance:
     """Provenance for a flow that was never evaluated. Never None (REQ CAP-013)."""
     return ProvenanceBuilder(profile).build()
+
+
+def _transforms_of(rule: CompiledRule) -> list[dict[str, Any]]:
+    """A rule's transforms, whether declared singly or as a list."""
+    single = rule.params.get("transform")
+    many = rule.params.get("transforms")
+    out: list[dict[str, Any]] = []
+    if isinstance(single, dict):
+        out.append(single)
+    if isinstance(many, list):
+        out.extend(item for item in many if isinstance(item, dict))
+    return out
+
+
+def _is_html(content_type: str | None) -> bool:
+    return bool(content_type) and "html" in (content_type or "").lower()
+
+
+def _charset(response: NormalizedResponse) -> str:
+    """Charset to re-encode a rewritten body with.
+
+    Read from the raw Content-Type header, not `response.content_type`, which
+    strips parameters by design. Getting this wrong re-encodes a latin-1 page as
+    UTF-8 and renders it as mojibake — a page that loads and is subtly wrong,
+    which is the exact failure this system exists to avoid.
+    """
+    raw = (response.header("content-type") or "").lower()
+    if "charset=" in raw:
+        return raw.split("charset=", 1)[1].split(";")[0].strip() or "utf-8"
+    return "utf-8"

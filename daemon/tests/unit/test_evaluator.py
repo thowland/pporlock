@@ -536,14 +536,30 @@ class TestBuffering:
 class TestResponseBody:
     def test_a_streamed_response_records_the_skip(self) -> None:
         b = builder()
-        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "regex_sub", "pattern": "nothing-here", "repl": "x"},
+                }
+            ]
+        )
         ev.evaluate_response(req(), resp(streamed=True, body=None), b)
         assert b.build().entries[0].outcome is Outcome.SKIPPED_STREAMED
 
     def test_an_exhausted_budget_records_the_skip_and_a_note(self) -> None:
         """REQ PXY-026 — the flow is delivered, not dropped."""
         b = builder()
-        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "regex_sub", "pattern": "nothing-here", "repl": "x"},
+                }
+            ]
+        )
         budget = TimeBudget(1.0)
         budget.consume(5.0)
         ev.evaluate_response(req(), resp(), b, budget)
@@ -631,9 +647,17 @@ class TestOffloadIsRecorded:
         assert detail["cost"] == "expensive"
         assert "offload_reason" in detail
 
-    def test_a_cheap_transform_records_that_it_stayed_inline(self) -> None:
+    def test_a_small_scanning_transform_records_that_it_stayed_inline(self) -> None:
         b = builder()
-        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "regex_sub", "pattern": "nothing-here", "repl": "x"},
+                }
+            ]
+        )
         ev.evaluate_response_body(req(), resp(), b)
         assert b.build().entries[0].detail["offload"] is False
 
@@ -645,9 +669,33 @@ class TestResponsePhasesAreSeparate:
 
     def test_header_evaluation_does_not_touch_body_rules(self) -> None:
         b = builder()
-        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "regex_sub", "pattern": "nothing-here", "repl": "x"},
+                }
+            ]
+        )
         ev.evaluate_response_headers(req(), resp(), b)
         assert b.build().entries == ()
+
+    def test_strip_csp_is_applied_in_the_header_phase_despite_being_a_body_rule(
+        self,
+    ) -> None:
+        """It operates on headers, and once a response streams its headers are
+        already on the wire — so it has to run where a mutation can still take
+        effect (Sprint 9's finding)."""
+        b = builder()
+        ev = evaluator([{"name": "csp", "action": "body", "transform": {"kind": "strip_csp"}}])
+        decision = ev.evaluate_response_headers(
+            req(),
+            resp(headers=(("content-security-policy", "default-src 'self'"),)),
+            b,
+        )
+        assert "content-security-policy" in decision.mutation.remove_headers
+        assert b.build().has_note(NoteCode.CSP_MODIFIED)
 
     def test_body_evaluation_does_not_touch_header_rules(self) -> None:
         b = builder()
@@ -668,3 +716,173 @@ class TestResponsePhasesAreSeparate:
         ev.evaluate_response(req(), resp(), b)
         actions = {str(e.action) for e in b.build().entries}
         assert actions == {"headers", "body"}
+
+
+class TestBodyRewriting:
+    """REQ PXY-040/041/042 — the transforms actually running."""
+
+    def html(self, body: str = "<html><head></head><body><p>hi</p></body></html>") -> Any:
+        return resp(
+            headers=(("content-type", "text/html; charset=utf-8"),),
+            body=body.encode(),
+        )
+
+    def test_a_transform_changes_the_body(self) -> None:
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "hi", "replace": "bye"},
+                }
+            ]
+        )
+        decision = ev.evaluate_response_body(req(), self.html(), b, None)
+        assert decision.mutation.body is not None
+        assert b"bye" in decision.mutation.body
+
+    def test_a_transform_that_matches_nothing_records_no_change(self) -> None:
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "absent", "replace": "x"},
+                }
+            ]
+        )
+        decision = ev.evaluate_response_body(req(), self.html(), b, None)
+        assert decision.mutation.body is None
+        assert b.build().entries[0].outcome is Outcome.NO_CHANGE
+
+    def test_a_failing_transform_is_attributed_and_not_fatal(self) -> None:
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "regex_sub", "pattern": "[", "repl": "x"},
+                }
+            ]
+        )
+        ev.evaluate_response_body(req(), self.html(), b, None)
+        provenance = b.build()
+        assert provenance.entries[0].outcome is Outcome.ERROR
+        assert provenance.has_note(NoteCode.MODULE_ERROR)
+
+    def test_a_rewritten_document_always_has_its_integrity_stripped(self) -> None:
+        """REQ PXY-040. The breakage is invisible from the proxy's side, so
+        leaving it to the operator to remember would guarantee it is forgotten."""
+        page = (
+            '<html><head><script src="a.js" integrity="sha384-x"></script></head>'
+            "<body><p>hi</p></body></html>"
+        )
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "hi", "replace": "bye"},
+                }
+            ]
+        )
+        decision = ev.evaluate_response_body(req(), self.html(page), b, None)
+        assert decision.mutation.body is not None
+        assert b"integrity" not in decision.mutation.body
+
+    def test_the_implicit_strip_is_recorded_not_silent(self) -> None:
+        page = '<html><head><script integrity="sha384-x"></script></head><body>hi</body></html>'
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "hi", "replace": "bye"},
+                }
+            ]
+        )
+        ev.evaluate_response_body(req(), self.html(page), b, None)
+        names = [e.rule_name for e in b.build().entries]
+        assert "implicit SRI strip" in names
+
+    def test_an_unrewritten_document_is_left_entirely_alone(self) -> None:
+        """The implicit strip only applies to a document we already changed."""
+        page = '<html><head><script integrity="sha384-x"></script></head><body>hi</body></html>'
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "absent", "replace": "x"},
+                }
+            ]
+        )
+        decision = ev.evaluate_response_body(req(), self.html(page), b, None)
+        assert decision.mutation.body is None
+
+    def test_injection_reuses_the_pages_nonce_end_to_end(self) -> None:
+        """REQ PXY-041 — leaving the page's own protections intact."""
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "inject",
+                    "action": "body",
+                    "transform": {"kind": "inject_script", "inline": "console.log(1)"},
+                }
+            ]
+        )
+        response = resp(
+            headers=(
+                ("content-type", "text/html"),
+                ("content-security-policy", "script-src 'nonce-xyz789'"),
+            ),
+            body=b"<html><head></head><body></body></html>",
+        )
+        decision = ev.evaluate_response_body(req(), response, b, None)
+        assert decision.mutation.body is not None
+        assert b'nonce="xyz789"' in decision.mutation.body
+        assert b.build().has_note(NoteCode.SCRIPT_INJECTED)
+
+    def test_several_transforms_apply_in_order(self) -> None:
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transforms": [
+                        {"kind": "replace_literal", "find": "hi", "replace": "mid"},
+                        {"kind": "replace_literal", "find": "mid", "replace": "end"},
+                    ],
+                }
+            ]
+        )
+        decision = ev.evaluate_response_body(req(), self.html(), b, None)
+        assert decision.mutation.body is not None
+        assert b"end" in decision.mutation.body
+
+    def test_the_charset_is_honoured_when_re_encoding(self) -> None:
+        b = builder()
+        ev = evaluator(
+            [
+                {
+                    "name": "t",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "hi", "replace": "café"},
+                }
+            ]
+        )
+        response = resp(
+            headers=(("content-type", "text/html; charset=latin-1"),),
+            body="<html><body>hi</body></html>".encode("latin-1"),
+        )
+        decision = ev.evaluate_response_body(req(), response, b, None)
+        assert decision.mutation.body is not None
+        assert "café" in decision.mutation.body.decode("latin-1")

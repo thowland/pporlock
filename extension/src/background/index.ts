@@ -8,6 +8,7 @@
 import { ControlApi } from '../shared/api';
 import type { ActionReply, Message, StatusReply } from '../shared/messages';
 import { StateStore, chromeArea, DEFAULT_CONTROL_ORIGIN } from '../shared/state';
+import { Attributor } from './attribution';
 import { applyBadge, badgeView, chromeBadgeApi, resolveBadgeState } from './badge';
 import { HealthMonitor, POLL_INTERVAL_MS } from './health';
 import { ProxyController, chromeProxyApi } from './proxy';
@@ -26,10 +27,27 @@ async function apiForState(): Promise<ControlApi> {
   const state = await store.load();
   if (api.origin !== state.controlOrigin) {
     api = new ControlApi(state.controlOrigin);
+    // Follow the control origin so we never attribute our own API traffic.
+    attributor.setIgnoreOrigin(state.controlOrigin);
   }
   api.setToken(state.token);
   return api;
 }
+
+/**
+ * Tab attribution. Submits through whatever ControlApi is current, so it
+ * follows a control-origin change without being rebuilt.
+ */
+const attributor = new Attributor(
+  {
+    submit: async (entries) => {
+      const client = await apiForState();
+      await client.submitAttribution(entries);
+    },
+  },
+  undefined,
+  DEFAULT_CONTROL_ORIGIN,
+);
 
 const health = new HealthMonitor({
   api,
@@ -54,18 +72,26 @@ const health = new HealthMonitor({
   onRecover: refreshBadge,
 });
 
-async function refreshBadge(): Promise<void> {
+async function refreshBadge(tabId?: number): Promise<void> {
   const state = await store.load();
+  // Per-tab counts once attribution can supply them; the global badge stays as
+  // the fallback for a tab we have nothing for.
+  const counters =
+    tabId === undefined
+      ? { blocked: 0, modified: 0, warnings: 0, errors: 0 }
+      : await store.getCounters(tabId);
+
   const view = badgeView(
     resolveBadgeState({
       proxyEnabled: state.proxyEnabled,
       failSafeTripped: state.failSafeTrippedAt !== null,
       daemonReachable: health.healthy !== false,
       devToggleActive: state.devToggles.anticache || state.devToggles.anticomp,
-      counts: { blocked: 0, modified: 0, warnings: 0, errors: 0 },
+      counts: counters,
     }),
+    counters,
   );
-  await applyBadge(badge, view);
+  await applyBadge(badge, view, tabId);
 }
 
 function proxyTargetFrom(listen: string | undefined): { host: string; port: number } {
@@ -180,6 +206,7 @@ async function status(): Promise<StatusReply> {
 
   return {
     state: await store.load(),
+    attributionGranted: await hasAttributionPermission(),
     daemonReachable,
     proxyControllable:
       level === 'controllable_by_this_extension' || level === 'controlled_by_this_extension',
@@ -263,7 +290,7 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
 // The alarm is what lets a suspended worker still notice a dead daemon.
 chrome.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MINUTES });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) void health.check().then(refreshBadge);
+  if (alarm.name === ALARM_NAME) void health.check().then(() => refreshBadge());
 });
 
 // On every wake, re-establish whatever the durable state says should be running.
@@ -274,3 +301,57 @@ void (async () => {
 })();
 
 chrome.tabs.onRemoved.addListener((tabId) => void store.resetCounters(tabId));
+
+/**
+ * Attribution: observe only, never block — and only with an explicit grant.
+ *
+ * chrome.webRequest reports only requests the extension has host access to, so
+ * this needs <all_urls>, which is optional and not granted at install
+ * (see manifest.config.ts). Registering the listener without the grant would
+ * silently produce nothing, which is worse than not registering it: the feature
+ * would appear on and do nothing.
+ *
+ * The listener itself records and returns. Anything slower would add latency to
+ * every request the browser makes, which is precisely the cost the daemon's own
+ * pipeline works to avoid.
+ */
+let attributionListening = false;
+
+function startAttribution(): void {
+  if (attributionListening) return;
+  attributionListening = true;
+
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      attributor.observe(details);
+    },
+    { urls: ['http://*/*', 'https://*/*'] },
+  );
+
+  // A navigation starts a new page, so its tally starts again.
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      if (details.type === 'main_frame' && details.tabId >= 0) {
+        void store.resetCounters(details.tabId).then(() => refreshBadge(details.tabId));
+      }
+    },
+    { urls: ['http://*/*', 'https://*/*'], types: ['main_frame'] },
+  );
+}
+
+export async function hasAttributionPermission(): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ origins: ['<all_urls>'] });
+  } catch {
+    return false;
+  }
+}
+
+void hasAttributionPermission().then((granted) => {
+  if (granted) startAttribution();
+});
+
+// Granting the permission takes effect at once rather than at the next restart.
+chrome.permissions.onAdded?.addListener((granted) => {
+  if (granted.origins?.includes('<all_urls>')) startAttribution();
+});

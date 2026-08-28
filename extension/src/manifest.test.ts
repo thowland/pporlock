@@ -36,6 +36,16 @@ describe('manifest', () => {
     }
   });
 
+  it('does not take broad host access at install', () => {
+    // The OI-2 spike established that per-tab attribution genuinely requires
+    // <all_urls>: coverage was 0% with loopback-only permissions and 100% with
+    // it. Rather than take it at install, it is optional and requested when the
+    // user asks for the feature — so installing pporlock prompts for nothing
+    // broad, and everything except per-tab counts works without it.
+    expect(manifest.host_permissions).not.toContain('<all_urls>');
+    expect(manifest.optional_host_permissions).toContain('<all_urls>');
+  });
+
   it('grants no permission to any host that is not this machine', () => {
     for (const host of manifest.host_permissions ?? []) {
       const url = new URL(host.replace('/*', '/'));

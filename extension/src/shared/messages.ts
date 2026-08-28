@@ -13,6 +13,8 @@ export type Message =
 
 export interface StatusReply {
   state: DurableState;
+  /** Whether the optional <all_urls> grant needed for per-tab attribution is held. */
+  attributionGranted: boolean;
   daemonReachable: boolean;
   proxyControllable: boolean;
   controlLevel: string;

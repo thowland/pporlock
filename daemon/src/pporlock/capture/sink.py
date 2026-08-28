@@ -23,7 +23,7 @@ class RingSink:
     flagged so a shortened body is never mistaken for a complete one.
     """
 
-    __slots__ = ("max_body_bytes", "on_flow", "ring")
+    __slots__ = ("max_body_bytes", "on_flow", "resolve_tab", "ring")
 
     def __init__(
         self,
@@ -31,11 +31,20 @@ class RingSink:
         *,
         max_body_bytes: int = 512 * 1024,
         on_flow: Any = None,
+        resolve_tab: Any = None,
     ) -> None:
         self.ring = ring
         self.max_body_bytes = max_body_bytes
         # Sprint 4 hangs the SSE hub off this.
         self.on_flow = on_flow
+        # Sprint 6: the attribution join, applied as the flow is recorded.
+        #
+        # Both orderings happen and both must work. The extension observes at
+        # onBeforeRequest, so its association usually arrives *before* the flow
+        # completes — that is this hook. When the flow wins the race instead,
+        # the POST /attribution handler backfills. Joining in only one direction
+        # leaves roughly half of all flows unattributed.
+        self.resolve_tab = resolve_tab
 
     def _emit(self, record: FlowRecord) -> None:
         self.ring.add(record)
@@ -64,12 +73,16 @@ class RingSink:
         blocked = provenance.short_circuited_by is not None
         modified = bool(provenance.modules_fired())
 
+        tab_id = request.tab_id if request is not None else None
+        if tab_id is None and request is not None and self.resolve_tab is not None:
+            tab_id = self.resolve_tab(request.method, request.url)
+
         record = FlowRecord(
             flow_id=_flow_id_of(request, response),
             kind="http",
             started_at=request.timestamp if request is not None else now_iso(),
             completed_at=now_iso(),
-            tab_id=request.tab_id if request is not None else None,
+            tab_id=tab_id,
             request=capped_request,
             response=capped_response,
             provenance=provenance,

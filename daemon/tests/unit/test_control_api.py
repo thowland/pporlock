@@ -368,3 +368,113 @@ class TestAuditLog:
         assert payload["origin"] == "mcp"
         assert payload["detail"] == {"module": "x"}
         assert payload["ts"].endswith("Z")
+
+
+class TestAttribution:
+    """SPEC-0 §3.6 — the join between what the extension sees and what we see."""
+
+    def test_accepts_a_batch(self, client: TestClient, token: str) -> None:
+        response = client.post(
+            "/attribution",
+            json={
+                "entries": [{"method": "GET", "url": "https://a.example/x", "tabId": 7, "ts": 1}]
+            },
+            headers=auth(token, "extension"),
+        )
+        assert response.status_code == 200
+        assert response.json()["accepted"] == 1
+
+    def test_a_malformed_entry_does_not_fail_the_batch(
+        self, client: TestClient, token: str
+    ) -> None:
+        """Dropping one association beats dropping a hundred."""
+        response = client.post(
+            "/attribution",
+            json={
+                "entries": [
+                    {"method": "GET", "url": "https://a.example/x", "tabId": 7},
+                    {"nonsense": True},
+                ]
+            },
+            headers=auth(token, "extension"),
+        )
+        payload = response.json()
+        assert payload["accepted"] == 1
+        assert payload["rejected"] == 1
+
+    def test_empty_batch_is_fine(self, client: TestClient, token: str) -> None:
+        response = client.post(
+            "/attribution", json={"entries": []}, headers=auth(token, "extension")
+        )
+        assert response.json()["accepted"] == 0
+
+    def test_backfills_an_already_delivered_flow(
+        self, client: TestClient, token: str, app: ControlApp
+    ) -> None:
+        """A flow is delivered before its tab is known, so the association has
+        to reach a row the client has already rendered."""
+        flow = app.ring.get("f0")
+        assert flow is not None and flow.request is not None
+        assert flow.tab_id is None
+
+        response = client.post(
+            "/attribution",
+            json={
+                "entries": [{"method": flow.request.method, "url": flow.request.url, "tabId": 42}]
+            },
+            headers=auth(token, "extension"),
+        )
+        assert response.json()["backfilled"] == 1
+        assert app.ring.get("f0") is not None
+        assert app.ring.get("f0").tab_id == 42  # type: ignore[union-attr]
+
+    def test_backfill_emits_flow_updated(self, tmp_path: Path) -> None:
+        """Clients key rows on flow_id and must be told when a field changes.
+
+        Uses a recording hub rather than a monkeypatch: EventHub has __slots__,
+        so its methods cannot be replaced on an instance — which is the right
+        design for something on the proxy's hot path.
+        """
+        from pporlock.control.events import EventHub
+
+        class RecordingHub(EventHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.seen: list[str] = []
+
+            def publish(self, event_type, data, record=None):  # type: ignore[no-untyped-def]
+                self.seen.append(event_type)
+                return super().publish(event_type, data, record)
+
+        config = Config()
+        config.state_dir = str(tmp_path)
+        ring = RingBuffer()
+        ring.add(make_record("f0", host="a.example", path="/one.js"))
+        hub = RecordingHub()
+        app = ControlApp(config, ring=ring, events=hub)
+        client = TestClient(app.asgi)
+
+        flow = app.ring.get("f0")
+        assert flow is not None and flow.request is not None
+        client.post(
+            "/attribution",
+            json={
+                "entries": [{"method": flow.request.method, "url": flow.request.url, "tabId": 42}]
+            },
+            headers=auth(app.tokens.ensure(), "extension"),
+        )
+        assert "flow.updated" in hub.seen
+
+    def test_requires_the_client_header(self, client: TestClient, token: str) -> None:
+        response = client.post(
+            "/attribution",
+            json={"entries": []},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 403
+
+    def test_coverage_is_reported_in_metrics(self, client: TestClient, token: str) -> None:
+        """The Sprint 6 decision criterion is measured against this."""
+        payload = client.get("/metrics", headers=auth(token)).json()
+        assert "attribution" in payload
+        assert "coverage" in payload["attribution"]

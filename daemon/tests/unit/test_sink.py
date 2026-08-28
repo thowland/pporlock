@@ -199,3 +199,46 @@ class TestWebSocketRecording:
         record = ring.get("ws0")
         assert record is not None
         assert record.ws_messages[0].truncated
+
+
+class TestAttributionJoin:
+    """SPEC-0 §3.6 — both orderings happen, and both must work."""
+
+    def test_resolves_the_tab_as_the_flow_is_recorded(self) -> None:
+        """The usual ordering: the extension observes at onBeforeRequest, so its
+        association arrives before the flow completes."""
+        ring = RingBuffer()
+        RingSink(ring, resolve_tab=lambda _m, _u: 42).record_http(
+            request(), response(), ProvenanceBuilder("default").build(), {}
+        )
+        record = ring.get("f0")
+        assert record is not None
+        assert record.tab_id == 42
+
+    def test_leaves_the_tab_unset_when_nothing_matches(self) -> None:
+        ring = RingBuffer()
+        RingSink(ring, resolve_tab=lambda _m, _u: None).record_http(
+            request(), response(), ProvenanceBuilder("default").build(), {}
+        )
+        record = ring.get("f0")
+        assert record is not None
+        assert record.tab_id is None
+
+    def test_does_not_overwrite_a_tab_already_known(self) -> None:
+        import dataclasses
+
+        ring = RingBuffer()
+        known = dataclasses.replace(request(), tab_id=7)
+        RingSink(ring, resolve_tab=lambda _m, _u: 99).record_http(
+            known, response(), ProvenanceBuilder("default").build(), {}
+        )
+        record = ring.get("f0")
+        assert record is not None
+        assert record.tab_id == 7
+
+    def test_works_without_a_resolver(self) -> None:
+        ring = RingBuffer()
+        RingSink(ring).record_http(request(), response(), ProvenanceBuilder("default").build(), {})
+        record = ring.get("f0")
+        assert record is not None
+        assert record.tab_id is None

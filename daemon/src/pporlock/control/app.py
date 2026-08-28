@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from ..capture.attribution import AttributionIndex, coverage_of, entry_from_dict
 from ..capture.filters import FlowFilter
 from ..config import Config
 from ..errors import AuthError, PairingError, PporlockError
@@ -59,6 +60,8 @@ INLINE_ROUTES: frozenset[str] = frozenset(
         "/audit",
         "/metrics",
         "/events",
+        "/attribution",
+        "/pair/begin",
     }
 )
 
@@ -159,6 +162,7 @@ class ControlApp:
         self.pairing = pairing or PairingWindow()
         self.audit = audit or AuditLog()
         self.events = events or EventHub()
+        self.attribution = AttributionIndex()
         self.static_dir = static_dir
         # Generate the token now rather than on first verify. It is per-install
         # state the user and the CLI need to be able to find, and a path printed
@@ -292,8 +296,60 @@ class ControlApp:
         stats = self.ring.stats
         counters = self.interceptor.counters.to_dict() if self.interceptor is not None else {}
         return JSONResponse(
-            {"ring": stats.to_dict(), "counters": counters, "attribution_coverage": None}
+            {
+                "ring": stats.to_dict(),
+                "counters": counters,
+                # The Sprint 6 decision criterion is measured against this, so
+                # it lives in the product rather than in a one-off script.
+                # Coverage is over flows; the index's own counters are join
+                # diagnostics and count attempts (see AttributionStats).
+                "attribution": {
+                    **self.attribution.stats.to_dict(),
+                    **coverage_of(self.ring.query(limit=1000).flows).to_dict(),
+                },
+            }
         )
+
+    async def post_attribution(self, request: Request) -> JSONResponse:
+        """Batched (request -> tab) associations from the extension.
+
+        Best-effort and non-blocking: a malformed entry is dropped rather than
+        failing the batch, and nothing here can delay a flow.
+        """
+        body = await request.json()
+        raw_entries = body.get("entries") or []
+        parsed = [e for e in (entry_from_dict(r) for r in raw_entries) if e is not None]
+        accepted = self.attribution.submit(parsed)
+
+        # Backfill anything already in the ring that we can now attribute, and
+        # tell subscribed clients so a row they already rendered gets updated
+        # rather than staying wrong (SPEC-0 §3.6, §7.3).
+        backfilled = self.backfill_attribution()
+        return JSONResponse(
+            {
+                "accepted": accepted,
+                "rejected": len(raw_entries) - accepted,
+                "backfilled": backfilled,
+            }
+        )
+
+    def backfill_attribution(self, limit: int = 200) -> int:
+        """Attribute recent unattributed flows. Returns how many were updated."""
+        updated = 0
+        for record in self.ring.query(limit=limit).flows:
+            if record.tab_id is not None or record.request is None:
+                continue
+            tab_id = self.attribution.resolve(record.request.method, record.request.url)
+            if tab_id is None:
+                continue
+            self.ring.update(record.flow_id, tab_id=tab_id)
+            updated += 1
+            self.events.publish_flow(
+                "flow.updated",
+                record,
+                {"flow_id": record.flow_id, "changed": {"tab_id": tab_id}},
+            )
+        return updated
 
     async def get_index(self, _: Request) -> Response:
         """Serve the web UI shell with its bearer token injected.
@@ -360,6 +416,22 @@ class ControlApp:
             },
         )
 
+    async def post_pair_begin(self, request: Request) -> JSONResponse:
+        """Open a pairing window and return the code (REQ API-012).
+
+        Authenticated: only something that can already read the token — the CLI
+        or the web UI — may open a window. That is what makes the code itself
+        safe to read aloud: it is worthless without a human having just asked
+        for it, and it expires in two minutes.
+        """
+        code = self.pairing.open()
+        self.audit.record(
+            request.scope.get("pporlock_client", "cli"),
+            "pairing_window_opened",
+            ttl_seconds=self.pairing.ttl,
+        )
+        return JSONResponse({"code": code, "expires_in": self.pairing.ttl})
+
     async def post_pair(self, request: Request) -> JSONResponse:
         """Redeem a pairing code for the bearer token (REQ API-012).
 
@@ -390,6 +462,8 @@ class ControlApp:
             Route("/audit", self.get_audit, methods=["GET"]),
             Route("/metrics", self.get_metrics, methods=["GET"]),
             Route("/events", self.get_events, methods=["GET"]),
+            Route("/attribution", self.post_attribution, methods=["POST"]),
+            Route("/pair/begin", self.post_pair_begin, methods=["POST"]),
             Route("/pair", self.post_pair, methods=["POST"]),
             Route("/", self.get_index, methods=["GET"]),
         ]

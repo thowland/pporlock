@@ -606,3 +606,109 @@ so. EXT-013 DevTools panel → Sprint 8. EXT-020/021 in-page banner → Sprint 1
   the token directly into storage rather than redeeming a code, because opening
   a pairing window needs a CLI invocation the harness does not yet make. Worth
   closing in Sprint 15.
+
+---
+
+## Sprint 06 — Attribution and platform spikes  ◀ DECISION GATE
+
+**Branch:** `sprint-06-attribution`
+**Tag:** `sprint-06-complete`
+
+**Requirements delivered:** SPEC-0 §3.6 (attribution, both join directions),
+API-012 (`pporlock pair`, which did not previously exist), API-028 (coverage in
+`/metrics`), EXT-012 (per-tab badge counts), and the resolution of **OI-1** and
+**OI-2**.
+
+**Requirements amended:** EXT-001. It assumed attribution needed no broad host
+access. Measurement says otherwise — see decision 3.
+
+**Gate results:**
+- **G1** — both spikes measured, not argued. OI-1 probe against Chrome 151; OI-2
+  measured at 49/49 flows attributed (100%) against a 95% criterion, over a real
+  browsing session with a real extension and a real daemon.
+- **G2** — daemon 92.88%, engine 99.56%, extension 95.73%, web 95.05%.
+- **G3** — 732 daemon + 144 extension + 125 web + 4 mcp, plus 8 E2E.
+- **G4** — no tests removed. Two were rewritten after they were found to assert
+  impossible states (see decision 6).
+- **G5** — clean.
+- **G6** — one new bandit finding, justified inline: `urlopen` in `pporlock
+  pair`, where the scheme is a literal and the host has already been asserted
+  loopback by `Config.validate()`. §2.5 areas walked: **origin/CSRF policy** —
+  the pairing gap below was found through it; **token handling** — the CLI reads
+  the token file, the extension still never does.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **OI-1 resolved: the HTTP control channel survives; Native Messaging is not
+   needed.** Measured on Chrome 151: extension service worker → loopback 200,
+   extension page → loopback 200, ordinary public page → loopback **blocked by
+   Chrome**. That third result is the notable one — Chrome now refuses
+   public→private requests itself, so our origin policy became defence in depth
+   rather than the only barrier. It stays: it also covers curl, other local
+   processes, and older Chrome versions.
+
+2. **OI-2 resolved: 100% coverage, criterion 95%.** The primary mechanism is
+   adopted; neither named fallback is needed. The measurement lives in the
+   product (`GET /metrics`) and in an E2E test, so it can be re-run rather than
+   remembered.
+
+3. **`<all_urls>` is genuinely required for attribution, and is therefore
+   optional.** `chrome.webRequest` reports only requests the extension has host
+   access to: coverage measured 0% with loopback-only permissions and 100% with
+   `<all_urls>`. Since REQ EXT-001 forbids broad host access, the permission is
+   declared in `optional_host_permissions` and requested only when the user asks
+   for per-tab counts. Installing pporlock prompts for nothing broad; proxy
+   control, the fail-safe, and browser-wide counts all work without it; and the
+   popup states the limitation rather than hiding it.
+
+4. **An MV3 timer cannot be trusted to fire.** A 500 ms batch timer produced
+   zero submissions: the worker is suspended with the timeout pending and the
+   batch is lost. Batching is now driven by round-trip time — flush immediately
+   when idle, buffer while in flight — which also keeps the worker alive for the
+   duration of the batch it is carrying.
+
+5. **The attributor was attributing its own POSTs**, which scheduled another
+   POST, which was attributed in turn. On an idle browser that loop generates
+   traffic forever. The control origin is now excluded from observation, and it
+   follows a control-origin change.
+
+6. **Attribution has to join in both directions.** The extension observes at
+   `onBeforeRequest`, so its association usually arrives *before* the flow
+   completes; the daemon joined only on submission. Roughly half of all flows
+   would have been unattributed. Both paths now exist: a resolve at flow-record
+   time, and backfill when the flow wins the race.
+
+7. **The coverage metric was measuring the wrong thing.** It counted join
+   attempts, and backfill re-tries every unattributed flow on every submission,
+   so one unattributable flow inflated the denominator without bound — reporting
+   77.8% where the figure over flows was 100%. SPEC-0 §3.6 states the criterion
+   over *flows*; it is now measured that way, with attempt counters kept
+   separately and labelled as diagnostics.
+
+8. **`pporlock pair` did not exist.** The popup and the documentation both
+   referenced it. Its absence surfaced as a 403: an extension holding a token
+   but never having completed the handshake cannot make mutating calls, because
+   pairing is what registers its origin with the daemon. Worth noting that GET
+   requests from an extension carry no `Origin` header and so were passing,
+   while the JSON POST triggered CORS and was refused — the failure was
+   therefore partial and would have been confusing to diagnose later.
+
+9. **The attribution E2E loads a copy of the built extension with `<all_urls>`
+   moved into `host_permissions`.** That is exactly the post-grant state, and it
+   is the only way to reach it automatically: `chrome.permissions.request`
+   requires a user gesture and raises a Chrome-native dialog no driver can
+   dismiss. The extension code under test is byte-identical to what ships.
+
+**Notes for the next sprint:**
+
+- Sprint 7 builds the rules engine and blocking. The seams in
+  `addon/interceptor.py` are marked and unchanged since Sprint 2.
+- `engine/` must reach 90% coverage in Sprint 7 (REQ TST-002); it currently sits
+  at 99.56% on a much smaller surface.
+- The `?` unattributed flag in the web UI (suppressed in Sprint 4 until
+  attribution existed) will now appear for genuinely unattributed flows — worth
+  confirming it reads correctly once someone browses without the optional grant.
+- `chrome.notifications` is still called optionally in the fail-safe trip
+  handler without the permission being held, so it silently no-ops. Carry to
+  Sprint 15 with the rest of the notification surface.

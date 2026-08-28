@@ -237,3 +237,50 @@ describe('Popup', () => {
     expect(chromeStub.chrome.tabs.create).toHaveBeenCalled();
   });
 });
+
+describe('recording from the popup (REQ CAP-025, EXT-023)', () => {
+  it('offers a record control when paired and idle', async () => {
+    sendMessage.mockResolvedValue(status({}, { paired: true }));
+    render(<Popup />);
+    expect(await screen.findByRole('button', { name: 'record' })).toBeTruthy();
+    expect(screen.getByLabelText('Session name')).toBeTruthy();
+  });
+
+  it('starts a session with the name given', async () => {
+    sendMessage.mockResolvedValue(status({}, { paired: true }));
+    render(<Popup />);
+    await userEvent.type(await screen.findByLabelText('Session name'), 'checkout-bug');
+    await userEvent.click(screen.getByRole('button', { name: 'record' }));
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: 'start_recording',
+      name: 'checkout-bug',
+    });
+  });
+
+  it('says unmissably that it is recording, and what that means', async () => {
+    // Recording is opt-in and off by default (REQ CAP-020). A proxy quietly
+    // writing every flow it sees to disk is a different, worse tool, so while
+    // it is on the popup states it and says the file holds no real secrets.
+    sendMessage.mockResolvedValue(status({}, { paired: true, recordingSession: 's-1' }));
+    render(<Popup />);
+    expect(await screen.findByText('● recording')).toBeTruthy();
+    expect(screen.getByText(/masked as they are written/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'record' })).toBeNull();
+  });
+
+  it('stops the session', async () => {
+    sendMessage.mockResolvedValue(status({}, { paired: true, recordingSession: 's-1' }));
+    render(<Popup />);
+    await userEvent.click(await screen.findByRole('button', { name: 'stop recording' }));
+    expect(sendMessage).toHaveBeenCalledWith({ type: 'stop_recording' });
+  });
+
+  it('offers no recording control before pairing', async () => {
+    // Nothing to record to. An enabled control that cannot work is worse than
+    // its absence.
+    sendMessage.mockResolvedValue(status({}, { paired: false }));
+    render(<Popup />);
+    await screen.findByText(/pporlock/);
+    expect(screen.queryByRole('button', { name: 'record' })).toBeNull();
+  });
+});

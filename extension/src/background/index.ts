@@ -309,6 +309,37 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
       return { ok: true, state: await store.load() };
     }
 
+    case 'start_recording': {
+      const client = await apiForState();
+      try {
+        const meta = await client.startSession(message.name);
+        const next = await store.save({ recordingSession: meta.session_id });
+        await refreshBadge();
+        return { ok: true, state: next };
+      } catch (error) {
+        return { ok: false, error: String((error as Error).message ?? error) };
+      }
+    }
+
+    case 'stop_recording': {
+      const state = await store.load();
+      if (state.recordingSession === null) return { ok: false, error: 'Not recording.' };
+      const client = await apiForState();
+      try {
+        await client.stopSession(state.recordingSession);
+      } catch (error) {
+        // The session may already have been stopped from the web UI. Clearing
+        // local state anyway is right: leaving the popup claiming to record
+        // something that is not recording is the worse failure.
+        await store.save({ recordingSession: null });
+        await refreshBadge();
+        return { ok: false, error: String((error as Error).message ?? error) };
+      }
+      const next = await store.save({ recordingSession: null });
+      await refreshBadge();
+      return { ok: true, state: next };
+    }
+
     case 'set_banner_enabled':
       return { ok: true, state: await store.save({ bannerEnabled: message.enabled }) };
 

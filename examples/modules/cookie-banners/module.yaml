@@ -1,0 +1,48 @@
+name: cookie-banners
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Hides consent dialogs and restores scrolling. CSS hides the overlay; a small
+  script re-enables scrolling that banners commonly disable on <body>.
+author: pporlock examples
+enabled: false
+
+# Runs after adblock (10) so a banner script that was blocked outright never
+# reaches this, and before any module that rewrites page content.
+priority: 20
+
+config:
+  # Read by module.py through ctx.config. Everything tunable lives here rather
+  # than in the code, so a change does not mean editing Python.
+  click_accept: false
+
+rules:
+  - name: hide-consent-overlays
+    action: body
+    match:
+      content_type: "text/html"
+      dest: document
+    transform:
+      kind: inject_style
+      position: head_end
+      # Inline rather than href: an external stylesheet is another request, and
+      # on a page with a strict CSP it is another thing to be blocked.
+      inline: |
+        #onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter,
+        #CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay,
+        #usercentrics-root, #cookiescript_injected, #cmpbox, #cmpbox2,
+        .qc-cmp2-container, .qc-cmp-cleanslate, #didomi-host,
+        .fc-consent-root, .truste_overlay, .truste_box_overlay,
+        [id^="sp_message_container"], [class*="cookie-banner"],
+        [class*="cookie-consent"], [class*="cookie-notice"] {
+          display: none !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+        }
+        /* Banners routinely set overflow:hidden on the document to trap you
+           behind the overlay. Hiding the overlay without this leaves a page
+           that cannot scroll — worse than the banner. */
+        html, body {
+          overflow: auto !important;
+          position: static !important;
+        }

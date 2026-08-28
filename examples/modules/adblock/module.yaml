@@ -1,0 +1,78 @@
+name: adblock
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Blocks common advertising and analytics endpoints, and serves a
+  destination-appropriate stub in their place rather than an error.
+author: pporlock examples
+# Creating a module never enables it. Turn it on deliberately, after reading it.
+enabled: false
+
+# Low number runs early. Blocking is first-match-wins across every module, so a
+# blocker that wants the last word should run before rules that rewrite.
+priority: 10
+
+rules:
+  # ------------------------------------------------------------------ hosts --
+  #
+  # Whole-host blocks. `host` is a case-insensitive glob against the full host,
+  # so "*.doubleclick.net" matches a subdomain and not the apex — list both when
+  # you mean both.
+  - name: block-ad-hosts
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      host: "*.doubleclick.net"
+
+  - name: block-google-analytics
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      host: "www.google-analytics.com"
+
+  - name: block-googletagmanager
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      host: "www.googletagmanager.com"
+
+  - name: block-scorecardresearch
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      host: "*.scorecardresearch.com"
+
+  - name: block-hotjar
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      host: "*.hotjar.com"
+
+  # ------------------------------------------------------------------ paths --
+  #
+  # Path blocks are narrower and riskier: /collect on a first-party host may be
+  # the application's own telemetry, and blocking it can break the page. These
+  # are deliberately scoped to a `dest` so a document navigation is never hit.
+  - name: block-beacon-paths
+    action: block
+    mode: stub
+    stub: auto
+    match:
+      # re.search, not fullmatch — anchored on purpose.
+      path: "^/(collect|beacon|telemetry|pixel)(/|$|\\?)"
+      dest: [script, image, empty]
+
+  # `kill` drops the connection instead of answering it. Reserve it for
+  # long-poll and streaming endpoints where a 200 with an empty body would make
+  # the client retry forever; anything the page awaits should get a stub.
+  - name: kill-tracker-long-poll
+    action: block
+    mode: kill
+    match:
+      host: "*.analytics-vendor.example"
+      path: "^/stream"

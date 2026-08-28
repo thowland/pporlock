@@ -1,0 +1,18 @@
+name: fault-lab
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Deterministic fault injection for testing error paths: turn chosen requests
+  into 500s, 429s or timeouts, on a fixed cycle rather than at random.
+author: pporlock examples
+enabled: false
+priority: 70
+
+config:
+  # Which requests are eligible. Both are matched by the Python tier, because
+  # "every third one" is not something a declarative rule can express.
+  host: "api.example.com"
+  path_prefix: "/v1/"
+  # Fail one request in this many. 1 fails everything; 0 disables.
+  every: 3
+  status: 503

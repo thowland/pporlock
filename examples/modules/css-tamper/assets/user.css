@@ -1,0 +1,24 @@
+/* Your stylesheet. Served at /__pporlock__/user.css on every host the module
+   is active for, so scope rules yourself when you mean one site.
+
+   Reload the page after editing; the file is read per request, so there is no
+   module reload to remember. */
+
+/* Example: a readable measure for long-form text. Scoped to one host, because
+   a rule this blunt applied everywhere is how you end up debugging your own
+   stylesheet on a site you did not mean to change. */
+@media screen {
+  html[data-pporlock] body {
+    /* deliberately inert — this attribute is never set. It is here so the
+       file does something visible only once you have chosen what to change. */
+  }
+}
+
+/* Uncomment and edit:
+
+article, main, .post-content {
+  max-width: 42rem !important;
+  margin-inline: auto !important;
+  line-height: 1.7 !important;
+}
+*/

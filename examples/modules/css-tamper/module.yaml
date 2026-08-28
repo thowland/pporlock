@@ -1,0 +1,32 @@
+name: css-tamper
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  A user stylesheet, per host. The CSS lives in assets/ rather than in this
+  file, so editing it is editing CSS and not editing YAML that contains CSS.
+author: pporlock examples
+enabled: false
+priority: 60
+
+rules:
+  # `href` points at a path the map_local rule below serves. Two rules, because
+  # a stylesheet the browser fetches can be cached, inspected in DevTools, and
+  # edited without touching the page — an inline blob can be none of those.
+  - name: link-user-stylesheet
+    action: body
+    match:
+      content_type: "text/html"
+      dest: document
+    transform:
+      kind: inject_style
+      href: "/__pporlock__/user.css"
+      position: head_end
+
+  # The link above is same-origin, so it arrives as an ordinary request to
+  # whatever host the page was on, and this serves it from disk.
+  - name: serve-user-stylesheet
+    action: map_local
+    file: user.css
+    content_type: "text/css; charset=utf-8"
+    match:
+      path: "^/__pporlock__/user\\.css$"

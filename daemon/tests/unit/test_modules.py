@@ -983,3 +983,71 @@ class TestWebSocketHookIsActuallyCalled:
         Evaluator().observe_websocket_message(
             self._message(), request(), ProvenanceBuilder("default")
         )
+
+
+class TestTheTwoTiersCompose:
+    """REQ MOD-023. A hook and a declarative rule on the same body must not
+    overwrite one another.
+
+    They did. Transforms ran, then hooks ran against the *original* response,
+    and then the transform result was written over ``decision.mutation.body`` —
+    so a hook that edited the body had its edit silently discarded whenever any
+    body rule also matched, while provenance recorded the hook as applied.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> Any:
+        from pporlock.engine.modules.registry import ModuleRegistry
+
+        directory = tmp_path / "both"
+        directory.mkdir(parents=True)
+        (directory / "module.yaml").write_text(
+            "name: both\n"
+            "pporlock_api: '1'\n"
+            "enabled: true\n"
+            "rules:\n"
+            "  - name: add-a-marker\n"
+            "    action: body\n"
+            "    match: {content_type: 'text/html'}\n"
+            "    transform: {kind: replace_literal, find: 'ORIGINAL', replace: 'BY-RULE'}\n"
+        )
+        (directory / "module.py").write_text(
+            "from pporlock.engine.models import ResponseMutation\n"
+            "def on_response(request, response, ctx):\n"
+            "    text = response.text\n"
+            "    if text is None:\n"
+            "        return None\n"
+            "    return ResponseMutation(body=(text + '<!--BY-HOOK-->').encode())\n"
+        )
+        registry = ModuleRegistry(tmp_path, store_path=tmp_path / "store.db")
+        registry.reload()
+        return registry
+
+    def _run(self, tmp_path: Path) -> bytes:
+        registry = self._registry(tmp_path)
+        ev = Evaluator(registry.build_ruleset(["both"]), registry=registry)
+        decision = ev.evaluate_response_body(
+            request(),
+            NormalizedResponse(
+                flow_id="f1",
+                timestamp="2026-08-28T00:00:00Z",
+                status=200,
+                headers=(("content-type", "text/html"),),
+                body=b"<html><body>ORIGINAL</body></html>",
+            ),
+            ProvenanceBuilder("default"),
+        )
+        assert decision.mutation.body is not None
+        return decision.mutation.body
+
+    def test_both_edits_survive(self, tmp_path: Path) -> None:
+        body = self._run(tmp_path)
+        assert b"BY-RULE" in body
+        assert b"BY-HOOK" in body
+        assert b"ORIGINAL" not in body
+
+    def test_the_hook_sees_what_the_rule_produced(self, tmp_path: Path) -> None:
+        """Not merely both-present: the hook must read the transformed body,
+        or the two tiers are composing by luck rather than by order."""
+        body = self._run(tmp_path)
+        assert body.index(b"BY-RULE") < body.index(b"BY-HOOK")

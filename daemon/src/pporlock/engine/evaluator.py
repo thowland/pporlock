@@ -13,7 +13,7 @@ without one, which is why the builder is threaded through rather than returned
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -658,12 +658,26 @@ class Evaluator:
         # left in the context after it belongs to nobody in particular.
         self._drain_transform_notes(context, builder, module=None)
 
+        # Declarative transforms first, then hooks — and hooks see the body as
+        # the transforms have left it.
+        #
+        # Previously the hooks ran against the original response and the
+        # transform result was written over decision.mutation.body afterwards,
+        # so a hook that edited the body had its edit silently discarded
+        # whenever any declarative body rule also matched. Provenance recorded
+        # the hook as `applied`. That is the precise failure this system exists
+        # to make impossible, and it broke the ordering promise of REQ MOD-023
+        # while appearing to keep it.
+        #
+        # Handing hooks the transformed body means the two tiers compose rather
+        # than race: a hook reads what the rules produced and edits that.
+        if text != original:
+            decision.mutation.body = text.encode(_charset(response))
+            response = replace(response, body=decision.mutation.body)
+
         self._run_python_hooks(
             "on_response", builder, decision.mutation, request=request, response=response
         )
-
-        if text != original:
-            decision.mutation.body = text.encode(_charset(response))
 
         return decision
 

@@ -7,9 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --max-warnings 0",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,html}\"",
-    "format": "prettier --write \"src/**/*.{ts,tsx,css,html}\"",
+    "lint": "eslint src e2e --max-warnings 0",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css,html}\" \"e2e/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,html}\" \"e2e/**/*.ts\"",
     "test": "vitest run",
     "coverage": "vitest run --coverage"
   },

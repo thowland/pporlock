@@ -14,6 +14,8 @@ interface Props {
   flows: FlowRecord[];
   connected: boolean;
   hasFilter: boolean;
+  selectedId?: string | null | undefined;
+  onSelect?: ((flow: FlowRecord) => void) | undefined;
 }
 
 function noteSeverity(flow: FlowRecord): 'error' | 'warning' | null {
@@ -97,7 +99,7 @@ function EmptyState({ connected, hasFilter }: { connected: boolean; hasFilter: b
   );
 }
 
-export function FlowTable({ flows, connected, hasFilter }: Props) {
+export function FlowTable({ flows, connected, hasFilter, selectedId, onSelect }: Props) {
   if (flows.length === 0) {
     return <EmptyState connected={connected} hasFilter={hasFilter} />;
   }
@@ -131,7 +133,21 @@ export function FlowTable({ flows, connected, hasFilter }: Props) {
           const response = flow.response;
           const overhead = flow.timing?.pporlock_ms ?? null;
           return (
-            <tr key={flow.flow_id}>
+            <tr
+              key={flow.flow_id}
+              className={flow.flow_id === selectedId ? 'selected' : undefined}
+              onClick={() => onSelect?.(flow)}
+              // Rows are focusable so the table is navigable without a mouse
+              // (REQ WUI-015).
+              tabIndex={0}
+              role="row"
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onSelect?.(flow);
+                }
+              }}
+            >
               <td className="dim">{formatTime(flow.started_at)}</td>
               <td>{request?.method ?? <span className="faint">—</span>}</td>
               <td>{flow.kind === 'passthrough' ? flow.passthrough?.host : request?.host}</td>

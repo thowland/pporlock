@@ -68,6 +68,11 @@ describe('manifest', () => {
     expect(manifest.background).toMatchObject({ type: 'module' });
   });
 
+  it('registers the DevTools panel', () => {
+    // REQ EXT-013 — the designated primary debugging affordance, not optional.
+    expect(manifest.devtools_page).toBeTruthy();
+  });
+
   it('declares a popup and an options page', () => {
     expect(manifest.action?.default_popup).toBeTruthy();
     expect(manifest.options_page).toBeTruthy();

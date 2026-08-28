@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pporlock.capture.ring import RingBuffer
 from pporlock.capture.sink import RingSink
 from pporlock.engine.models import NormalizedRequest, NormalizedResponse, WebSocketMessage
@@ -242,3 +244,82 @@ class TestAttributionJoin:
         record = ring.get("f0")
         assert record is not None
         assert record.tab_id is None
+
+
+class TestModifiedFlag:
+    """The flags column is how you scan a hundred rows for the one that broke,
+    so BLK and MOD must not both appear on a flow that was simply blocked."""
+
+    def _record(self, builder: ProvenanceBuilder) -> Any:
+        ring = RingBuffer()
+        RingSink(ring).record_http(request(), response(), builder.build(), {})
+        return ring.get("f0")
+
+    def test_a_blocked_flow_is_not_also_modified(self) -> None:
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.REQUEST_SHORT_CIRCUIT,
+            module="m",
+            rule_id="m:0",
+            action=Action.BLOCK,
+            outcome=Outcome.APPLIED,
+        )
+        builder.short_circuit("m:0")
+        record = self._record(builder)
+        assert record is not None
+        assert record.blocked
+        assert not record.modified
+
+    def test_a_header_change_counts_as_modified(self) -> None:
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.RESPONSE_HEADERS,
+            module="m",
+            rule_id="m:0",
+            action=Action.HEADERS,
+            outcome=Outcome.APPLIED,
+        )
+        record = self._record(builder)
+        assert record is not None
+        assert record.modified
+        assert not record.blocked
+
+    def test_a_body_change_counts_as_modified(self) -> None:
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.RESPONSE_BODY,
+            module="m",
+            rule_id="m:0",
+            action=Action.BODY,
+            outcome=Outcome.APPLIED,
+        )
+        record = self._record(builder)
+        assert record is not None
+        assert record.modified
+
+    def test_a_redirect_is_neither_blocked_nor_modified_content(self) -> None:
+        """It changed where the request went, not what came back."""
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.REQUEST_SHORT_CIRCUIT,
+            module="m",
+            rule_id="m:0",
+            action=Action.REDIRECT,
+            outcome=Outcome.APPLIED,
+        )
+        record = self._record(builder)
+        assert record is not None
+        assert not record.modified
+
+    def test_a_header_rule_that_changed_nothing_is_not_modified(self) -> None:
+        builder = ProvenanceBuilder("default")
+        builder.record(
+            phase=Phase.RESPONSE_HEADERS,
+            module="m",
+            rule_id="m:0",
+            action=Action.HEADERS,
+            outcome=Outcome.NO_CHANGE,
+        )
+        record = self._record(builder)
+        assert record is not None
+        assert not record.modified

@@ -51,6 +51,7 @@ interface Manifest {
   background: { service_worker: string; type: 'module' };
   action: { default_popup: string; default_title?: string };
   options_page?: string;
+  devtools_page?: string;
   content_scripts?: unknown[];
 }
 
@@ -72,6 +73,7 @@ const manifest: Manifest = {
     default_title: 'pporlock',
   },
   options_page: 'src/popup/options.html',
+  devtools_page: 'src/devtools/devtools.html',
 };
 
 export default manifest;

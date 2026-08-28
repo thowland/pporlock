@@ -10,7 +10,7 @@ from typing import Any
 
 from ..addon.normalize import now_iso
 from ..engine.models import NormalizedRequest, NormalizedResponse, WebSocketMessage
-from ..engine.provenance import NoteCode, Provenance
+from ..engine.provenance import Action, NoteCode, Outcome, Provenance
 from .records import FlowRecord, Timing, truncate
 from .ring import RingBuffer
 
@@ -71,7 +71,11 @@ class RingSink:
                 capped_response = replace_response_body(response, body, truncated=True)
 
         blocked = provenance.short_circuited_by is not None
-        modified = bool(provenance.modules_fired())
+        # "Modified" means headers or a body were changed. A short-circuited
+        # flow was blocked, not modified — showing both flags on one row makes
+        # the flags column, which is how you scan a hundred rows for the one
+        # that went wrong, harder rather than easier to read.
+        modified = _was_modified(provenance)
 
         tab_id = request.tab_id if request is not None else None
         if tab_id is None and request is not None and self.resolve_tab is not None:
@@ -143,6 +147,18 @@ class RingSink:
                 truncated=cut,
             )
         )
+
+
+#: Actions that change an existing message rather than replacing it.
+_MODIFYING_ACTIONS = frozenset({Action.HEADERS, Action.BODY})
+
+
+def _was_modified(provenance: Provenance) -> bool:
+    """Whether any header or body was actually changed."""
+    return any(
+        entry.outcome is Outcome.APPLIED and entry.action in _MODIFYING_ACTIONS
+        for entry in provenance.entries
+    )
 
 
 def _flow_id_of(request: NormalizedRequest | None, response: NormalizedResponse | None) -> str:

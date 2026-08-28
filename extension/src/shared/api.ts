@@ -8,6 +8,7 @@
  *  - The token is never placed in a URL, only in an Authorization header.
  */
 import { assertLoopbackOrigin } from './control-origin';
+import type { FlowPage, FlowQuery, FlowRecord } from './flows';
 
 export class ApiError extends Error {
   constructor(
@@ -148,6 +149,21 @@ export class ControlApi {
     entries: unknown[],
   ): Promise<{ accepted: number; rejected: number; backfilled: number }> {
     return this.request('/attribution', { method: 'POST', body: { entries } });
+  }
+
+  /** Flows, filtered with the SPEC-0 §6.5 vocabulary — the same one the web UI uses. */
+  listFlows(query: FlowQuery = {}): Promise<FlowPage> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null || value === '') continue;
+      params.set(key, String(value));
+    }
+    const suffix = [...params.keys()].length > 0 ? `?${params.toString()}` : '';
+    return this.request<FlowPage>(`/flows${suffix}`);
+  }
+
+  getFlow(flowId: string): Promise<FlowRecord> {
+    return this.request<FlowRecord>(`/flows/${encodeURIComponent(flowId)}?detail=full`);
   }
 
   getExclusions(): Promise<{ entries: { pattern: string; comment: string }[] }> {

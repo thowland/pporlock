@@ -25,6 +25,10 @@ export default defineConfig({
         'src/background/index.ts',
         'src/manifest.config.ts',
         'src/test/**',
+        // Entry points: devtools.ts registers the panel and does nothing else;
+        // main.tsx wires it up. Both need a live DevTools host to run.
+        'src/devtools/devtools.ts',
+        'src/devtools/main.tsx',
       ],
       // Gate G2: extension >= 80%
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },

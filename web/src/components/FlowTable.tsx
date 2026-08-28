@@ -7,6 +7,7 @@
  * per event — that is handled upstream in useFlows, which buffers and flushes
  * on an animation frame.
  */
+import type { ReactNode } from 'react';
 import type { FlowRecord } from '../api/types';
 import { formatBytes, formatMs, formatTime, shortType, statusClass } from '../lib/format';
 
@@ -16,6 +17,12 @@ interface Props {
   hasFilter: boolean;
   selectedId?: string | null | undefined;
   onSelect?: ((flow: FlowRecord) => void) | undefined;
+  /**
+   * Per-row actions (SPEC-2 §6.6). Supplied by the shell rather than built in,
+   * so the table stays a pure presentation of flows and can be reused by the
+   * session browser (SPEC-2 §8.2) where those actions do not apply.
+   */
+  renderActions?: ((flow: FlowRecord) => ReactNode) | undefined;
 }
 
 function noteSeverity(flow: FlowRecord): 'error' | 'warning' | null {
@@ -99,7 +106,14 @@ function EmptyState({ connected, hasFilter }: { connected: boolean; hasFilter: b
   );
 }
 
-export function FlowTable({ flows, connected, hasFilter, selectedId, onSelect }: Props) {
+export function FlowTable({
+  flows,
+  connected,
+  hasFilter,
+  selectedId,
+  onSelect,
+  renderActions,
+}: Props) {
   if (flows.length === 0) {
     return <EmptyState connected={connected} hasFilter={hasFilter} />;
   }
@@ -125,6 +139,7 @@ export function FlowTable({ flows, connected, hasFilter, selectedId, onSelect }:
             pporlock
           </th>
           <th>Flags</th>
+          {renderActions !== undefined && <th>Actions</th>}
         </tr>
       </thead>
       <tbody>
@@ -172,6 +187,7 @@ export function FlowTable({ flows, connected, hasFilter, selectedId, onSelect }:
               <td>
                 <Flags flow={flow} attributionActive={attributionActive} />
               </td>
+              {renderActions !== undefined && <td>{renderActions(flow)}</td>}
             </tr>
           );
         })}

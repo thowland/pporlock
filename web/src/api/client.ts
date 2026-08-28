@@ -9,6 +9,16 @@ import { resolveControlOrigin } from '../lib/control-origin';
 import type { ApiError, DaemonState, DetailLevel, FlowFilter, FlowPage } from './types';
 import { filterToParams } from './types';
 import type { FlowRecord, Health } from './types';
+import type {
+  ModuleDetail,
+  ModuleStatus,
+  ProfileList,
+  ProfileSummary,
+  ReloadResult,
+  RuleIntent,
+  SuggestedRule,
+  ValidationResult,
+} from './types';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -117,6 +127,91 @@ export class ApiClient {
 
   getExclusions(): Promise<{ entries: { pattern: string; comment: string; source: string }[] }> {
     return this.request('/exclusions');
+  }
+
+  /* ---------------- Modules (SPEC-0 §6.6) ---------------- */
+
+  listModules(): Promise<{ modules: ModuleStatus[] }> {
+    return this.request<{ modules: ModuleStatus[] }>('/modules');
+  }
+
+  getModule(name: string): Promise<ModuleDetail> {
+    return this.request<ModuleDetail>(`/modules/${encodeURIComponent(name)}`);
+  }
+
+  /**
+   * Create never enables (REQ MCP-030) — the daemon enforces it and the UI
+   * mirrors it, so enabling is always a separate, deliberate PATCH.
+   */
+  createModule(name: string, files: Record<string, string>): Promise<ModuleStatus> {
+    return this.request<ModuleStatus>('/modules', { method: 'POST', body: { name, files } });
+  }
+
+  replaceModule(name: string, files: Record<string, string>): Promise<ModuleStatus> {
+    return this.request<ModuleStatus>(`/modules/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: { files },
+    });
+  }
+
+  /** `PATCH` carries `enabled` and `priority` only — never file content. */
+  patchModule(
+    name: string,
+    changes: { enabled?: boolean; priority?: number },
+  ): Promise<ModuleStatus> {
+    return this.request<ModuleStatus>(`/modules/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: changes,
+    });
+  }
+
+  deleteModule(name: string): Promise<void> {
+    return this.request<void>(`/modules/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  }
+
+  reloadModules(): Promise<ReloadResult> {
+    return this.request<ReloadResult>('/modules/reload', { method: 'POST', body: {} });
+  }
+
+  /** Validates a candidate module and installs nothing (REQ API-027). */
+  validateModule(files: Record<string, string>): Promise<ValidationResult> {
+    return this.request<ValidationResult>('/validate', { method: 'POST', body: { files } });
+  }
+
+  /* ---------------- Profiles (SPEC-0 §6.7) ---------------- */
+
+  listProfiles(): Promise<ProfileList> {
+    return this.request<ProfileList>('/profiles');
+  }
+
+  createProfile(profile: ProfileSummary): Promise<ProfileSummary> {
+    return this.request<ProfileSummary>('/profiles', { method: 'POST', body: profile });
+  }
+
+  replaceProfile(name: string, profile: ProfileSummary): Promise<ProfileSummary> {
+    return this.request<ProfileSummary>(`/profiles/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: profile,
+    });
+  }
+
+  deleteProfile(name: string): Promise<void> {
+    return this.request<void>(`/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  }
+
+  activateProfile(name: string): Promise<{ active: string }> {
+    return this.request<{ active: string }>(`/profiles/${encodeURIComponent(name)}/activate`, {
+      method: 'POST',
+      body: {},
+    });
+  }
+
+  /** Candidate rule derived from a flow (REQ WUI-008, MCP-014). */
+  suggestRule(flowId: string, intent: RuleIntent): Promise<SuggestedRule> {
+    return this.request<SuggestedRule>(`/flows/${encodeURIComponent(flowId)}/suggest-rule`, {
+      method: 'POST',
+      body: { intent },
+    });
   }
 
   /**

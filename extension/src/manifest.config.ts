@@ -21,6 +21,20 @@
  * test running the daemon on an ephemeral port found immediately. This is still
  * loopback only: the extension cannot read any page, or reach any host that is
  * not this machine.
+ *
+ * optional_host_permissions is <all_urls>, and it is NOT granted at install.
+ *
+ * The OI-2 spike established that chrome.webRequest only reports requests the
+ * extension has host access to: with loopback-only permissions, attribution
+ * coverage measured 0%; with <all_urls>, 100%. So per-tab attribution genuinely
+ * requires broad host access — REQ EXT-001 assumed otherwise.
+ *
+ * Rather than take it at install, it is optional and requested when the user
+ * asks for per-tab attribution. Installing pporlock therefore prompts for
+ * nothing broad, the cost is paid only by someone who wants the feature, and
+ * everything else — proxy control, the fail-safe, browser-wide counts — works
+ * without it. Without the grant the daemon simply reports flows with no tab,
+ * which every consumer already tolerates (SPEC-0 §3.6).
  */
 // Declared with a local type rather than CRXJS's ManifestV3Export: that is a
 // union including a Promise, which makes the object's own fields unreadable to
@@ -33,6 +47,7 @@ interface Manifest {
   minimum_chrome_version?: string;
   permissions: string[];
   host_permissions: string[];
+  optional_host_permissions?: string[];
   background: { service_worker: string; type: 'module' };
   action: { default_popup: string; default_title?: string };
   options_page?: string;
@@ -47,6 +62,7 @@ const manifest: Manifest = {
   minimum_chrome_version: '116',
   permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest'],
   host_permissions: ['http://127.0.0.1/*', 'http://localhost/*'],
+  optional_host_permissions: ['<all_urls>'],
   background: {
     service_worker: 'src/background/index.ts',
     type: 'module',

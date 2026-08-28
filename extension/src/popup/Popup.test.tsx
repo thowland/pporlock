@@ -12,6 +12,7 @@ function status(
 ): StatusReply {
   return {
     state: { ...DEFAULT_STATE, ...state },
+    attributionGranted: false,
     daemonReachable: true,
     proxyControllable: true,
     controlLevel: 'controllable_by_this_extension',
@@ -156,12 +157,33 @@ describe('Popup', () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: 'pair', code: '1234' });
   });
 
-  it('shows counters and says they are browser-wide for now', async () => {
-    sendMessage.mockResolvedValue(status({}, { paired: true }));
+  it('shows counters and says they are browser-wide without the grant', async () => {
+    sendMessage.mockResolvedValue(status({ attributionGranted: false }, { paired: true }));
     render(<Popup />);
     await waitFor(() => expect(screen.getByText('42')).toBeTruthy());
-    // A partial that is stated is not a shortfall.
-    expect(screen.getByText(/browser-wide until Sprint 6/)).toBeTruthy();
+    // A limitation that is stated is not a shortfall.
+    expect(screen.getByText(/counts are browser-wide/)).toBeTruthy();
+    expect(screen.getByText('enable per-tab counts')).toBeTruthy();
+  });
+
+  it('says per-tab attribution is on once the grant is held', async () => {
+    sendMessage.mockResolvedValue(status({ attributionGranted: true }, { paired: true }));
+    render(<Popup />);
+    await waitFor(() => expect(screen.getByText(/per-tab attribution is on/)).toBeTruthy());
+    expect(screen.queryByText('enable per-tab counts')).toBeNull();
+  });
+
+  it('requests the optional permission from the click itself', async () => {
+    // chrome.permissions.request needs a user gesture, so it cannot be routed
+    // through the service worker.
+    const request = vi.fn().mockResolvedValue(true);
+    const chromeStub = globalThis as unknown as { chrome: Record<string, unknown> };
+    chromeStub.chrome['permissions'] = { request };
+    sendMessage.mockResolvedValue(status({ attributionGranted: false }, { paired: true }));
+    render(<Popup />);
+    await waitFor(() => expect(screen.getByText('enable per-tab counts')).toBeTruthy());
+    await userEvent.click(screen.getByText('enable per-tab counts'));
+    expect(request).toHaveBeenCalledWith({ origins: ['<all_urls>'] });
   });
 
   it('offers to bypass the current host', async () => {

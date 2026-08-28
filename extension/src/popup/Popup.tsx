@@ -67,7 +67,15 @@ export function Popup() {
     );
   }
 
-  const { state, daemonReachable, proxyControllable, controlLevel, profiles, counters } = status;
+  const {
+    state,
+    daemonReachable,
+    proxyControllable,
+    controlLevel,
+    profiles,
+    counters,
+    attributionGranted,
+  } = status;
   const failSafeTripped = state.failSafeTrippedAt !== null;
   const devToggleActive = state.devToggles.anticache || state.devToggles.anticomp;
   const activeToggles = Object.entries(state.devToggles)
@@ -240,7 +248,27 @@ export function Popup() {
             </div>
           </div>
           <div className="row">
-            <span className="sub">counts are browser-wide until Sprint 6</span>
+            {attributionGranted ? (
+              <span className="sub">per-tab attribution is on</span>
+            ) : (
+              <>
+                <span className="sub">counts are browser-wide</span>
+                <span className="spacer" />
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    // Requires a user gesture, so it is requested from the click
+                    // itself rather than through the service worker.
+                    void chrome.permissions
+                      .request({ origins: ['<all_urls>'] })
+                      .then(() => refresh());
+                  }}
+                >
+                  enable per-tab counts
+                </button>
+              </>
+            )}
           </div>
         </>
       )}

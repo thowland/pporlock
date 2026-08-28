@@ -156,7 +156,15 @@ async def _run(config: Config, sink: Any) -> int:
             serialize_flow(record, "summary"),
         )
 
-    ring_sink = RingSink(ring, max_body_bytes=config.capture.max_body_bytes, on_flow=publish_flow)
+    ring_sink = RingSink(
+        ring,
+        max_body_bytes=config.capture.max_body_bytes,
+        on_flow=publish_flow,
+        # The attribution join. Both orderings occur: the extension usually
+        # observes before the flow completes (this hook), and when the flow wins
+        # the race the POST /attribution handler backfills instead.
+        resolve_tab=control.attribution.resolve,
+    )
     console = sink if isinstance(sink, ConsoleSink) else ConsoleSink(quiet=True)
     tee = TeeSink(ring_sink, console)
 

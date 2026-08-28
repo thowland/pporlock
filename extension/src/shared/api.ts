@@ -138,6 +138,18 @@ export class ControlApi {
     });
   }
 
+  /**
+   * Batched (request -> tab) associations.
+   *
+   * Best-effort: the daemon joins what it can within a bounded window and
+   * ignores the rest. Nothing here can delay a flow.
+   */
+  submitAttribution(
+    entries: unknown[],
+  ): Promise<{ accepted: number; rejected: number; backfilled: number }> {
+    return this.request('/attribution', { method: 'POST', body: { entries } });
+  }
+
   getExclusions(): Promise<{ entries: { pattern: string; comment: string }[] }> {
     return this.request('/exclusions');
   }

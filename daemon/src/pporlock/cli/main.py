@@ -123,6 +123,56 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pair(args: argparse.Namespace) -> int:
+    """Open a pairing window so the extension can obtain the token.
+
+    The CLI can read the token file; the extension deliberately cannot
+    (REQ API-012). This bridges the two with a short-lived, single-use code the
+    user types into the extension.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+    from pathlib import Path as _Path
+
+    config = _load_config(args)
+    token_path = _Path(config.state_dir).expanduser() / "token"
+    if not token_path.exists():
+        print(f"No token at {token_path}. Start the daemon once with `pporlock run`.")
+        return 1
+
+    url = f"http://{config.control.listen_host}:{config.control.listen_port}/pair/begin"
+    request = urllib.request.Request(
+        url,
+        method="POST",
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {token_path.read_text().strip()}",
+            "Content-Type": "application/json",
+            "X-Pporlock-Client": "cli",
+        },
+    )
+    try:
+        # nosec B310 — the scheme is the literal "http" in the f-string above,
+        # and the host is config.control.listen_host, which Config.validate()
+        # has already asserted is a loopback address (REQ API-010). There is no
+        # path here to file:// or a custom scheme.
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310  # nosec B310
+            payload = json.load(response)
+    except urllib.error.URLError as exc:
+        print(f"Could not reach the daemon at {url}: {exc}")
+        print("Is it running? `pporlock run`")
+        return 1
+
+    print("Pairing code:\n")
+    print(f"    {payload['code']}\n")
+    print(
+        f"Enter it in the pporlock extension popup within {payload['expires_in']:.0f} seconds.\n"
+        "It is single-use: a wrong entry closes the window and you run this again."
+    )
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run the proxy in the foreground (REQ PXY-005)."""
     from .runner import run_foreground
@@ -161,6 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--purge", action="store_true", help="also delete ~/.pporlock (modules, sessions)"
     )
     p_uninstall.set_defaults(func=cmd_uninstall)
+
+    p_pair = sub.add_parser("pair", help="open a pairing window for the extension")
+    p_pair.set_defaults(func=cmd_pair)
 
     p_version = sub.add_parser("version", help="show versions")
     p_version.set_defaults(func=cmd_version)

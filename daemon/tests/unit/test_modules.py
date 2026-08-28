@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from pporlock.engine.cost import Cost
+from pporlock.engine.evaluator import Evaluator
 from pporlock.engine.models import NormalizedRequest, NormalizedResponse
 from pporlock.engine.modules.context import (
     MODULE_API_VERSION,
@@ -883,3 +884,170 @@ class TestSyntheticResponses:
         response = context.stub_for("script", request())
         assert response.origin == "tidy"
         assert response.status == 200
+
+
+class TestWebSocketHookIsActuallyCalled:
+    """REQ MOD-021, PXY-051.
+
+    ``on_websocket_message`` was a declared hook name that nothing invoked. A
+    module defining it loaded cleanly, reported healthy, and did nothing — the
+    exact silent failure the provenance design exists to prevent. These assert
+    it runs, that a raise is contained, and that a return value is ignored.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path, python: str) -> Any:
+        from pporlock.engine.modules.registry import ModuleRegistry
+
+        directory = tmp_path / "wsmod"
+        directory.mkdir(parents=True)
+        (directory / "module.yaml").write_text("name: wsmod\npporlock_api: '1'\nenabled: true\n")
+        (directory / "module.py").write_text(python)
+        registry = ModuleRegistry(tmp_path, store_path=tmp_path / "store.db")
+        registry.reload()
+        return registry
+
+    @staticmethod
+    def _message() -> Any:
+        from pporlock.engine.models import WebSocketMessage
+
+        return WebSocketMessage(
+            flow_id="f1",
+            index=0,
+            timestamp="2026-08-28T00:00:00Z",
+            direction="outgoing",
+            opcode="text",
+            payload=b'{"type":"ping"}',
+        )
+
+    def test_the_hook_is_invoked(self, tmp_path: Path) -> None:
+        registry = self._registry(
+            tmp_path,
+            "SEEN = []\n"
+            "def on_websocket_message(msg, req, ctx):\n"
+            "    SEEN.append(msg.payload)\n"
+            "    ctx.log('info', 'saw a frame', size=msg.size)\n",
+        )
+        ev = Evaluator(registry=registry)
+        b = ProvenanceBuilder("default")
+        ev.observe_websocket_message(self._message(), request(), b)
+
+        module = registry.get("wsmod")
+        assert module is not None and module.python is not None
+        assert module.python.SEEN == [b'{"type":"ping"}']
+
+    def test_a_note_from_the_hook_reaches_provenance(self, tmp_path: Path) -> None:
+        registry = self._registry(
+            tmp_path,
+            "def on_websocket_message(msg, req, ctx):\n"
+            "    ctx.note('module_error', 'frame looked wrong', severity='warning')\n",
+        )
+        ev = Evaluator(registry=registry)
+        b = ProvenanceBuilder("default")
+        ev.observe_websocket_message(self._message(), request(), b)
+        prov = b.build()
+        assert prov.has_note(NoteCode.MODULE_ERROR)
+        assert any(n.module == "wsmod" for n in prov.notes)
+
+    def test_a_raising_hook_is_contained_and_attributed(self, tmp_path: Path) -> None:
+        """A module must not be able to break a socket that is working."""
+        registry = self._registry(
+            tmp_path,
+            "def on_websocket_message(msg, req, ctx):\n    raise RuntimeError('boom')\n",
+        )
+        ev = Evaluator(registry=registry)
+        b = ProvenanceBuilder("default")
+        ev.observe_websocket_message(self._message(), request(), b)  # does not raise
+        prov = b.build()
+        assert prov.has_note(NoteCode.MODULE_ERROR)
+        assert any("boom" in n.message for n in prov.notes)
+
+    def test_a_returned_mutation_is_ignored(self, tmp_path: Path) -> None:
+        """Frames are inspection-only in v1. A module that believes it rewrote
+        one should find that it did not, rather than find provenance claiming a
+        change the wire never saw."""
+        registry = self._registry(
+            tmp_path,
+            "from pporlock.engine.models import ResponseMutation\n"
+            "def on_websocket_message(msg, req, ctx):\n"
+            "    return ResponseMutation(body=b'rewritten')\n",
+        )
+        ev = Evaluator(registry=registry)
+        b = ProvenanceBuilder("default")
+        ev.observe_websocket_message(self._message(), request(), b)
+        prov = b.build()
+        assert not prov.has_note(NoteCode.MODULE_ERROR)
+        assert prov.entries == ()
+
+    def test_no_registry_is_not_an_error(self) -> None:
+        Evaluator().observe_websocket_message(
+            self._message(), request(), ProvenanceBuilder("default")
+        )
+
+
+class TestTheTwoTiersCompose:
+    """REQ MOD-023. A hook and a declarative rule on the same body must not
+    overwrite one another.
+
+    They did. Transforms ran, then hooks ran against the *original* response,
+    and then the transform result was written over ``decision.mutation.body`` —
+    so a hook that edited the body had its edit silently discarded whenever any
+    body rule also matched, while provenance recorded the hook as applied.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> Any:
+        from pporlock.engine.modules.registry import ModuleRegistry
+
+        directory = tmp_path / "both"
+        directory.mkdir(parents=True)
+        (directory / "module.yaml").write_text(
+            "name: both\n"
+            "pporlock_api: '1'\n"
+            "enabled: true\n"
+            "rules:\n"
+            "  - name: add-a-marker\n"
+            "    action: body\n"
+            "    match: {content_type: 'text/html'}\n"
+            "    transform: {kind: replace_literal, find: 'ORIGINAL', replace: 'BY-RULE'}\n"
+        )
+        (directory / "module.py").write_text(
+            "from pporlock.engine.models import ResponseMutation\n"
+            "def on_response(request, response, ctx):\n"
+            "    text = response.text\n"
+            "    if text is None:\n"
+            "        return None\n"
+            "    return ResponseMutation(body=(text + '<!--BY-HOOK-->').encode())\n"
+        )
+        registry = ModuleRegistry(tmp_path, store_path=tmp_path / "store.db")
+        registry.reload()
+        return registry
+
+    def _run(self, tmp_path: Path) -> bytes:
+        registry = self._registry(tmp_path)
+        ev = Evaluator(registry.build_ruleset(["both"]), registry=registry)
+        decision = ev.evaluate_response_body(
+            request(),
+            NormalizedResponse(
+                flow_id="f1",
+                timestamp="2026-08-28T00:00:00Z",
+                status=200,
+                headers=(("content-type", "text/html"),),
+                body=b"<html><body>ORIGINAL</body></html>",
+            ),
+            ProvenanceBuilder("default"),
+        )
+        assert decision.mutation.body is not None
+        return decision.mutation.body
+
+    def test_both_edits_survive(self, tmp_path: Path) -> None:
+        body = self._run(tmp_path)
+        assert b"BY-RULE" in body
+        assert b"BY-HOOK" in body
+        assert b"ORIGINAL" not in body
+
+    def test_the_hook_sees_what_the_rule_produced(self, tmp_path: Path) -> None:
+        """Not merely both-present: the hook must read the transformed body,
+        or the two tiers are composing by luck rather than by order."""
+        body = self._run(tmp_path)
+        assert body.index(b"BY-RULE") < body.index(b"BY-HOOK")

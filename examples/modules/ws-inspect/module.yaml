@@ -1,0 +1,15 @@
+name: ws-inspect
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Watches WebSocket frames and reports the ones that look interesting. Frames
+  are inspection-only in v1 — this cannot change them, and does not pretend to.
+author: pporlock examples
+enabled: false
+priority: 80
+
+config:
+  # Substrings that make a frame worth a note. Case-insensitive.
+  interesting: ["error", "unauthorized", "disconnect", "rate_limit"]
+  # Frames larger than this get a note of their own.
+  large_frame_bytes: 65536

@@ -138,18 +138,31 @@ Provenance only — no headers, no bodies. Enough to answer "what did pporlock d
 to this", which is the question.
 
 ```
-suggest_rule_from_flow(flow_id="...")
-create_module(name="local-bundle", files={"module.yaml": "...", ...})
+suggest_rule_from_flow(flow_id="...", intent="map_local")
+create_module(name="local-bundle", files={"module.yaml": "...", "module.py": "..."})
 ```
+
+`intent` is required, and is one of `block`, `map_local`, `redirect`,
+`headers` — the tool needs to know what kind of rule you are asking it to
+shape, because the same flow suggests four different rules depending on what
+you want done to it.
 
 `create_module` sends `{name, files}` and nothing else. There is no `enabled`
 parameter in its schema, and a test drives it with `enabled=True` to prove the
 wire body is unchanged. **The module is created disabled.**
 
 ```
-validate_module(name="local-bundle")
-dry_run(module="local-bundle", include_diffs=true)
+validate_module(files={"module.yaml": "...", "module.py": "..."})
+dry_run(session_id="live", module_name="local-bundle", include_diffs=true)
 ```
+
+Both signatures are worth reading carefully, because both are easy to guess
+wrong. `validate_module` validates *files*, not an installed name — it is meant
+to be called on a draft before anything is written, and `name` is optional
+(omit it and the manifest's own name is used, which is the only name that can
+be correct). `dry_run` requires a `session_id`; pass `"live"` to replay the ring
+buffer, or a recorded session's id. `module_name` names an installed module,
+while `files` supplies an uninstalled candidate.
 
 Dry run **executes Python hooks**, by design, so that its result matches live
 behaviour (REQ CAP-032). For an agent-authored module that means the agent's own

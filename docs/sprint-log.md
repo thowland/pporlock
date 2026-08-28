@@ -1371,3 +1371,84 @@ The commits are path-scoped and chronological, so the sprint boundaries are
 preserved as branch points cut from the linear history and merged `--no-ff` in
 order. Granular history is intact — no squashing anywhere — which was the point
 of the rule.
+
+---
+
+## Sprint 17 — Example module library and authoring guides
+
+**Requirements:** MOD-021, DOC-002 (extended), MCP-010–MCP-013 (documented)
+**1855 tests, engine 96%+**
+
+Not in the original plan. Added because a system whose primary extension
+mechanism has no worked examples has an extension mechanism nobody can use.
+
+### Delivered
+
+- **`examples/modules/`** — eight modules covering every action and both tiers:
+  `adblock`, `cookie-banners`, `local-bundle`, `header-lab`, `json-tamper`,
+  `css-tamper`, `fault-lab`, `ws-inspect`. All ship disabled, and a test asserts
+  it.
+- **`daemon/tests/unit/test_examples.py`** — loads every module through the
+  ordinary loader and exercises the behaviour worth pinning. The closest thing
+  the project has to a public API conformance suite.
+- **`docs/module-cookbook.md`** — matching, ten recipes, the Python tier,
+  ordering, performance, a debugging table, and anti-patterns.
+- **`docs/llm-with-mcp.md`** — a pasteable system prompt, three worked
+  scenarios, and a review checklist for agent-authored modules.
+- **`make examples`** — installs the library disabled, never overwriting an
+  edited module.
+
+### Four bugs, all found by writing and running the examples
+
+1. **SPEC-0 §8 described a module API that did not exist.** Six divergences,
+   two of them signatures that are not implementable as written. A module
+   written faithfully from the published stability contract would have raised
+   `TypeError` on its first flow, and the failure would have surfaced as a
+   `module_error` blaming the author. See **OI-16**.
+
+2. **`on_websocket_message` was never invoked by anything.** It was in
+   `HOOK_NAMES`, loadable, and dispatched from nowhere. A module defining it
+   loaded cleanly, reported healthy, and did nothing. Now dispatched, with a
+   returned value explicitly ignored — frames are inspection-only in v1, and a
+   hook whose return were quietly dropped while provenance claimed a change
+   would be worse than one that cannot change anything.
+
+3. **A Python hook's body edit was silently discarded whenever a declarative
+   rule also matched.** Transforms ran, then hooks ran against the *original*
+   response, and then the transform result was written over the hook's. The
+   hook was recorded as `applied`. This broke REQ MOD-023's ordering promise
+   while appearing to keep it. Found by `cookie-banners` on its first run.
+
+4. **`map_local` could never find a module's own asset.** It resolved `file:`
+   against one global asset root — the state directory — while SPEC-0 §5.4 and
+   the rule schema both say "relative to the module's `assets/`", which is the
+   only place a module author can put a file. It reported `map_local_missing`
+   and served the real response, which looks exactly like a rule that did not
+   match. The documented primary mechanism did not work from the only place
+   rules come from. Found by `css-tamper`.
+
+### Two authoring traps now documented rather than suffered
+
+- **`dest: document` is not reliable.** `Sec-Fetch-Dest` is sent only on secure
+  contexts; pporlock infers it from `Accept` otherwise, which works for a
+  browser navigation and not for `curl`. Three example rules required it and
+  therefore matched nothing in testing. They match on `content_type` now, with
+  the reasoning in the manifests.
+- **`</body>` is optional in HTML.** `cookie-banners` required it and did
+  nothing at all, silently, on a valid document that omits one — which the
+  fixture origin does.
+
+### Corrections to earlier work
+
+Three MCP call shapes in `docs/worked-example.md` were wrong, and SPEC-1 §11.2's
+tool table was stale in six places. Both were written from the specs rather than
+from `tools.py`, which is the same mistake in a different register: the code is
+authoritative, and a document that disagrees with it teaches people to write
+calls that fail.
+
+### The pattern, again
+
+Every one of these four bugs survived a green suite of ~1800 tests. Each was
+found by *using* the system as a module author would, rather than by testing it
+as its authors did. Examples are not documentation garnish here; they are the
+only thing that exercises the public API the way a stranger will.

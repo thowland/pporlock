@@ -1,0 +1,51 @@
+name: json-tamper
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Edits JSON API responses in place with RFC 6902 patches — turn a feature flag
+  on, empty a list, change an entitlement — without touching the server.
+author: pporlock examples
+enabled: false
+priority: 50
+
+rules:
+  - name: force-feature-flags
+    action: body
+    match:
+      host: "api.example.com"
+      path: "^/v1/flags$"
+      content_type: "application/json"
+      status: 200
+    transform:
+      kind: json_patch
+      ops:
+        # `add` on an existing key replaces it, so this works whether or not
+        # the server already sends the flag.
+        - { op: add, path: "/newCheckout", value: true }
+        - { op: add, path: "/betaBanner", value: false }
+
+  # A body rule matching nothing causes no buffering, so this costs nothing on
+  # sites it does not apply to. That is also why a rule that matches too widely
+  # is expensive: it makes the proxy hold bodies it has no use for.
+  - name: empty-the-ads-array
+    action: body
+    match:
+      content_type: "application/json"
+      path: "^/json$"
+    transform:
+      kind: json_patch
+      ops:
+        - { op: replace, path: "/ads", value: [] }
+
+  # `remove` on a path that is not there is not an error: a rule describes a
+  # shape the body may or may not have. A non-JSON body is left alone and
+  # reported as no_change with a note, rather than failing the flow.
+  - name: strip-nested-tracker
+    action: body
+    match:
+      content_type: "application/json"
+      path: "^/json$"
+    transform:
+      kind: json_patch
+      ops:
+        - { op: remove, path: "/nested/tracker" }

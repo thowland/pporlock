@@ -13,7 +13,7 @@ without one, which is why the builder is threaded through rather than returned
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from .models import (
     ResponseMutation,
     Scheme,
     SyntheticResponse,
+    WebSocketMessage,
 )
 from .modules.registry import ModuleRegistry
 from .provenance import Action, NoteCode, Outcome, Phase, Provenance, ProvenanceBuilder
@@ -256,6 +257,27 @@ class Evaluator:
             budget.consume((time.perf_counter() - started) * 1000)
         return decision
 
+    def _asset_root_for(self, rule: CompiledRule) -> Path | None:
+        """Where a rule's ``file:`` is resolved from.
+
+        A module's assets live in its own ``assets/`` directory — SPEC-0 §5.4
+        and the rule schema both say so, and it is the only place the module
+        author can put them.
+
+        This used to resolve every rule against one global asset root, which is
+        the state directory. A module's ``map_local`` could therefore never find
+        its own file: it reported ``map_local_missing`` and served the real
+        response instead, which looks exactly like a rule that did not match.
+        The documented primary mechanism did not work from the only place rules
+        come from.
+
+        Rules loaded from ``rules.yaml`` have no module and keep the old root,
+        which is the directory that file lives in.
+        """
+        if rule.module and self.registry is not None:
+            return Path(self.registry.root) / rule.module / "assets"
+        return self.asset_root
+
     def _apply_short_circuit(
         self,
         rule: CompiledRule,
@@ -339,7 +361,7 @@ class Evaluator:
         started: float,
     ) -> None:
         relative = str(rule.params.get("file", ""))
-        root = self.asset_root
+        root = self._asset_root_for(rule)
 
         def fail(message: str, code: NoteCode = NoteCode.MAP_LOCAL_MISSING) -> None:
             builder.record(
@@ -657,12 +679,26 @@ class Evaluator:
         # left in the context after it belongs to nobody in particular.
         self._drain_transform_notes(context, builder, module=None)
 
+        # Declarative transforms first, then hooks — and hooks see the body as
+        # the transforms have left it.
+        #
+        # Previously the hooks ran against the original response and the
+        # transform result was written over decision.mutation.body afterwards,
+        # so a hook that edited the body had its edit silently discarded
+        # whenever any declarative body rule also matched. Provenance recorded
+        # the hook as `applied`. That is the precise failure this system exists
+        # to make impossible, and it broke the ordering promise of REQ MOD-023
+        # while appearing to keep it.
+        #
+        # Handing hooks the transformed body means the two tiers compose rather
+        # than race: a hook reads what the rules produced and edits that.
+        if text != original:
+            decision.mutation.body = text.encode(_charset(response))
+            response = replace(response, body=decision.mutation.body)
+
         self._run_python_hooks(
             "on_response", builder, decision.mutation, request=request, response=response
         )
-
-        if text != original:
-            decision.mutation.body = text.encode(_charset(response))
 
         return decision
 
@@ -715,6 +751,64 @@ class Evaluator:
         # exists to cover.
         _merge_mutation(decision.mutation, body.mutation)
         return decision
+
+    def observe_websocket_message(
+        self,
+        message: WebSocketMessage,
+        request: NormalizedRequest,
+        builder: ProvenanceBuilder,
+    ) -> None:
+        """Offer a WebSocket frame to every active module, read-only.
+
+        Frames are inspection-only in v1 (REQ PXY-051), so a returned value is
+        deliberately ignored rather than merged: a module that believes it can
+        rewrite a frame should find that it did not, rather than find
+        provenance claiming a change the wire never saw.
+
+        This exists because ``on_websocket_message`` was a declared hook name
+        that nothing ever called. A module defining it loaded cleanly, reported
+        healthy, and did nothing — the exact silent failure the provenance
+        design is built to prevent.
+        """
+        if self.registry is None:
+            return
+
+        for module in self.registry.active(
+            None if not self.ruleset.modules else list(self.ruleset.modules)
+        ):
+            fn = module.hooks().get("on_websocket_message")
+            context = self.registry.context(module.name)
+            if fn is None or context is None:
+                continue
+
+            started = time.perf_counter()
+            try:
+                fn(message, request, context)
+                self.registry.record_success(module.name)
+            except Exception as exc:
+                builder.note(
+                    NoteCode.MODULE_ERROR,
+                    f"{module.name}.on_websocket_message raised: {exc}",
+                    module=module.name,
+                    hook="on_websocket_message",
+                )
+                self.registry.record_failure(module.name, builder)
+                builder.record(
+                    phase=Phase.WEBSOCKET,
+                    module=module.name,
+                    rule_id=f"{module.name}:python",
+                    rule_name="on_websocket_message",
+                    action=Action.BODY,
+                    outcome=Outcome.ERROR,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    error=str(exc),
+                )
+                context.drain()
+                continue
+
+            for code, severity, note_message, detail in context.notes:
+                builder.note(code, note_message, severity=severity, module=module.name, **detail)
+            context.drain()
 
     def _run_python_hooks(
         self,

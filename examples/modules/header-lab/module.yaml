@@ -1,0 +1,63 @@
+name: header-lab
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Header rewriting on both sides of a flow: identify as a different client,
+  relax CORS for a local front end, and stop a staging site being indexed.
+author: pporlock examples
+enabled: false
+priority: 40
+
+config:
+  origin: "http://localhost:5173"
+
+rules:
+  # A headers rule declaring only `request` runs before the response exists; one
+  # declaring `response` runs after. That is not cosmetic — it decides whether
+  # response-side match criteria (status, content_type) are legal on the rule,
+  # and a rule that mixes them is a load error rather than a silent surprise.
+  - name: pretend-to-be-mobile-safari
+    action: headers
+    match:
+      host: "staging.example.com"
+    request:
+      set:
+        user-agent: >-
+          Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)
+          AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1
+
+  # `set` replaces every existing occurrence; `add` appends another. For
+  # Access-Control-Allow-Origin, which must appear exactly once, `set` is the
+  # only correct choice — two of them and the browser rejects both.
+  - name: relax-cors-for-local-dev
+    action: headers
+    match:
+      host: "api.staging.example.com"
+    response:
+      set:
+        access-control-allow-origin: "http://localhost:5173"
+        access-control-allow-credentials: "true"
+      remove:
+        # A stale Vary can make the browser reuse a cached response that was
+        # generated for a different origin.
+        - vary
+
+  - name: keep-staging-out-of-search
+    action: headers
+    match:
+      host: "*.staging.example.com"
+    response:
+      set:
+        x-robots-tag: "noindex, nofollow"
+
+  # Removing a header you did not put there is a modification like any other,
+  # and this one turns off a browser security control. It is here as an example
+  # and is disabled: enable it deliberately, per host, never globally.
+  - name: drop-hsts-for-local-testing
+    enabled: false
+    action: headers
+    match:
+      host: "staging.example.com"
+    response:
+      remove:
+        - strict-transport-security

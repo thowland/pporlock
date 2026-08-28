@@ -753,31 +753,48 @@ class ModuleContext:
     profile: str                        # active profile name
 
     # matching helpers
-    def matches(self, *, host: str | None = None, path: str | None = None,
+    #
+    # `request` is positional and required: the context is per-module and
+    # long-lived, not per-flow, so it does not know which request you mean.
+    def matches(self, request, *, host: str | None = None, path: str | None = None,
                 method: str | None = None, dest: str | None = None,
-                content_type: str | None = None) -> bool: ...
+                content_type: str | None = None,
+                response=None) -> bool: ...
 
     # logging — module-scoped, structured, surfaces in the UI
     def log(self, level: str, message: str, **fields) -> None: ...
-    def note(self, code: str, severity: str, message: str, **detail) -> None: ...
+
+    # provenance note. `severity` defaults to "warning" and so follows the
+    # message; a code outside the taxonomy becomes MODULE_ERROR carrying the
+    # code you asked for, rather than raising.
+    def note(self, code: str, message: str, severity: str = "warning", **detail) -> None: ...
 
     # module-scoped persistent key/value storage (REQ MOD-022)
     def store_get(self, key: str, default=None): ...
     def store_set(self, key: str, value) -> None: ...
     def store_delete(self, key: str) -> None: ...
 
-    # asset resolution — paths under the module's assets/ directory
-    def asset_path(self, relative: str) -> str: ...
+    # asset resolution — confined to the module's assets/ directory, with
+    # containment checked after symlink resolution
+    def asset_path(self, relative: str) -> pathlib.Path: ...
     def asset_bytes(self, relative: str) -> bytes: ...
+    def asset_text(self, relative: str) -> str: ...
 
-    # registry extension
-    def register_transform(self, name: str, fn, schema: dict) -> None: ...
+    # registry extension. `cost` is what the scheduler needs in order to decide
+    # what may run inline on the event loop, and defaults to "expensive"
+    # because nothing is known about a module's transform.
+    def register_transform(self, name: str, fn, cost: str = "expensive") -> None: ...
 
     # response construction
     def synthesize(self, *, status: int = 200, content_type: str | None = None,
                    body: bytes | str = b"") -> SyntheticResponse: ...
-    def stub_for(self, dest: str | None) -> SyntheticResponse: ...
+
+    # the same Sec-Fetch-Dest derivation the `block` action uses; `request` is
+    # needed for the Accept-header fallback on insecure contexts
+    def stub_for(self, dest: str | None, request) -> SyntheticResponse: ...
 ```
+
+A module transform registered through `register_transform` has **no parameter schema**. Built-in transforms validate their parameters at rule-compile time; a module's does not, and is responsible for its own argument handling.
 
 ### 8.3 Hook signatures (v1)
 
@@ -793,6 +810,12 @@ def on_websocket_message(msg: WebSocketMessage, req: NormalizedRequest,
 ```
 
 Returning `None` means no mutation. Raising is caught, logged, attributed, and does not affect flow delivery (REQ MOD-024).
+
+`on_websocket_message` is **read-only**: any value it returns is ignored. Frames are inspection-only in v1 (REQ PXY-051), and a hook whose return value were quietly dropped while provenance reported a change would be worse than one that cannot change anything at all.
+
+Mutations are `pporlock.engine.models.RequestMutation` and `ResponseMutation`. Both carry `set_headers`, `add_headers`, `remove_headers` and `body`; `RequestMutation` also carries `redirect` and `short_circuit` (a `SyntheticResponse`, as returned by `ctx.synthesize` or `ctx.stub_for`), and `ResponseMutation` also carries `status`.
+
+A returned mutation is folded into the same mutation the declarative rules contribute to, rather than applied in a separate pass. That is what makes ordering between the two tiers meaningful (REQ MOD-023).
 
 ### 8.4 Trust
 

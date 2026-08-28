@@ -405,6 +405,24 @@ class Interceptor:
         self._ws_indexes[flow_id] = index + 1
         self.sink.record_websocket_message(message)
 
+        # Offer the frame to module hooks (REQ MOD-021). Read-only: the return
+        # value is ignored, and the frame reaching the sink above is the one
+        # that went over the wire either way.
+        #
+        # Errors are contained here rather than allowed out: a raising module
+        # must not be able to break a socket that is working. The builder is
+        # local because a frame is not a flow — it has no provenance record of
+        # its own to attach to — so what this preserves is the module's error
+        # isolation and quarantine, which is what MOD-024/025 are for.
+        if self.evaluator is not None:
+            try:
+                request = normalize.normalize_request(flow, flow_id=flow_id)
+                self.evaluator.observe_websocket_message(
+                    message, request, ProvenanceBuilder(self.profile)
+                )
+            except Exception:
+                self.counters.errors += 1
+
     def websocket_end(self, flow: Any) -> None:
         flow_id = _flow_id(flow)
         self._ws_indexes.pop(flow_id, None)

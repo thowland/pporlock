@@ -93,6 +93,24 @@ written against our own reader could pass merely because our reader redacts.
 
 ---
 
+## Modules you can start from
+
+```bash
+make examples        # installs eight example modules, all disabled
+```
+
+`adblock`, `cookie-banners`, `css-tamper`, `local-bundle`, `header-lab`,
+`json-tamper`, `fault-lab`, `ws-inspect` — covering every action and both
+authoring tiers, each commented with the reasoning for its choices. They are
+tested: `daemon/tests/unit/test_examples.py` loads every one and exercises the
+behaviour worth pinning, which is also the closest thing here to a public API
+conformance suite.
+
+Read them before enabling them. [The cookbook](docs/module-cookbook.md) is the
+reference they draw on.
+
+---
+
 ## Install
 
 Full instructions: **[docs/install.md](docs/install.md)**. The short version:
@@ -126,6 +144,9 @@ pporlock doctor       # ten checks, all should pass
 |---|---|
 | [Install](docs/install.md) | Setup, verification, and complete uninstall |
 | [Module authoring](docs/module-authoring.md) | Both tiers, the transform registry, the `ctx` API, the trust model |
+| [Module cookbook](docs/module-cookbook.md) | The deep reference — matching, recipes, ordering, performance, debugging |
+| [Example modules](examples/README.md) | Eight working modules: adblock, cookie banners, CSS tampering, local builds, fault injection |
+| [Driving it with an LLM](docs/llm-with-mcp.md) | A pasteable system prompt, worked scenarios, and how to review what an agent wrote |
 | [Troubleshooting](docs/troubleshooting.md) | "The page is subtly wrong", from provenance to cause |
 | [Worked example](docs/worked-example.md) | One problem end to end, via the UI and via MCP |
 | [Open issues](docs/open-issues.md) | Known gaps, each with why it is still open |

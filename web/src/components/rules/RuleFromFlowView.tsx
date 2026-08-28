@@ -52,7 +52,7 @@ export function RuleFromFlowView({ api, rule, onCreated, onCancel }: Props) {
 
   useEffect(() => {
     api.listModules().then(
-      (page) => setModules(page.modules),
+      (list) => setModules(list),
       () => setModules([]),
     );
   }, [api]);

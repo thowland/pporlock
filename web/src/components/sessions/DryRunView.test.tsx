@@ -62,7 +62,7 @@ const WITH_RESULTS: DryRunResult = makeDryRun({
 function api(result: DryRunResult = WITH_RESULTS): ApiClient {
   const client = new ApiClient('http://127.0.0.1:8081');
   vi.spyOn(client, 'getSession').mockResolvedValue(makeSession());
-  vi.spyOn(client, 'listModules').mockResolvedValue({ modules: [MODULE] });
+  vi.spyOn(client, 'listModules').mockResolvedValue([MODULE]);
   vi.spyOn(client, 'dryRun').mockResolvedValue(result);
   return client;
 }
@@ -158,7 +158,7 @@ describe('DryRunView  # REQ CAP-033', () => {
 
   it('refuses to run without a module chosen', async () => {
     const client = api();
-    vi.spyOn(client, 'listModules').mockResolvedValue({ modules: [] });
+    vi.spyOn(client, 'listModules').mockResolvedValue([]);
     render(view(client));
     await userEvent.click(await screen.findByRole('button', { name: /Run and execute/ }));
     expect(screen.getByRole('alert').textContent).toContain('Choose a module');

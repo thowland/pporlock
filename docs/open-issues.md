@@ -8,7 +8,12 @@ Each says who found it, why it was not fixed there, and what closing it needs.
 ## OI-3 — `POST /state` silently discards `proxy_running`
 
 **Found:** Sprint 14 (MCP), while coding `proxy_start` / `proxy_stop` against the
-contract.
+contract. **CLOSED** — implemented rather than refused. The listener really
+starts and stops, and the route polls until it observably has, raising 409 on
+timeout. Unknown `StatePatch` keys and unknown dev toggles are now 400 rather
+than discarded. Refusing with 400 alone would have been the cheaper close, but
+`proxy_start`/`proxy_stop` are in the MCP tool table and would have become dead
+tools.
 
 `contracts/openapi.yaml` `StatePatch` declares `proxy_running: boolean` and
 SPEC-0 §6.4 says the route starts and stops the proxy listener.
@@ -27,7 +32,14 @@ owned by the Sprint 13 agent when this was found.
 
 ## OI-4 — `clients.mcp_connected` is hard-coded to `0`
 
-**Found:** Sprint 14 (MCP).
+**Found:** Sprint 14 (MCP). **PARTLY CLOSED.** `mcp_connected` is now inferred
+from recent `X-Pporlock-Client: mcp` requests with a 60s TTL — no new endpoint,
+and "recently active" is the more useful signal anyway.
+
+`mcp_read_only` remains `false` and is documented as **unobservable**: nothing
+on the wire carries the MCP server's `--read-only` flag, and inferring it from
+an absence of mutating calls would present a guess as a fact. Closing that half
+needs a protocol field.
 
 `_state_payload` returns `{"clients": {"mcp_connected": 0, "mcp_read_only": false}}`
 unconditionally. REQ MCP-033 wants an MCP activity indicator in the web UI, and
@@ -80,7 +92,9 @@ see what it is recorded as having done is a gap worth an explicit decision.
 
 ## OI-7 — Duplicated not-found guard in `get_module`
 
-**Found:** Sprint 14 (MCP), reading the control app.
+**Found:** Sprint 14 (MCP), reading the control app. **CLOSED** — it was already
+gone from HEAD by the time anyone looked. A regression test now asserts its
+absence rather than pretending to have removed it.
 
 `control/app.py::get_module` has the same `if module is None: return
 self._not_found(...)` block twice. Harmless, and the second is unreachable.
@@ -129,9 +143,17 @@ The E2E test that found it was reading the developer's real modules while
 believing it had an isolated state directory. A test that silently uses
 production data is a test whose result means nothing.
 
-**To close:** derive the path-valued defaults from the effective `state_dir`
-while still honouring an explicitly-set `modules.root`. Assigned to the Sprint
-14 daemon work.
+**CLOSED.** `load_config` tracks which settings the caller actually stated at any
+precedence level and moves only the unstated ones, so an explicit `modules.root`
+still wins — including one that happens to equal the default.
+
+An adjacent bug fell out: `PPORLOCK_STATE_DIR` was parsed as section `state`,
+key `dir`, and rejected. The one setting the whole layout hangs off could not be
+set from the environment at all.
+
+**Still open:** assigning `cfg.state_dir` *after* construction does not cascade.
+Several tests do exactly that, and a property setter was more surgery than the
+sprint warranted.
 
 ---
 

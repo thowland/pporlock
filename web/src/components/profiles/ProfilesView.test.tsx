@@ -17,9 +17,9 @@ const PROFILES: ProfileSummary[] = [
   },
 ];
 
-function api(profiles = PROFILES, active = 'default'): ApiClient {
+function api(profiles = PROFILES): ApiClient {
   const client = new ApiClient('http://127.0.0.1:8081');
-  vi.spyOn(client, 'listProfiles').mockResolvedValue({ profiles, active });
+  vi.spyOn(client, 'listProfiles').mockResolvedValue(profiles);
   vi.spyOn(client, 'createProfile').mockResolvedValue({ name: 'new' });
   vi.spyOn(client, 'deleteProfile').mockResolvedValue(undefined);
   vi.spyOn(client, 'activateProfile').mockResolvedValue({ active: 'ad-blocking' });
@@ -108,7 +108,7 @@ describe('ProfilesView  # REQ WUI-009', () => {
   });
 
   it('seeds the active profile from daemon state before the list arrives', async () => {
-    const client = api(PROFILES, 'ad-blocking');
+    const client = api(PROFILES);
     render(<ProfilesView api={client} activeProfile="ad-blocking" />);
     const row = (await screen.findByText('ad-blocking')).closest('tr')!;
     expect(within(row).getByText('active')).toBeTruthy();

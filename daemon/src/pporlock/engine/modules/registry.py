@@ -39,11 +39,16 @@ class ReloadResult:
     loaded: int
     enabled: int
     errors: tuple[LoadedModule, ...]
+    #: Modules held out of evaluation after repeated hook failures (REQ
+    #: MOD-025). Reported because a reload that quietly dropped a quarantined
+    #: module would look like a module that had simply vanished.
+    quarantined: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "loaded": self.loaded,
             "enabled": self.enabled,
+            "quarantined": self.quarantined,
             "errors": [m.error.to_dict() | {"module": m.name} for m in self.errors if m.error],
         }
 
@@ -114,6 +119,7 @@ class ModuleRegistry:
             loaded=len(self._modules),
             enabled=sum(1 for m in self._modules.values() if m.enabled),
             errors=tuple(m for m in self._modules.values() if m.state == "load_error"),
+            quarantined=sum(1 for m in self._modules.values() if m.state == "quarantined"),
         )
 
     def _make_context(self, module: LoadedModule, registry: Any, profile: str) -> ModuleContext:

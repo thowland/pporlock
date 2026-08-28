@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,17 +26,22 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from ..capture.attribution import AttributionIndex, coverage_of, entry_from_dict
+from ..capture.dryrun import DryRunner, DryRunRequest
 from ..capture.export import EXPORT_FORMATS, export_session
 from ..capture.filters import FlowFilter
+from ..capture.records import FlowRecord
 from ..capture.redact import FieldPathError, Redactor, resolve_field
 from ..capture.session import SessionMeta, SessionStore
+from ..capture.suggest import suggest_rule
 from ..config import Config, save_config, update_config
+from ..engine.evaluator import Evaluator
 from ..engine.modules.loader import (
     ASSETS_DIR,
     MANIFEST_NAME,
     MODULE_NAME_PATTERN,
-    PYTHON_NAME,
+    WRITABLE_FILES,
 )
+from ..engine.modules.validate import validate_module_files
 from ..engine.profiles import DEFAULT_PROFILE, Profile
 from ..engine.rules_file import rules_to_dicts
 from ..engine.ruleset import RuleSet
@@ -43,6 +50,7 @@ from ..errors import (
     ConfigError,
     PairingError,
     PporlockError,
+    ProxyControlError,
     RuleValidationError,
     SessionError,
 )
@@ -66,7 +74,6 @@ from .serialize import (
 
 if TYPE_CHECKING:
     from ..addon.interceptor import Interceptor
-    from ..capture.records import FlowRecord
     from ..capture.ring import RingBuffer
     from ..engine.modules.registry import ModuleRegistry, ReloadResult
     from ..engine.profiles import ProfileManager
@@ -81,6 +88,7 @@ INLINE_ROUTES: frozenset[str] = frozenset(
         "/state",
         "/flows",
         "/flows/{flow_id}",
+        "/flows/{flow_id}/suggest-rule",
         "/exclusions",
         "/audit",
         "/metrics",
@@ -118,17 +126,81 @@ OFFLOAD_ROUTES: frozenset[str] = frozenset(
         "/sessions/{session_id}/stop",
         "/sessions/{session_id}/flows",
         "/sessions/{session_id}/export",
+        "/sessions/{session_id}/dryrun",
+        "/validate",
     }
 )
 
-#: Files a module write may contain. Anything else is refused rather than
-#: written: a file the loader never reads is a file whose author believes it
-#: does something it does not.
-WRITABLE_MODULE_FILES: frozenset[str] = frozenset({MANIFEST_NAME, PYTHON_NAME})
+#: Files a module write may contain. Defined by the loader, because "what a
+#: module is made of" is the loader's fact and a second copy of it here would
+#: drift.
+WRITABLE_MODULE_FILES: frozenset[str] = WRITABLE_FILES
+
+#: The keys ``POST /state`` accepts (SPEC-0 §6.4, ``StatePatch`` in the
+#: OpenAPI). Anything else is a 400 rather than a silent discard: the contract
+#: and the code have to agree, and the failure mode of disagreeing is a caller
+#: told its request worked (OI-3).
+STATE_PATCH_KEYS: frozenset[str] = frozenset({"dev_toggles", "proxy_running"})
+
+#: Session ids that mean "the live ring buffer" to the dry runner. Not a real
+#: session, so it never reaches the session store.
+LIVE_SESSION_IDS: frozenset[str] = frozenset({"live", "ring"})
+
+#: How long after a request from a client we still call it active (REQ MCP-033).
+CLIENT_ACTIVE_TTL_S = 60.0
 
 #: Path prefixes served without a token. The web UI's own assets: the page has
 #: to load before it can present a token, and the assets are ours, not data.
 PUBLIC_PREFIXES: tuple[str, ...] = ("/assets/", "/favicon", "/vite.svg")
+
+
+class ClientActivity:
+    """Which client kinds have been heard from lately (REQ MCP-033, OI-4).
+
+    ``clients.mcp_connected`` was hard-coded to zero, so the web UI's MCP
+    activity indicator had nothing to read. There is no registration endpoint
+    and no place in the protocol for one, but every MCP request already carries
+    ``X-Pporlock-Client: mcp`` — so "was the MCP server active in the last
+    minute" is answerable from what the daemon already sees, needs no new
+    surface, and is the more useful signal in any case: an idle stdio connection
+    the user has forgotten about is not what the indicator is for.
+
+    What this cannot observe is the MCP server's ``--read-only`` flag. Nothing
+    on the wire carries it, so ``mcp_read_only`` is reported false and the
+    indicator says "active", not "read/write". Inferring it from the absence of
+    mutating calls would be a guess that reads as a fact.
+    """
+
+    __slots__ = ("_seen", "ttl")
+
+    def __init__(self, ttl: float = CLIENT_ACTIVE_TTL_S) -> None:
+        self.ttl = ttl
+        self._seen: dict[str, float] = {}
+
+    def touch(self, client: str, *, now: float | None = None) -> None:
+        self._seen[client] = time.time() if now is None else now
+
+    def last_seen(self, client: str) -> float | None:
+        return self._seen.get(client)
+
+    def is_active(self, client: str, *, now: float | None = None) -> bool:
+        seen = self._seen.get(client)
+        if seen is None:
+            return False
+        current = time.time() if now is None else now
+        return (current - seen) <= self.ttl
+
+    def to_dict(self, *, now: float | None = None) -> dict[str, Any]:
+        seen = self._seen.get("mcp")
+        return {
+            "mcp_connected": 1 if self.is_active("mcp", now=now) else 0,
+            # Not observable from the control API; see the class docstring.
+            "mcp_read_only": False,
+            "mcp_last_seen": (
+                datetime.fromtimestamp(seen, tz=UTC).isoformat() if seen is not None else None
+            ),
+            "active_ttl_s": self.ttl,
+        }
 
 
 def error_response(exc: PporlockError, status: int) -> JSONResponse:
@@ -213,7 +285,18 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 client = require_client(request.headers.get(CLIENT_HEADER))
             except AuthError as exc:
                 return error_response(exc, 403)
+        elif not is_public:
+            # Non-mutating requests are not *required* to identify themselves,
+            # but they do, and it is what makes the activity indicator work on a
+            # client that has only ever read (REQ MCP-033).
+            declared = request.headers.get(CLIENT_HEADER)
+            if declared:
+                try:
+                    client = require_client(declared)
+                except AuthError:
+                    client = "cli"
         request.scope["pporlock_client"] = client
+        self.control.clients.touch(client)
 
         try:
             response = await call_next(request)
@@ -264,6 +347,9 @@ class ControlApp:
         self.policy = policy or OriginPolicy(config.control.listen_host, config.control.listen_port)
         self.pairing = pairing or PairingWindow()
         self.audit = audit or AuditLog()
+        # Who has been talking to us lately, for the MCP activity indicator
+        # (REQ MCP-033, OI-4).
+        self.clients = ClientActivity()
         self.events = events or EventHub()
         self.attribution = AttributionIndex()
         self.static_dir = static_dir
@@ -377,7 +463,7 @@ class ControlApp:
             "version": self.version,
             "mitmproxy_version": mitm_version.VERSION,
             "proxy": {
-                "running": self.interceptor is not None,
+                "running": self.interceptor is not None and self.interceptor.proxy_listening,
                 "listen": f"{self.config.proxy.listen_host}:{self.config.proxy.listen_port}",
                 "uptime_s": self.interceptor.uptime_s if self.interceptor is not None else 0.0,
             },
@@ -390,7 +476,7 @@ class ControlApp:
                 "recording_session": self.sessions.recording_session,
             },
             "counters": counters,
-            "clients": {"mcp_connected": 0, "mcp_read_only": False},
+            "clients": self.clients.to_dict(),
         }
 
     # -- routes ----------------------------------------------------------
@@ -402,9 +488,36 @@ class ControlApp:
         return JSONResponse(self._state_payload())
 
     async def post_state(self, request: Request) -> JSONResponse:
+        """Apply a StatePatch (SPEC-0 §6.4).
+
+        Every key the contract declares is implemented, and every key it does
+        not is refused. The route used to read ``dev_toggles`` and drop the
+        rest, answering 200 with a payload saying the proxy was still running —
+        so an agent calling ``proxy_stop`` was told it had worked (OI-3). A
+        route that reports success for an effect it did not have is worse than
+        one that refuses.
+        """
         body = await request.json()
+        if not isinstance(body, dict):
+            raise ConfigError("the state patch must be a mapping")
+        unknown = set(body) - STATE_PATCH_KEYS
+        if unknown:
+            raise ConfigError(
+                f"cannot set {', '.join(sorted(unknown))} on /state; "
+                f"the patchable keys are {', '.join(sorted(STATE_PATCH_KEYS))}",
+                setting=sorted(unknown)[0],
+            )
+
         client = request.scope.get("pporlock_client", "cli")
         toggles = body.get("dev_toggles") or {}
+        if not isinstance(toggles, dict):
+            raise ConfigError("dev_toggles must be a mapping", setting="dev_toggles")
+        unknown_toggles = set(toggles) - {"anticache", "anticomp"}
+        if unknown_toggles:
+            raise ConfigError(
+                f"unknown dev toggle: {', '.join(sorted(unknown_toggles))}",
+                setting="dev_toggles",
+            )
         for name in ("anticache", "anticomp"):
             if name in toggles:
                 self.dev_toggles[name] = bool(toggles[name])
@@ -412,6 +525,24 @@ class ControlApp:
                 if self.interceptor is not None:
                     self.interceptor.dev_toggles[name] = self.dev_toggles[name]
                 self.audit.record(client, "dev_toggle", toggle=name, value=self.dev_toggles[name])
+
+        if "proxy_running" in body:
+            wanted = bool(body["proxy_running"])
+            if self.interceptor is None:
+                return error_response(
+                    ProxyControlError(
+                        "no proxy is attached to this control server, so its "
+                        "listener cannot be started or stopped",
+                        requested=wanted,
+                    ),
+                    409,
+                )
+            try:
+                await self.interceptor.set_proxy_running(wanted)
+            except ProxyControlError as exc:
+                return error_response(exc, 409)
+            self.audit.record(client, "set_proxy_running", running=wanted)
+
         self.events.publish("state.changed", {"dev_toggles": dict(self.dev_toggles)})
         return JSONResponse(self._state_payload())
 
@@ -918,6 +1049,113 @@ class ControlApp:
         self.events.publish("state.changed", {"modules": self._module_summary()})
         return JSONResponse(result.to_dict())
 
+    # -- validation, suggestion, dry run (REQ API-027, CAP-030-033) ------
+
+    async def post_validate(self, request: Request) -> JSONResponse:
+        """Validate a candidate module without installing it (REQ API-027).
+
+        Writes nothing, installs nothing, and does not execute the candidate's
+        Python — it compiles it. See ``engine/modules/validate.py`` for why that
+        distinction is the point rather than a shortcut.
+        """
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ConfigError("the validation request body must be a mapping")
+        files = body.get("files")
+        if not isinstance(files, dict) or not files:
+            raise ConfigError("'files' must be a non-empty mapping of filename to contents")
+        # No name given — the web UI's editor validates a file before it has
+        # named it — means "use the manifest's own", not "call it candidate and
+        # then report a name mismatch against a name the caller never chose".
+        raw_name = body.get("name")
+        name = str(raw_name) if raw_name else None
+        report = await self.offload(
+            validate_module_files, name, {k: str(v) for k, v in files.items()}
+        )
+        return JSONResponse(report.to_dict())
+
+    async def post_suggest_rule(self, request: Request) -> JSONResponse:
+        """A candidate rule matching one flow (REQ WUI-008, MCP-014)."""
+        flow_id = request.path_params["flow_id"]
+        record = self.ring.get(flow_id)
+        if record is None:
+            return self._not_found(f"no flow {flow_id}")
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ConfigError("the suggestion request body must be a mapping")
+        payload = suggest_rule(record, str(body.get("intent") or ""))
+        self.audit.record(
+            self._client(request), "suggest_rule", flow_id=flow_id, intent=payload["intent"]
+        )
+        return JSONResponse(payload)
+
+    def dry_runner(self) -> DryRunner:
+        """The dry runner, built from live daemon state.
+
+        The evaluator handed over is the one the proxy is using, so the clone it
+        makes inherits every setting live traffic is evaluated under
+        (REQ CAP-031). With no proxy attached — a control server started without
+        one — a default evaluator still gives the module system somewhere to
+        run, which is what makes the route usable from tests and from the CLI.
+        """
+        evaluator = self.interceptor.evaluator if self.interceptor is not None else Evaluator()
+        return DryRunner(
+            evaluator,
+            installed_root=Path(self.config.modules.root).expanduser(),
+            redactor=self.redactor,
+            budget_ms=self.config.budget.per_flow_ms,
+        )
+
+    async def post_session_dryrun(self, request: Request) -> JSONResponse:
+        """Replay a session — or the live ring — through candidate modules.
+
+        ``session_id`` may be ``live``, which replays the ring buffer. The two
+        sources are the same ``FlowRecord`` shape, so this is a different
+        iterable and nothing else; a separate route for it would have been a
+        second code path to keep honest for no gain.
+
+        **This executes the candidate module's Python hooks** (REQ CAP-032). It
+        is stated in the tool descriptions, in the module authoring guide, and
+        in the web UI's dry-run panel, because dry-running an agent-authored
+        module runs that agent's code on this machine.
+        """
+        session_id = request.path_params["session_id"]
+        body = await request.json()
+        dry_request = DryRunRequest.from_dict(body)
+
+        if session_id in LIVE_SESSION_IDS:
+            flows: list[FlowRecord] = self.ring.query(limit=dry_request.limit).flows
+        else:
+            try:
+                flows = await self.offload(self._session_flows_for_dryrun, session_id, dry_request)
+            except SessionError as exc:
+                return error_response(exc, 404)
+
+        result = await self.offload(self._run_dry_run, flows, dry_request)
+        self.audit.record(
+            self._client(request),
+            "dry_run",
+            session_id=session_id,
+            modules=[m.name for m in dry_request.candidate_modules]
+            + list(dry_request.use_installed),
+            flows=result["summary"]["flows_evaluated"],
+        )
+        return JSONResponse(result)
+
+    def _session_flows_for_dryrun(
+        self, session_id: str, dry_request: DryRunRequest
+    ) -> list[FlowRecord]:
+        reader = self.sessions.reader(session_id)
+        flows: list[FlowRecord] = []
+        for record in reader.iter_all():
+            if len(flows) >= dry_request.limit:
+                break
+            flows.append(record)
+        return flows
+
+    def _run_dry_run(self, flows: list[FlowRecord], dry_request: DryRunRequest) -> dict[str, Any]:
+        return self.dry_runner().run(flows, dry_request)
+
     # -- profiles (REQ API-024) ------------------------------------------
 
     async def get_profiles(self, _: Request) -> JSONResponse:
@@ -1148,6 +1386,7 @@ class ControlApp:
             Route("/flows", self.get_flows, methods=["GET"]),
             Route("/flows", self.delete_flows, methods=["DELETE"]),
             Route("/flows/{flow_id}", self.get_flow, methods=["GET"]),
+            Route("/flows/{flow_id}/suggest-rule", self.post_suggest_rule, methods=["POST"]),
             Route("/exclusions", self.get_exclusions, methods=["GET"]),
             Route("/exclusions", self.put_exclusions, methods=["PUT"]),
             Route("/config", self.get_config, methods=["GET"]),
@@ -1157,6 +1396,7 @@ class ControlApp:
             Route("/sessions/{session_id}/stop", self.post_session_stop, methods=["POST"]),
             Route("/sessions/{session_id}/flows", self.get_session_flows, methods=["GET"]),
             Route("/sessions/{session_id}/export", self.get_session_export, methods=["GET"]),
+            Route("/sessions/{session_id}/dryrun", self.post_session_dryrun, methods=["POST"]),
             Route("/sessions", self.get_sessions, methods=["GET"]),
             Route("/sessions", self.post_sessions, methods=["POST"]),
             Route("/sessions/{session_id}", self.get_session, methods=["GET"]),
@@ -1167,6 +1407,7 @@ class ControlApp:
             Route("/events", self.get_events, methods=["GET"]),
             Route("/rules", self.get_rules, methods=["GET"]),
             Route("/rules", self.put_rules, methods=["PUT"]),
+            Route("/validate", self.post_validate, methods=["POST"]),
             # Registered before /modules/{name}, or a reload would be read as a
             # module called "reload".
             Route("/modules/reload", self.post_modules_reload, methods=["POST"]),

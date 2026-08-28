@@ -37,9 +37,9 @@ export function ProfilesView({ api, activeProfile, onActivated }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      const list = await api.listProfiles();
-      setProfiles(list.profiles);
-      setActive(list.active);
+      // GET /profiles is a bare array — which profile is active is daemon
+      // state, and the shell already has it from GET /state and passes it in.
+      setProfiles(await api.listProfiles());
       setError(null);
     } catch (cause) {
       setProfiles([]);

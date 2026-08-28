@@ -45,11 +45,8 @@ function api(): ApiClient {
     next_cursor: null,
     total_estimate: 1,
   });
-  vi.spyOn(client, 'listModules').mockResolvedValue({ modules: [] });
-  vi.spyOn(client, 'listProfiles').mockResolvedValue({
-    profiles: [{ name: 'default', modules: [] }],
-    active: 'default',
-  });
+  vi.spyOn(client, 'listModules').mockResolvedValue([]);
+  vi.spyOn(client, 'listProfiles').mockResolvedValue([{ name: 'default', modules: [] }]);
   vi.spyOn(client, 'suggestRule').mockResolvedValue({
     rule: { name: 'block-cdn-example-com', action: 'block', match: { host: 'cdn.example.com' } },
   });

@@ -105,3 +105,14 @@ class AuthError(PporlockError):
 
 class PairingError(PporlockError):
     code = "pairing_failed"
+
+
+class ProxyControlError(PporlockError):
+    """The proxy listener could not be started or stopped as asked.
+
+    Its own code, rather than a generic failure, because the caller's next move
+    differs: a control API reachable while the listener is not is a legitimate
+    state to be in and to report, not a malformed request to retry.
+    """
+
+    code = "proxy_control_failed"

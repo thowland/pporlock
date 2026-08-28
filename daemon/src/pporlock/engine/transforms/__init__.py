@@ -103,6 +103,19 @@ class TransformRegistry:
     def register(self, spec: TransformSpec) -> None:
         self._specs[spec.name] = spec
 
+    def copy(self) -> TransformRegistry:
+        """An independent registry holding the same transforms.
+
+        The dry runner loads candidate modules for real, and ``on_load`` may
+        register a transform. Handing it the live registry would let a module
+        that is only being *considered* extend the set the running proxy
+        evaluates against (REQ CAP-031 asks for the same code path, not the same
+        mutable state).
+        """
+        clone = TransformRegistry()
+        clone._specs = dict(self._specs)
+        return clone
+
     def get(self, name: str) -> TransformSpec:
         spec = self._specs.get(name)
         if spec is None:

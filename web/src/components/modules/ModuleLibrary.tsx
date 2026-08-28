@@ -34,8 +34,8 @@ export function ModuleLibrary({ api, onOpen }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      const page = await api.listModules();
-      setModules([...page.modules].sort(byPriority));
+      const list = await api.listModules();
+      setModules([...list].sort(byPriority));
       setError(null);
     } catch (cause) {
       setModules([]);
@@ -202,10 +202,14 @@ function ModuleRow({
         </td>
         <td className="num">{module.rule_count}</td>
         <td className="dim">{module.has_python ? 'yes' : '—'}</td>
-        <td className="num dim">{module.stats.flows_matched.toLocaleString()}</td>
-        <td className="num dim">{module.stats.flows_modified.toLocaleString()}</td>
-        <td className={`num ${module.stats.errors > 0 ? 'bad' : 'dim'}`}>{module.stats.errors}</td>
-        <td className="num dim">{module.stats.avg_ms.toFixed(2)}</td>
+        {/* An em dash rather than 0: "no statistics yet" and "matched nothing"
+            are different facts, and showing 0 for the first is a lie. */}
+        <td className="num dim">{module.stats?.flows_matched.toLocaleString() ?? '—'}</td>
+        <td className="num dim">{module.stats?.flows_modified.toLocaleString() ?? '—'}</td>
+        <td className={`num ${(module.stats?.errors ?? 0) > 0 ? 'bad' : 'dim'}`}>
+          {module.stats?.errors ?? '—'}
+        </td>
+        <td className="num dim">{module.stats?.avg_ms.toFixed(2) ?? '—'}</td>
         <td>
           <button
             type="button"

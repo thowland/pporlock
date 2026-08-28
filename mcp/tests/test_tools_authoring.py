@@ -158,12 +158,35 @@ async def test_validate_module_installs_nothing(client: ControlClient, daemon: F
     assert [r.path for r in daemon.requests] == ["/validate"]
 
 
-async def test_validate_module_defaults_the_candidate_name(
+async def test_validate_module_sends_no_name_when_the_caller_gave_none(
+    client: ControlClient, daemon: FakeDaemon
+) -> None:
+    """A validator must not report an error that is not in the thing validated.
+
+    This defaulted to "candidate", so validating any manifest with a different
+    name came back with module_name_mismatch — an error the tool had
+    manufactured itself. Omitted, the daemon uses the manifest's own name,
+    which is the only name that can be correct.
+    """
+    daemon.route("POST", "/validate", {"valid": True})
+    await call(client, "validate_module", files=FILES)
+    assert daemon.last.json_body == {"files": FILES}
+
+
+async def test_validate_module_still_sends_an_explicit_name(
     client: ControlClient, daemon: FakeDaemon
 ) -> None:
     daemon.route("POST", "/validate", {"valid": True})
-    await call(client, "validate_module", files=FILES)
-    assert daemon.last.json_body["name"] == "candidate"
+    await call(client, "validate_module", name="tidy", files=FILES)
+    assert daemon.last.json_body == {"name": "tidy", "files": FILES}
+
+
+async def test_dry_run_does_not_invent_a_module_name_either(
+    client: ControlClient, daemon: FakeDaemon
+) -> None:
+    daemon.route("POST", "/sessions/live/dryrun", {"summary": {}, "results": []})
+    await call(client, "dry_run", session_id="live", files=FILES)
+    assert daemon.last.json_body["modules"] == [{"files": FILES}]
 
 
 async def test_dry_run_sends_a_candidate_module(client: ControlClient, daemon: FakeDaemon) -> None:

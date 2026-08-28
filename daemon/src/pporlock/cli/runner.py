@@ -176,6 +176,34 @@ def build_evaluator(
     return evaluator, registry, profiles, ruleset, rules_path, error
 
 
+def build_control_app(
+    config: Config,
+    ring: RingBuffer,
+    events: EventHub,
+    registry: ModuleRegistry,
+    profiles: ProfileManager,
+    base_ruleset: RuleSet,
+) -> ControlApp:
+    """Assemble the control app the daemon actually serves.
+
+    Extracted from ``_run`` so a test can build the same object the daemon does
+    rather than one that merely resembles it. Two sprints closed with the module
+    system fully unit-tested and not wired in here (OI-11); a unit test that
+    constructs its own ControlApp cannot notice that, and this is the seam that
+    lets one notice.
+    """
+    return ControlApp(
+        config,
+        ring=ring,
+        interceptor=None,
+        events=events,
+        registry=registry,
+        profiles=profiles,
+        base_ruleset=base_ruleset,
+        static_dir=web_assets_dir(),
+    )
+
+
 async def _run(
     config: Config,
     sink: Any,
@@ -213,16 +241,7 @@ async def _run(
         max_body_bytes=config.capture.max_body_bytes,
     )
     events = EventHub()
-    control = ControlApp(
-        config,
-        ring=ring,
-        interceptor=None,
-        events=events,
-        registry=registry,
-        profiles=profiles,
-        base_ruleset=base_ruleset,
-        static_dir=web_assets_dir(),
-    )
+    control = build_control_app(config, ring, events, registry, profiles, base_ruleset)
 
     def publish_flow(record: Any) -> None:
         """Fan a completed flow out to SSE subscribers.

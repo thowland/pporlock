@@ -25,7 +25,7 @@ function makeModule(overrides: Partial<ModuleStatus> = {}): ModuleStatus {
 
 function api(modules: ModuleStatus[]): ApiClient {
   const client = new ApiClient('http://127.0.0.1:8081');
-  vi.spyOn(client, 'listModules').mockResolvedValue({ modules });
+  vi.spyOn(client, 'listModules').mockResolvedValue(modules);
   vi.spyOn(client, 'patchModule').mockImplementation((name) =>
     Promise.resolve(makeModule({ name })),
   );
@@ -192,5 +192,31 @@ describe('ModuleLibrary  # REQ WUI-005', () => {
     const row = (await screen.findByText('only')).closest('tr')!;
     expect(within(row).getByLabelText('Move only earlier')).toHaveProperty('disabled', true);
     expect(within(row).getByLabelText('Move only later')).toHaveProperty('disabled', true);
+  });
+});
+
+describe('a module the daemon reports without stats', () => {
+  it('renders rather than crashing  # contract: stats is optional', () => {
+    // The daemon does not send stats yet (REQ PRF-007) and the contract does
+    // not require them. Reading through them unconditionally crashed the whole
+    // view — "Cannot read properties of undefined (reading 'flows_matched')" —
+    // and every test passed, because every fixture supplied stats the real
+    // daemon never sends.
+    const client = new ApiClient('http://127.0.0.1:8081');
+    const bare = { ...makeModule({ name: 'no-stats' }) };
+    delete (bare as { stats?: unknown }).stats;
+    vi.spyOn(client, 'listModules').mockResolvedValue([bare]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+    return waitFor(() => expect(screen.getByText('no-stats')).toBeTruthy());
+  });
+
+  it('shows an em dash, not a zero  # "no data" is not "zero"', async () => {
+    const client = new ApiClient('http://127.0.0.1:8081');
+    const bare = { ...makeModule({ name: 'no-stats' }) };
+    delete (bare as { stats?: unknown }).stats;
+    vi.spyOn(client, 'listModules').mockResolvedValue([bare]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+    const row = (await screen.findByText('no-stats')).closest('tr')!;
+    expect(within(row).getAllByText('—').length).toBeGreaterThan(0);
   });
 });

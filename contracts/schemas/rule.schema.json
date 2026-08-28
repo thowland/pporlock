@@ -210,7 +210,8 @@
         "redirect",
         "headers",
         "body"
-      ]
+      ],
+      "description": "The action namespace beginning `ws_` is RESERVED for future WebSocket actions (REQ PXY-052) and no rule may use it. WebSocket frames are inspection-only in v1 (REQ PXY-051); holding the prefix now is what makes adding ws_send, ws_drop or ws_rewrite later an addition rather than a collision with a name a module had meanwhile invented for itself. The daemon rejects a `ws_`-prefixed action with an explicit \"reserved\" error rather than a generic \"unknown action\", so the reason is legible."
     },
     "asset_path": {
       "type": "string",

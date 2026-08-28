@@ -47,18 +47,20 @@ signal anyway.
 
 ## OI-5 — `GET /sessions/{id}/flows` filter vocabulary disagrees with the prose
 
-**Found:** Sprint 14 (MCP).
+**Found:** Sprint 14 (MCP). **CLOSED.**
 
-SPEC-0 §6.8 says the route takes "the same filter vocabulary as §6.5". The
-OpenAPI path declares only `host`, `limit`, `cursor`, `detail`.
+SPEC-0 §6.8 said "the same filter vocabulary as §6.5" and the OpenAPI declared
+four of the seventeen. The prose is normative under CLAUDE.md's precedence rule,
+so the OpenAPI was widened rather than the prose narrowed — a TST-005 contract
+test written against the narrow version would have passed while being wrong.
 
-TST-005 adds contract tests against the OpenAPI in Sprint 16. If the OpenAPI is
-authoritative there, and the prose is authoritative for implementers, the two
-will disagree and the test will be right for the wrong reason.
+`tab_id` is the deliberate exception. Attribution is a property of the live
+browser session, and a recorded session's tab ids refer to tabs that no longer
+exist.
 
-**To close:** decide which is normative (CLAUDE.md's precedence rule says SPEC-0
-outranks generated artefacts, so the OpenAPI should be widened) and make them
-match before TST-005 lands.
+Also added while there: `PATCH /sessions/{id}` (rename, REQ CAP-021) and
+`GET /sessions/{id}/export` (REQ CAP-024), both implemented and tested in
+Sprint 13 with no OpenAPI entry.
 
 ---
 
@@ -110,3 +112,48 @@ mid-sprint would be a design decision made by accident.
 
 **To close:** define what happens to a connection already tunnelled under the
 outgoing profile's exclusions, then implement.
+
+
+---
+
+## OI-10 — `state_dir` does not cascade to `modules.root`
+
+**Found:** Sprint 15, writing the banner E2E test.
+
+`ModulesConfig.root` defaults to `DEFAULT_STATE_DIR / "modules"` — a constant
+resolved at import, not derived from the configured `state_dir`. Setting
+`state_dir` in a config file therefore moves the token, the sessions and the
+rules file, and leaves modules loading from `~/.pporlock/modules`.
+
+The E2E test that found it was reading the developer's real modules while
+believing it had an isolated state directory. A test that silently uses
+production data is a test whose result means nothing.
+
+**To close:** derive the path-valued defaults from the effective `state_dir`
+while still honouring an explicitly-set `modules.root`. Assigned to the Sprint
+14 daemon work.
+
+---
+
+## OI-11 — the running daemon did not build what the sprints delivered
+
+**Found:** Sprint 15, writing the banner E2E test. **CLOSED** — recorded because
+the lesson outlives the fix.
+
+`cli/runner.py` built no `ModuleRegistry` and no `ProfileManager`. Sprint 11
+delivered the loader, the registry, contexts, quarantine, profiles, and 13
+control API routes, with 1248 tests passing. None of it was connected to the
+process `pporlock run` starts. `ControlApp` got `registry=None`, so every module
+route answered 404; the `Evaluator` got no registry, so no module rule and no
+Python hook ever touched live traffic. Sprint 13 closed on top of that state.
+
+**Unit tests cannot catch this class of bug**, because a unit test constructs
+the objects it exercises and so cannot notice that the daemon does not. Only
+running the real thing finds it.
+
+Two consequences, both now standing practice:
+
+- `tests/unit/test_runner.py::TestStartupWiring` asserts the wiring exists, and
+  anything new that must run in the daemon gets a case there.
+- A sprint's exit demo is not optional and is not a formality. Both the sprints
+  that shipped this passed every automated gate.

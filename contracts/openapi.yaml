@@ -393,11 +393,49 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SessionMeta' }
+    patch:
+      tags: [sessions]
+      summary: Rename a session (REQ CAP-021)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '200':
+          description: Updated session metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionMeta' }
     delete:
       tags: [sessions]
       summary: Delete a session and its database file
       responses:
         '204': { description: Deleted }
+
+  /sessions/{session_id}/export:
+    parameters:
+      - { $ref: '#/components/parameters/sessionId' }
+    get:
+      tags: [sessions]
+      summary: Export a session (REQ CAP-024)
+      description: |
+        Exports carry redacted values, never raw ones. A session never held the
+        real value: redaction is applied at write time (REQ CAP-045), so there
+        is nothing here for an export to leak.
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [har, pporlock], default: har }
+      responses:
+        '200':
+          description: The exported session
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
 
   /sessions/{session_id}/stop:
     parameters:
@@ -418,8 +456,30 @@ paths:
     get:
       tags: [sessions]
       summary: Session flows, same filter vocabulary as /flows
+      description: |
+        SPEC-0 §6.8 says "the same filter vocabulary as §6.5", and this listed
+        four of the seventeen. The prose is normative (CLAUDE.md's precedence
+        rule), so the document is widened to match rather than the other way
+        round — and a contract test written against the narrow version would
+        have been right for the wrong reason (docs/open-issues.md OI-5).
+
+        `tab_id` is the one exception: attribution is a property of the live
+        browser session, and a recorded session's tab ids refer to tabs that no
+        longer exist.
       parameters:
         - { $ref: '#/components/parameters/host' }
+        - { $ref: '#/components/parameters/path' }
+        - { $ref: '#/components/parameters/method' }
+        - { $ref: '#/components/parameters/status' }
+        - { $ref: '#/components/parameters/contentType' }
+        - { $ref: '#/components/parameters/dest' }
+        - { $ref: '#/components/parameters/modified' }
+        - { $ref: '#/components/parameters/blocked' }
+        - { $ref: '#/components/parameters/module' }
+        - { $ref: '#/components/parameters/noteCode' }
+        - { $ref: '#/components/parameters/since' }
+        - { $ref: '#/components/parameters/until' }
+        - { $ref: '#/components/parameters/q' }
         - { $ref: '#/components/parameters/limit' }
         - { $ref: '#/components/parameters/cursor' }
         - { $ref: '#/components/parameters/detail' }

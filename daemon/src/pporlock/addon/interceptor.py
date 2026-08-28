@@ -181,7 +181,8 @@ class Interceptor:
         builder = ProvenanceBuilder(self.profile)
 
         request = normalize.normalize_request(flow, flow_id=flow_id, body=flow.request.content)
-        decision = self.evaluator.evaluate_request(request, builder)
+        budget = TimeBudget(self.config.budget.per_flow_ms)
+        decision = self.evaluator.evaluate_request(request, builder, budget)
 
         if decision.kill:
             # Opt-in only: flow.kill() is the wrong default because a page's
@@ -194,11 +195,20 @@ class Interceptor:
             else:
                 self.counters.modified += 1
 
+        # Re-normalise after applying, so the captured request is the one that
+        # actually went out. Provenance explains what changed; the record should
+        # show the result, not the input — otherwise the panel displays a
+        # request that was never sent.
+        if not decision.kill and not decision.mutation.is_empty():
+            request = normalize.normalize_request(
+                flow, flow_id=flow_id, tab_id=request.tab_id, body=flow.request.content
+            )
+
         _stash(flow, "request", request)
         _stash(flow, "builder", builder)
         _stash(flow, "started", started)
         _stash(flow, "wants_body", decision.wants_body)
-        _stash(flow, "budget", TimeBudget(self.config.budget.per_flow_ms))
+        _stash(flow, "budget", budget)
 
         self.counters.flows_total += 1
 
@@ -222,6 +232,14 @@ class Interceptor:
             length = int(flow.response.headers.get("content-length", "") or 0) or None
         except (TypeError, ValueError):
             length = None
+
+        # Response headers are applied HERE, not in response(). Once a response
+        # streams, mitmproxy has already put its headers on the wire, so a
+        # mutation computed later is recorded as applied and changes nothing.
+        response = normalize.normalize_response(flow, flow_id=_flow_id(flow))
+        header_decision = self.evaluator.evaluate_response_headers(request, response, builder)
+        if apply_mod.apply_response_mutation(flow, header_decision.mutation):
+            self.counters.modified += 1
 
         decision = self.evaluator.decide_buffering(
             request,
@@ -248,7 +266,9 @@ class Interceptor:
         )
 
         if request is not None:
-            decision = self.evaluator.evaluate_response(
+            # Headers were already applied in responseheaders(); only body work
+            # remains here.
+            decision = self.evaluator.evaluate_response_body(
                 request, response, builder, _unstash(flow, "budget")
             )
             if apply_mod.apply_response_mutation(flow, decision.mutation):
@@ -294,6 +314,7 @@ class Interceptor:
             asset_root=self.evaluator.asset_root,
             buffer_types=self.evaluator.buffer_types,
             max_buffer_bytes=self.evaluator.max_buffer_bytes,
+            offload_threshold=self.evaluator.offload_threshold,
         )
 
     # -- state -----------------------------------------------------------

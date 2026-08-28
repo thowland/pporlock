@@ -578,3 +578,93 @@ class TestAlwaysProvenance:
         assert provenance.profile == "default"
         assert provenance.entries == ()
         assert provenance.short_circuited_by is None
+
+
+class TestBudgetIsActuallyCharged:
+    """A guard that cannot fire is not a guard.
+
+    The budget was created and checked from Sprint 7 but never consumed, so
+    skipped_budget could not occur in production. These assert it is charged.
+    """
+
+    def test_the_request_phase_charges_the_budget(self) -> None:
+        budget = TimeBudget(1000.0)
+        evaluator([BLOCK]).evaluate_request(req(), builder(), budget)
+        assert budget.spent > 0
+
+    def test_matching_a_large_rule_set_is_charged(self) -> None:
+        """A budget that only counted body transforms would let the request
+        phase overrun it unnoticed."""
+        rules = [{**BLOCK, "name": f"r{i}", "match": {"host": f"*.no{i}.test"}} for i in range(200)]
+        budget = TimeBudget(1000.0)
+        evaluator(rules).evaluate_request(req(), builder(), budget)
+        assert budget.spent > 0
+
+    def test_the_body_phase_charges_the_budget(self) -> None:
+        budget = TimeBudget(1000.0)
+        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "regex_sub"}}])
+        ev.evaluate_response_body(req(), resp(), builder(), budget)
+        assert budget.spent > 0
+
+    def test_an_exhausted_budget_skips_the_remaining_transforms(self) -> None:
+        budget = TimeBudget(0.0001)
+        budget.consume(10.0)
+        b = builder()
+        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "regex_sub"}}])
+        ev.evaluate_response_body(req(), resp(), b, budget)
+        assert b.build().entries[0].outcome is Outcome.SKIPPED_BUDGET
+
+    def test_evaluation_without_a_budget_still_works(self) -> None:
+        """The dry runner replays without one."""
+        assert evaluator([BLOCK]).evaluate_request(req(), builder()).blocked
+
+
+class TestOffloadIsRecorded:
+    def test_a_body_rule_records_its_offload_decision(self) -> None:
+        """REQ PXY-024 — the classification is visible in provenance rather than
+        implicit, so an operator can see why something was slow."""
+        b = builder()
+        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "inject_script"}}])
+        ev.evaluate_response_body(req(), resp(), b)
+        detail = b.build().entries[0].detail
+        assert detail["offload"] is True
+        assert detail["cost"] == "expensive"
+        assert "offload_reason" in detail
+
+    def test_a_cheap_transform_records_that_it_stayed_inline(self) -> None:
+        b = builder()
+        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev.evaluate_response_body(req(), resp(), b)
+        assert b.build().entries[0].detail["offload"] is False
+
+
+class TestResponsePhasesAreSeparate:
+    """Headers must be applied at responseheaders, before anything is on the
+    wire; body work happens later. Conflating them meant header mutations on a
+    streamed response were recorded as applied and changed nothing."""
+
+    def test_header_evaluation_does_not_touch_body_rules(self) -> None:
+        b = builder()
+        ev = evaluator([{"name": "t", "action": "body", "transform": {"kind": "strip_csp"}}])
+        ev.evaluate_response_headers(req(), resp(), b)
+        assert b.build().entries == ()
+
+    def test_body_evaluation_does_not_touch_header_rules(self) -> None:
+        b = builder()
+        ev = evaluator([{"name": "h", "action": "headers", "response": {"remove": ["x"]}}])
+        ev.evaluate_response_body(req(), resp(), b)
+        assert b.build().entries == ()
+
+    def test_the_combined_form_runs_both(self) -> None:
+        """Kept for callers holding a fully-buffered response — the dry runner
+        replaying complete recorded flows."""
+        b = builder()
+        ev = evaluator(
+            [
+                {"name": "h", "action": "headers", "response": {"remove": ["x"]}},
+                {"name": "t", "action": "body", "transform": {"kind": "strip_csp"}},
+            ]
+        )
+        ev.evaluate_response(req(), resp(), b)
+        actions = {str(e.action) for e in b.build().entries}
+        assert actions == {"headers", "body"}

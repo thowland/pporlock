@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import AssetPathError
+from .cost import DEFAULT_OFFLOAD_THRESHOLD_BYTES, decide_offload
 from .exclusions import ExclusionList
 from .models import (
     NormalizedRequest,
@@ -125,7 +126,15 @@ def _resolve_asset(base: Path, relative: str) -> Path:
 class Evaluator:
     """Evaluates a rule set against a flow."""
 
-    __slots__ = ("asset_root", "buffer_types", "exclusions", "max_buffer_bytes", "ruleset", "stubs")
+    __slots__ = (
+        "asset_root",
+        "buffer_types",
+        "exclusions",
+        "max_buffer_bytes",
+        "offload_threshold",
+        "ruleset",
+        "stubs",
+    )
 
     def __init__(
         self,
@@ -136,6 +145,7 @@ class Evaluator:
         asset_root: Path | None = None,
         buffer_types: tuple[str, ...] = DEFAULT_BUFFER_TYPES,
         max_buffer_bytes: int = 2 * 1024 * 1024,
+        offload_threshold: int = DEFAULT_OFFLOAD_THRESHOLD_BYTES,
     ) -> None:
         self.ruleset = ruleset if ruleset is not None else RuleSet()
         self.exclusions = exclusions if exclusions is not None else ExclusionList()
@@ -143,6 +153,7 @@ class Evaluator:
         self.asset_root = asset_root
         self.buffer_types = buffer_types
         self.max_buffer_bytes = max_buffer_bytes
+        self.offload_threshold = offload_threshold
 
     # -- phase 1: ClientHello -------------------------------------------
 
@@ -167,8 +178,12 @@ class Evaluator:
     # -- phase 2 and 3: request -----------------------------------------
 
     def evaluate_request(
-        self, request: NormalizedRequest, builder: ProvenanceBuilder
+        self,
+        request: NormalizedRequest,
+        builder: ProvenanceBuilder,
+        budget: TimeBudget | None = None,
     ) -> RequestDecision:
+        started = time.perf_counter()
         decision = RequestDecision()
         builder.set_modules(self.ruleset.modules)
 
@@ -186,6 +201,12 @@ class Evaluator:
             )
 
         decision.wants_body = self.ruleset.wants_body(request)
+
+        # Charge the budget for request-side work too. Matching a large rule set
+        # is not free, and a budget that only counted body transforms would let
+        # the request phase overrun it unnoticed.
+        if budget is not None:
+            budget.consume((time.perf_counter() - started) * 1000)
         return decision
 
     def _apply_short_circuit(
@@ -337,6 +358,20 @@ class Evaluator:
         builder: ProvenanceBuilder,
         started: float,
     ) -> None:
+        """Rewrite where a request goes (REQ PXY-035).
+
+        This action can retarget a request at any host, including one on the
+        local network — which is server-side request forgery by design, and is
+        the point: substituting a remote asset with a local one is a stated use
+        case of the whole system.
+
+        What makes it safe is where the target comes from. It is read only from
+        the rule, which is trusted operator input; nothing in a response body, a
+        request header, or a URL can influence it. A redirect target derived
+        from intercepted content would be a genuine SSRF vector, and the type of
+        `params` is what prevents that from being written by accident
+        (implementation-plan.md §2.5).
+        """
         target = dict(rule.params.get("to") or {})
         scheme_raw = target.get("scheme")
         scheme: Scheme | None = (
@@ -411,19 +446,35 @@ class Evaluator:
 
     # -- phase 5 and 6: response ----------------------------------------
 
-    def evaluate_response(
+    def evaluate_response_headers(
+        self,
+        request: NormalizedRequest,
+        response: NormalizedResponse,
+        builder: ProvenanceBuilder,
+    ) -> ResponseDecision:
+        """Response header rules (REQ PXY-020 phase 5).
+
+        Separate from body evaluation, and applied at ``responseheaders``,
+        because once a response streams its headers are already on the wire —
+        a header mutation computed later is recorded as applied and silently
+        changes nothing. Found end to end rather than by reading.
+        """
+        decision = ResponseDecision()
+        for rule in self.ruleset.matching_response_headers(request, response):
+            self._apply_header_rule(
+                rule, "response", decision.mutation, builder, Phase.RESPONSE_HEADERS
+            )
+        return decision
+
+    def evaluate_response_body(
         self,
         request: NormalizedRequest,
         response: NormalizedResponse,
         builder: ProvenanceBuilder,
         budget: TimeBudget | None = None,
     ) -> ResponseDecision:
+        """Response body rules (REQ PXY-020 phase 6)."""
         decision = ResponseDecision()
-
-        for rule in self.ruleset.matching_response_headers(request, response):
-            self._apply_header_rule(
-                rule, "response", decision.mutation, builder, Phase.RESPONSE_HEADERS
-            )
 
         for rule in self.ruleset.matching_response_body(request, response):
             if response.streamed:
@@ -452,8 +503,18 @@ class Evaluator:
                     module=rule.module,
                 )
                 continue
-            # Transforms themselves land in Sprint 10; the phase, ordering, and
-            # provenance are established here so nothing has to be retrofitted.
+
+            # Transforms themselves land in Sprint 10. The phase, ordering,
+            # offload classification, and provenance are established here so
+            # nothing has to be retrofitted around them.
+            started = time.perf_counter()
+            transform = rule.params.get("transform") or {}
+            kind = str(transform.get("kind", "")) if isinstance(transform, dict) else ""
+            offload = decide_offload(kind, response.body_size, self.offload_threshold)
+            elapsed = (time.perf_counter() - started) * 1000
+            if budget is not None:
+                budget.consume(elapsed)
+
             builder.record(
                 phase=Phase.RESPONSE_BODY,
                 module=rule.module,
@@ -461,9 +522,31 @@ class Evaluator:
                 rule_name=rule.name,
                 action=Action.BODY,
                 outcome=Outcome.NO_CHANGE,
+                duration_ms=elapsed,
                 reason="transform registry lands in Sprint 10",
+                **offload.to_dict(),
             )
 
+        return decision
+
+    def evaluate_response(
+        self,
+        request: NormalizedRequest,
+        response: NormalizedResponse,
+        builder: ProvenanceBuilder,
+        budget: TimeBudget | None = None,
+    ) -> ResponseDecision:
+        """Both response phases at once.
+
+        Kept for callers that hold a fully-buffered response and have no
+        streaming concern — the dry runner above all, which replays complete
+        recorded flows.
+        """
+        decision = self.evaluate_response_headers(request, response, builder)
+        body = self.evaluate_response_body(request, response, builder, budget)
+        decision.mutation.status = body.mutation.status
+        if body.mutation.body is not None:
+            decision.mutation.body = body.mutation.body
         return decision
 
     def _apply_header_rule(

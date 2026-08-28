@@ -504,3 +504,105 @@ what can be shown — revisit when a session browser can show 10,000 rows.
 - The flow table is windowed rather than virtualized. That is adequate while the
   ring buffer bounds what exists; the session browser in Sprint 13 will show
   more than that and should revisit it against PRF-004.
+
+---
+
+## Sprint 05 — Extension proxy control
+
+**Branch:** `sprint-05-extension-control`
+**Tag:** `sprint-05-complete`
+
+**Requirements delivered:** EXT-001 (minimal MV3 permissions), EXT-002
+(fixed-server proxy control), EXT-003 (PAC mode), **EXT-010 / PXY-008 (the
+fail-safe)**, EXT-011 (popup), EXT-022 (pairing), EXT-024 (loadable unpacked),
+and EXT-012 in part — see below.
+
+**Requirements deferred:** EXT-012 per-tab badge counts → Sprint 6, which is
+where attribution arrives. Counts are browser-wide until then and the popup says
+so. EXT-013 DevTools panel → Sprint 8. EXT-020/021 in-page banner → Sprint 15.
+
+**Gate results:**
+- **G1** — exit demo is the E2E suite itself: real unpacked extension in headed
+  Chromium, real daemon on an ephemeral port, real SIGKILL. Six Playwright tests
+  pass, including the four that matter: the proxy is applied, traffic routes
+  through it, the configuration is cleared when the daemon dies, and ordinary
+  browsing still works afterwards.
+- **G2** — extension 96.7% statements / 94.9% functions. Entry points
+  (`main.tsx`, `options.tsx`, `background/index.ts`, `manifest.config.ts`) are
+  excluded with the reason recorded in `vitest.config.ts`: they compose tested
+  units and cannot run outside an extension host, and the E2E suite covers the
+  wiring. The thin `chrome.*` adapters are *not* excluded — they are tested,
+  because they are the one place a typing cast would go unnoticed.
+- **G3** — 123 extension + 693 daemon + 125 web + 4 mcp, plus 6 E2E.
+- **G4** — no tests removed.
+- **G5** — clean. Four `security/detect-object-injection` suppressions, each
+  with the reason stated inline (module constants and numeric tab ids, no path
+  from user input to a property name), and one file-level suppression on the E2E
+  harness for `node:fs` calls on paths it created itself.
+- **G6** — scanners clean. §2.5 areas walked: **token handling** — the extension
+  never reads the filesystem and obtains its token by pairing; **fail-safe** —
+  the mandatory automated test exists and gates this merge; **origin/CSRF** —
+  every mutating call sends `X-Pporlock-Client: extension`, which is what makes
+  the audit log's origin field trustworthy.
+- **G7** — merged `--no-ff`.
+
+**Decisions:**
+
+1. **The fail-safe was built third, immediately after the toggle**, per the plan.
+   That ordering was right: everything from here on involves leaving the proxy
+   running for long stretches, and a crash without the fail-safe leaves the
+   browser unusable with no explanation.
+
+2. **Two consecutive failures, not one.** A single dropped request during a
+   daemon restart should not tear down a working setup. The health check also
+   carries an abort signal, because a daemon that accepts the connection and
+   never answers is exactly as broken as one that is gone — and would otherwise
+   hang the check rather than failing it.
+
+3. **No auto-re-enable.** SPEC-3 §4.4 rule 4, and it has a test. A daemon that
+   crashed once may crash again mid-page-load.
+
+4. **`host_permissions` widened from `:8081` to loopback on any port.** The
+   control port is configurable, so an extension pinned to the default is simply
+   broken for anyone who changes it. Found by an E2E test using an ephemeral
+   port; it would otherwise have arrived as a bug report. Still loopback only —
+   the extension cannot read any page.
+
+5. **The manifest is asserted on by test.** It is a security surface, not
+   configuration: exactly five permissions, no `webRequestBlocking`, no
+   `declarativeNetRequest`, no `<all_urls>`, no content scripts yet. This
+   required typing it with a local interface rather than CRXJS's
+   `ManifestV3Export`, which is a union including a Promise and hides the
+   object's fields from a test.
+
+6. **The E2E drives the service worker from an extension page, not from itself.**
+   `chrome.runtime.sendMessage` does not dispatch to the sender's own listener,
+   so a worker cannot message itself — and using a page exercises the same path
+   the popup does.
+
+7. **The routing test uses an external host deliberately.** The local fixture
+   origin cannot prove routing: it is on loopback, and the bypass list excludes
+   loopback on purpose so the extension's own API calls and the health check do
+   not route through the proxy. `ignoreHTTPSErrors` is set on the test context
+   because a fresh Chrome profile does not inherit the keychain trust that
+   `pporlock install` establishes — keeping CA trust and routing separate means
+   a cert problem cannot masquerade as a routing problem.
+
+8. **`make lint` covered `src` but not `e2e`.** The pre-commit hook caught it on
+   this sprint's commit. Both now cover both.
+
+**Notes for the next sprint:**
+
+- Sprint 6 is the decision gate. Attribution turns the popup's browser-wide
+  counters into per-tab ones and makes `EventFilter.tab_id` — which exists and
+  is tested but does nothing useful yet — meaningful.
+- `webRequest` is already in the manifest for exactly that purpose and is
+  currently unused. If the attribution spike fails and the fallback does not
+  need it, the permission should be removed rather than left held.
+- `chrome.notifications` is called optionally in the trip handler but is not in
+  the permissions list, so it silently no-ops. Either add the permission in
+  Sprint 15 with the rest of the notification surface, or drop the call.
+- The pairing flow is implemented and tested at the unit level; the E2E writes
+  the token directly into storage rather than redeeming a code, because opening
+  a pairing window needs a CLI invocation the harness does not yet make. Worth
+  closing in Sprint 15.

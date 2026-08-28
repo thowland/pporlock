@@ -83,6 +83,13 @@ const NOTE_LABEL: Record<string, string> = {
   module_deprecation: 'A module used something scheduled for removal',
 };
 
+/** A shape per severity, so meaning survives greyscale and colour blindness. */
+const SEVERITY_SYMBOL = new Map([
+  ['error', '✕'],
+  ['warning', '⚠'],
+  ['info', 'ℹ'],
+]);
+
 function Notes({ notes }: { notes: ProvenanceNote[] }) {
   if (notes.length === 0) return null;
   return (
@@ -90,6 +97,13 @@ function Notes({ notes }: { notes: ProvenanceNote[] }) {
       {notes.map((note, index) => (
         <div key={`${note.code}-${index}`} className={`prov-note sev-${note.severity}`}>
           <div className="prov-note-head">
+            {/* Severity as a word and a symbol, not only as a colour: the
+                red/amber/blue distinction is invisible to a large minority of
+                users and to every screen reader (REQ WUI-015). */}
+            <span className={`prov-note-sev sev-${note.severity}`}>
+              <span aria-hidden="true">{SEVERITY_SYMBOL.get(note.severity) ?? '•'}</span>{' '}
+              {note.severity}
+            </span>
             <span className="prov-note-code">{note.code}</span>
             {note.module && <span className="prov-note-module">{note.module}</span>}
           </div>
@@ -154,6 +168,9 @@ function Entry({
         <span className="spacer" />
         <span className="prov-action">{entry.action}</span>
         <span className={`prov-outcome sev-${negative ? 'warning' : 'ok'}`}>
+          {/* The outcome label is already words; the mark makes "this did not
+              happen" survive a greyscale screenshot too (REQ WUI-015). */}
+          <span aria-hidden="true">{negative ? '⚠ ' : '✓ '}</span>
           {OUTCOME_LABEL[entry.outcome] ?? entry.outcome}
         </span>
         <span className="prov-ms faint">{entry.duration_ms.toFixed(2)}ms</span>

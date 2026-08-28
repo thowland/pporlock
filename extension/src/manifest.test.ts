@@ -15,7 +15,7 @@ describe('manifest', () => {
 
   it('requests exactly the permissions it needs and no more', () => {
     expect(new Set(manifest.permissions)).toEqual(
-      new Set(['proxy', 'storage', 'tabs', 'alarms', 'webRequest']),
+      new Set(['proxy', 'storage', 'tabs', 'alarms', 'webRequest', 'notifications']),
     );
   });
 
@@ -58,10 +58,14 @@ describe('manifest', () => {
     expect(manifest.host_permissions).not.toContain('<all_urls>');
   });
 
-  it('declares no content scripts in this sprint', () => {
-    // The in-page warning banner (REQ EXT-020) lands in Sprint 15. Until then
-    // there is no reason to hold the permission that makes it possible.
-    expect(manifest.content_scripts).toBeUndefined();
+  it('declares the warning content script', () => {
+    // REQ EXT-020. It matches all URLs because a modification warning must be
+    // able to appear on any page, and it is inert without the optional host
+    // grant: it only ever renders what the service worker sends it.
+    const scripts = manifest.content_scripts ?? [];
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]?.js).toEqual(['src/content/banner.ts']);
+    expect(scripts[0]?.run_at).toBe('document_idle');
   });
 
   it('runs its background as a module service worker', () => {

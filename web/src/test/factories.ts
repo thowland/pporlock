@@ -1,5 +1,5 @@
 /** Test factories for wire shapes. Shared, not duplicated per test file. */
-import type { FlowRecord, Provenance } from '../api/types';
+import type { DryRunResult, FlowRecord, Provenance, SessionMeta } from '../api/types';
 
 export function makeProvenance(overrides: Partial<Provenance> = {}): Provenance {
   return {
@@ -66,4 +66,37 @@ export function makeFlow(
     provenance: makeProvenance(),
     ...overrides,
   } as FlowRecord;
+}
+
+/** A recorded session (SPEC-0 §6.8). */
+export function makeSession(overrides: Partial<SessionMeta> = {}): SessionMeta {
+  return {
+    session_id: 's1',
+    name: 'checkout-bug',
+    state: 'stopped',
+    started_at: '2026-08-27T14:00:00.000Z',
+    stopped_at: '2026-08-27T14:05:00.000Z',
+    flow_count: 42,
+    size_bytes: 204800,
+    profile: 'default',
+    dropped: 0,
+    ...overrides,
+  };
+}
+
+/** A dry-run response (SPEC-0 §6.8, REQ CAP-033). */
+export function makeDryRun(overrides: Partial<DryRunResult> = {}): DryRunResult {
+  return {
+    summary: {
+      flows_evaluated: 500,
+      matched: 63,
+      modified: 41,
+      blocked: 22,
+      errors: 0,
+      avg_ms: 0.9,
+      p95_ms: 3.1,
+    },
+    results: [],
+    ...overrides,
+  };
 }

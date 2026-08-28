@@ -11,13 +11,19 @@ import type { FlowFilter } from '../api/types';
 interface Props {
   filter: FlowFilter;
   onChange: (next: FlowFilter) => void;
-  paused: boolean;
-  heldCount: number;
-  onTogglePause: () => void;
-  onClear: () => void;
+  /**
+   * Live controls (SPEC-2 §5.3) belong to a stream. A recorded session is not
+   * one: pausing a file and clearing a file are both meaningless, so the
+   * session browser reuses the same filter vocabulary with them omitted.
+   */
+  paused?: boolean | undefined;
+  heldCount?: number | undefined;
+  onTogglePause?: (() => void) | undefined;
+  onClear?: (() => void) | undefined;
 }
 
 export function FilterBar({ filter, onChange, paused, heldCount, onTogglePause, onClear }: Props) {
+  const held = heldCount ?? 0;
   const set = <K extends keyof FlowFilter>(key: K, value: FlowFilter[K]) => {
     const next = { ...filter };
     // security/detect-object-injection flags dynamic keys, but K is constrained
@@ -76,12 +82,16 @@ export function FilterBar({ filter, onChange, paused, heldCount, onTogglePause, 
 
       <span className="spacer" style={{ flex: 1 }} />
 
-      <button type="button" className="action" onClick={onTogglePause}>
-        {paused ? `resume${heldCount > 0 ? ` (${heldCount} held)` : ''}` : 'pause'}
-      </button>
-      <button type="button" className="action" onClick={onClear}>
-        clear
-      </button>
+      {onTogglePause !== undefined && (
+        <button type="button" className="action" onClick={onTogglePause}>
+          {paused ? `resume${held > 0 ? ` (${held} held)` : ''}` : 'pause'}
+        </button>
+      )}
+      {onClear !== undefined && (
+        <button type="button" className="action" onClick={onClear}>
+          clear
+        </button>
+      )}
     </div>
   );
 }

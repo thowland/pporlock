@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { ApiClient } from './api/client';
-import { makeFlow } from './test/factories';
+import { makeFlow, makeSession } from './test/factories';
 
 vi.mock('./api/events', () => ({
   EventStream: class {
@@ -141,5 +141,88 @@ describe('App', () => {
     window.location.hash = '#/newrule';
     render(<App api={api()} />);
     await waitFor(() => expect(screen.getByText('cdn.example.com')).toBeTruthy());
+  });
+});
+
+describe('App — sessions, dry run and settings  # REQ WUI-010, WUI-011, CAP-043', () => {
+  function sessionApi(): ApiClient {
+    const client = api();
+    vi.spyOn(client, 'listSessions').mockResolvedValue([makeSession()]);
+    vi.spyOn(client, 'getSession').mockResolvedValue(makeSession());
+    vi.spyOn(client, 'listSessionFlows').mockResolvedValue({
+      flows: [makeFlow()],
+      next_cursor: null,
+      total_estimate: 1,
+    });
+    vi.spyOn(client, 'getConfig').mockResolvedValue({
+      redaction: { enabled: true, header_patterns: ['cookie'], json_key_patterns: ['token'] },
+    });
+    return client;
+  }
+
+  it('navigates to sessions, into one, and on to its dry run', async () => {
+    render(<App api={sessionApi()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Browse' }));
+    expect(window.location.hash).toBe('#/sessions/s1');
+    await screen.findByText('checkout-bug');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Dry run against this session' }));
+    expect(window.location.hash).toBe('#/sessions/s1/dryrun');
+    // The code-execution warning is present the moment the screen is
+    // (REQ CAP-032) — it is not revealed by pressing anything.
+    expect((await screen.findByRole('note')).textContent).toContain(
+      "executes the module's Python code",
+    );
+  });
+
+  it('keeps Sessions highlighted for the session and dry-run routes', async () => {
+    render(<App api={sessionApi()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Dry run' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Sessions' }).getAttribute('aria-current')).toBe(
+        'page',
+      ),
+    );
+  });
+
+  it('navigates to settings', async () => {
+    render(<App api={sessionApi()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByText('Redaction');
+    expect(window.location.hash).toBe('#/settings');
+  });
+
+  it('offers a reveal control on a live flow but not on a session flow', async () => {
+    // The same FlowDetail component, differing only in whether the shell hands
+    // it a live unmask callback (REQ CAP-043, CAP-045).
+    const client = sessionApi();
+    const masked = makeFlow();
+    masked.request!.headers = [['cookie', '«redacted:sha1=a3f2,len=142»']];
+    vi.spyOn(client, 'listFlows').mockResolvedValue({
+      flows: [masked],
+      next_cursor: null,
+      total_estimate: 1,
+    });
+    vi.spyOn(client, 'getFlow').mockResolvedValue(masked);
+    vi.spyOn(client, 'listSessionFlows').mockResolvedValue({
+      flows: [masked],
+      next_cursor: null,
+      total_estimate: 1,
+    });
+
+    render(<App api={client} />);
+    await userEvent.click(await screen.findByText('cdn.example.com'));
+    await userEvent.click(await screen.findByRole('tab', { name: 'request' }));
+    expect(screen.getByRole('button', { name: /^Reveal / })).toBeTruthy();
+
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Browse' }));
+    await userEvent.click(await screen.findByText('cdn.example.com'));
+    await userEvent.click(await screen.findByRole('tab', { name: 'request' }));
+    await waitFor(() => expect(screen.getByText(/142 bytes/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /^Reveal / })).toBeNull();
   });
 });

@@ -65,13 +65,19 @@ export function fixedServerConfig(
  * sites should be proxied at all.
  */
 export function pacScript(includeHosts: string[], target: ProxyTarget): string {
+  // Everything interpolated goes through JSON.stringify, including the proxy
+  // target. The host comes from the daemon's reported listen address, which is
+  // not attacker-controlled today — but a PAC script is executable source, and
+  // "the input happens to be safe right now" is not a property worth depending
+  // on when encoding it correctly costs nothing.
   const patterns = JSON.stringify(includeHosts);
+  const proxy = JSON.stringify(`PROXY ${target.host}:${target.port}`);
   return `function FindProxyForURL(url, host) {
   if (isPlainHostName(host) || host === "127.0.0.1" || host === "localhost") return "DIRECT";
   var include = ${patterns};
-  if (include.length === 0) return "PROXY ${target.host}:${target.port}";
+  if (include.length === 0) return ${proxy};
   for (var i = 0; i < include.length; i++) {
-    if (shExpMatch(host, include[i])) return "PROXY ${target.host}:${target.port}";
+    if (shExpMatch(host, include[i])) return ${proxy};
   }
   return "DIRECT";
 }`;

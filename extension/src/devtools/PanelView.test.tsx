@@ -297,3 +297,56 @@ describe('PanelView', () => {
     expect(screen.getByText('MOD')).toBeTruthy();
   });
 });
+
+describe('redaction rendering (REQ CAP-043)', () => {
+  const masked = '«redacted:sha1=a1b2,len=48»';
+
+  function withHeaders(): FlowRecord {
+    const base = flow({ flow_id: 'h1', redacted: true });
+    return {
+      ...base,
+      request: {
+        ...(base.request as object),
+        headers: [
+          ['accept', 'text/html'],
+          ['cookie', masked],
+        ],
+      },
+      response: {
+        ...(base.response as object),
+        headers: [['set-cookie', masked]],
+      },
+    } as unknown as FlowRecord;
+  }
+
+  it('shows a masked header as length and fingerprint, never as a value', async () => {
+    const api = apiWith([withHeaders()]);
+    render(<PanelView api={api} tabId={7} pollMs={0} />);
+    await userEvent.click(await screen.findByText('/a.js'));
+    // Both the request cookie and the response set-cookie.
+    expect(await screen.findAllByText(/48 bytes/)).toHaveLength(2);
+    expect(screen.getAllByText(/#a1b2/)).toHaveLength(2);
+    // The raw contract string is an implementation detail, not something to
+    // put in front of a human.
+    expect(screen.queryByText(masked)).toBeNull();
+  });
+
+  it('shows unmasked headers normally', async () => {
+    const api = apiWith([withHeaders()]);
+    render(<PanelView api={api} tabId={7} pollMs={0} />);
+    await userEvent.click(await screen.findByText('/a.js'));
+    expect(await screen.findByText('text/html')).toBeTruthy();
+  });
+
+  it('offers no way to reveal a masked value', async () => {
+    // Unmasking is live-ring-only and web-UI-only (SPEC-0 §9.3). If a reveal
+    // control ever appears in the panel, this fails — which is the point.
+    const api = apiWith([withHeaders()]);
+    render(<PanelView api={api} tabId={7} pollMs={0} />);
+    await userEvent.click(await screen.findByText('/a.js'));
+    await screen.findAllByText(/48 bytes/);
+    for (const button of screen.queryAllByRole('button')) {
+      expect(button.textContent ?? '').not.toMatch(/reveal|unmask|show value/i);
+    }
+  });
+});

@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { cpSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { freePorts } from './ports';
 
 /* eslint-disable security/detect-non-literal-fs-filename --
    Test harness: every path is built from a temp directory this file created, or
@@ -63,8 +64,6 @@ let fixturePort: number;
 let extensionId: string;
 let extPath: string;
 
-const port = (base: number) => base + Math.floor(Math.random() * 400);
-
 async function waitFor(url: string, tries = 120): Promise<void> {
   for (let i = 0; i < tries; i += 1) {
     try {
@@ -97,9 +96,7 @@ async function metrics(): Promise<{
 
 test.beforeAll(async () => {
   test.setTimeout(240_000);
-  proxyPort = port(17000);
-  controlPort = port(17500);
-  fixturePort = port(16000);
+  [proxyPort, controlPort, fixturePort] = (await freePorts(3)) as [number, number, number];
   stateDir = mkdtempSync(join(tmpdir(), 'pporlock-attr-state-'));
   userDataDir = mkdtempSync(join(tmpdir(), 'pporlock-attr-chrome-'));
 

@@ -8,7 +8,7 @@
  *  - The token is never placed in a URL, only in an Authorization header.
  */
 import { assertLoopbackOrigin } from './control-origin';
-import type { FlowPage, FlowQuery, FlowRecord } from './flows';
+import type { FlowPage, FlowQuery, FlowRecord, SessionMeta } from './flows';
 
 export class ApiError extends Error {
   constructor(
@@ -164,6 +164,23 @@ export class ControlApi {
 
   getFlow(flowId: string): Promise<FlowRecord> {
     return this.request<FlowRecord>(`/flows/${encodeURIComponent(flowId)}?detail=full`);
+  }
+
+  /**
+   * Start recording (REQ CAP-025, EXT-023).
+   *
+   * Recording is opt-in and off by default: a proxy that quietly writes every
+   * flow it sees to disk is a different, worse tool. Starting from the popup
+   * is a deliberate act with a visible indicator for as long as it lasts.
+   */
+  startSession(name: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>('/sessions', { method: 'POST', body: { name } });
+  }
+
+  stopSession(sessionId: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>(`/sessions/${encodeURIComponent(sessionId)}/stop`, {
+      method: 'POST',
+    });
   }
 
   getExclusions(): Promise<{ entries: { pattern: string; comment: string }[] }> {

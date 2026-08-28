@@ -5,48 +5,128 @@
  * retained — you are almost always comparing this flow against the ones around
  * it.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../api/client';
 import type { FlowRecord, HeaderPairs } from '../../api/types';
 import { formatBytes, formatMs, formatTime, statusClass } from '../../lib/format';
+import { headerFieldPath, parseMasked } from '../../lib/redaction';
 import { ProvenanceView } from './ProvenanceView';
 
 type Tab = 'overview' | 'request' | 'response' | 'provenance';
 
-const MASK_PATTERN = /^«redacted:sha1=([0-9a-f]{4}),len=(\d+)»$/;
+/**
+ * Reveals one masked value. `undefined` means "this flow cannot be unmasked" —
+ * which is the case for every session flow (SPEC-0 §9.3, REQ CAP-045).
+ */
+export type UnmaskFn = (fieldPath: string) => Promise<string>;
 
 /**
  * Masked values render distinctly and carry a stable hash prefix, so "is this
  * the same token" is answerable without unmasking (SPEC-0 §9.1).
+ *
+ * The reveal control exists **only** when `onUnmask` is supplied. That is the
+ * whole gate: a session browser passes nothing and therefore cannot render one,
+ * rather than rendering a disabled button that a future edit could re-enable.
  */
-function HeaderValue({ value }: { value: string }) {
-  const masked = MASK_PATTERN.exec(value);
-  if (!masked) return <span className="hv">{value}</span>;
-  return (
-    <span className="hv masked" title={`redacted — ${masked[2]} bytes, fingerprint ${masked[1]}`}>
-      redacted{' '}
-      <span className="faint">
-        ({masked[2]}b · {masked[1]})
+function HeaderValue({
+  value,
+  fieldPath,
+  onUnmask,
+}: {
+  value: string;
+  fieldPath: string;
+  onUnmask?: UnmaskFn | undefined;
+}) {
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const masked = parseMasked(value);
+
+  if (masked === null) return <span className="hv">{value}</span>;
+
+  if (revealed !== null) {
+    return (
+      <span className="hv revealed">
+        <span className="sr-only">revealed secret: </span>
+        {revealed}{' '}
+        <button type="button" className="linkish" onClick={() => setRevealed(null)}>
+          hide
+        </button>
       </span>
+    );
+  }
+
+  return (
+    <span className="hv masked">
+      {/* Length and fingerprint, exactly as the extension shows them, so the
+          two clients agree about what a masked value looks like. */}
+      <span aria-hidden="true">🔒</span> redacted{' '}
+      <span className="faint">
+        ({masked.len} bytes · #{masked.sha1})
+      </span>
+      {onUnmask !== undefined && (
+        <button
+          type="button"
+          className="linkish reveal"
+          // Explicit per-value action, named so a screen reader user knows
+          // which value is about to be revealed (REQ CAP-043, WUI-015).
+          aria-label={`Reveal ${fieldPath}`}
+          onClick={() => {
+            setFailed(null);
+            void onUnmask(fieldPath)
+              .then(setRevealed)
+              .catch((cause: unknown) =>
+                setFailed(cause instanceof Error ? cause.message : 'Could not reveal this value.'),
+              );
+          }}
+        >
+          reveal
+        </button>
+      )}
+      {failed !== null && (
+        <span className="reveal-error" role="alert">
+          {failed}
+        </span>
+      )}
     </span>
   );
 }
 
-function Headers({ headers }: { headers: HeaderPairs | undefined }) {
+function Headers({
+  headers,
+  side,
+  onUnmask,
+}: {
+  headers: HeaderPairs | undefined;
+  side: 'request' | 'response';
+  onUnmask?: UnmaskFn | undefined;
+}) {
   if (!headers || headers.length === 0) {
     return <div className="empty-small">No headers.</div>;
   }
+  // The daemon addresses a repeated header by its index *among headers of that
+  // name*, not by its row (redact.py:_from_headers). Counting here keeps the
+  // field path right for the second Set-Cookie.
+  const seen = new Map<string, number>();
   return (
     <table className="kv">
       <tbody>
-        {headers.map(([name, value], index) => (
-          <tr key={`${name}-${index}`}>
-            <td className="k">{name}</td>
-            <td className="v">
-              <HeaderValue value={value} />
-            </td>
-          </tr>
-        ))}
+        {headers.map(([name, value], index) => {
+          const key = name.toLowerCase();
+          const occurrence = seen.get(key) ?? 0;
+          seen.set(key, occurrence + 1);
+          return (
+            <tr key={`${name}-${index}`}>
+              <td className="k">{name}</td>
+              <td className="v">
+                <HeaderValue
+                  value={value}
+                  fieldPath={headerFieldPath(side, name, occurrence)}
+                  onUnmask={onUnmask}
+                />
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -99,15 +179,36 @@ export function FlowDetail({
   api,
   onClose,
   onOpenModule,
+  onUnmask,
+  loadDetail,
 }: {
   flow: FlowRecord;
   api: ApiClient;
   onClose: () => void;
   onOpenModule?: ((module: string) => void) | undefined;
+  /**
+   * Supplied only where unmasking is legitimate: the **live ring buffer**
+   * (REQ CAP-043). Omitted entirely by the session browser, because a session
+   * flow was redacted before it reached the file and there is nothing to
+   * reveal (REQ CAP-045). Absence removes the control, it does not disable it.
+   */
+  onUnmask?: UnmaskFn | undefined;
+  /**
+   * How to fetch the fuller representation of this flow. Defaults to
+   * `GET /flows/{id}`; the session browser overrides it, since a recorded flow
+   * is not in the live ring and that route would 404.
+   */
+  loadDetail?: ((flowId: string) => Promise<FlowRecord>) | undefined;
 }) {
   const [tab, setTab] = useState<Tab>('provenance');
   const [full, setFull] = useState<FlowRecord>(flow);
   const [loading, setLoading] = useState(false);
+  const panel = useRef<HTMLElement | null>(null);
+
+  const fetchDetail = useCallback(
+    (flowId: string) => (loadDetail ? loadDetail(flowId) : api.getFlow(flowId, 'bodies')),
+    [api, loadDetail],
+  );
 
   useEffect(() => {
     setFull(flow);
@@ -115,8 +216,7 @@ export function FlowDetail({
     // fetched only when a flow is actually opened (SPEC-0 §6.3).
     setLoading(true);
     let cancelled = false;
-    void api
-      .getFlow(flow.flow_id, 'bodies')
+    void fetchDetail(flow.flow_id)
       .then((detailed) => {
         if (!cancelled) setFull(detailed);
       })
@@ -129,14 +229,21 @@ export function FlowDetail({
     return () => {
       cancelled = true;
     };
-  }, [api, flow]);
+  }, [fetchDetail, flow]);
+
+  // Opening the panel moves focus into it, so a keyboard user is not left on a
+  // table row behind a panel they cannot reach (REQ WUI-015). Focus returns to
+  // the table on close — the shell owns that half, since it owns the rows.
+  useEffect(() => {
+    panel.current?.focus();
+  }, []);
 
   const request = full.request;
   const response = full.response;
   const noteCount = full.provenance?.notes?.length ?? 0;
 
   return (
-    <aside className="detail" aria-label="Flow detail">
+    <aside className="detail" aria-label="Flow detail" tabIndex={-1} ref={panel}>
       <header className="detail-head">
         <span className={`status ${statusClass(response?.status)}`}>{response?.status ?? '—'}</span>
         <span className="detail-url" title={request?.url ?? ''}>
@@ -229,7 +336,7 @@ export function FlowDetail({
 
         {tab === 'request' && (
           <>
-            <Headers headers={request?.headers} />
+            <Headers headers={request?.headers} side="request" onUnmask={onUnmask} />
             <Body
               body={request?.body}
               encoding={request?.body_encoding}
@@ -241,7 +348,7 @@ export function FlowDetail({
 
         {tab === 'response' && (
           <>
-            <Headers headers={response?.headers} />
+            <Headers headers={response?.headers} side="response" onUnmask={onUnmask} />
             <Body
               body={response?.body}
               encoding={response?.body_encoding}

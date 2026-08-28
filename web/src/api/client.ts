@@ -19,6 +19,7 @@ import type {
   SuggestedRule,
   ValidationResult,
 } from './types';
+import type { DaemonConfig, DryRunRequest, DryRunResult, SessionMeta, UnmaskResult } from './types';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -68,9 +69,15 @@ export class ApiClient {
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+    // Sent on every request, not only mutating ones. The daemon requires it on
+    // mutations as the CSRF defence (REQ API-013), and separately requires it
+    // on the *read* that unmasks a value, because unmasking is web-UI-only by
+    // construction (SPEC-0 §9.3, REQ CAP-043). Sending it unconditionally means
+    // no route can be reached by a client that forgot to identify itself, and
+    // keeps one place responsible for saying who we are.
+    headers['X-Pporlock-Client'] = 'ui';
     if (method !== 'GET' && method !== 'HEAD') {
       headers['Content-Type'] = 'application/json';
-      headers['X-Pporlock-Client'] = 'ui';
     }
 
     const init: RequestInit = { method, headers };
@@ -119,6 +126,22 @@ export class ApiClient {
   getFlow(flowId: string, detail: DetailLevel = 'full'): Promise<FlowRecord> {
     const params = new URLSearchParams({ detail });
     return this.request<FlowRecord>(`/flows/${encodeURIComponent(flowId)}`, { params });
+  }
+
+  /**
+   * Reveal one masked value from a **live** flow (REQ CAP-043, SPEC-0 §9.3).
+   *
+   * Three constraints, all of which are the caller's to honour as well as the
+   * daemon's: live ring buffer only, web UI only, one value per call. There is
+   * deliberately no bulk form and no session equivalent — a session flow was
+   * redacted before it reached the file (REQ CAP-045), so there is nothing
+   * there to reveal even if a caller asked.
+   *
+   * The response is never cached and the revealed value is never logged.
+   */
+  unmask(flowId: string, fieldPath: string): Promise<UnmaskResult> {
+    const params = new URLSearchParams({ unmask: fieldPath });
+    return this.request<UnmaskResult>(`/flows/${encodeURIComponent(flowId)}`, { params });
   }
 
   clearFlows(): Promise<void> {
@@ -204,6 +227,96 @@ export class ApiClient {
       method: 'POST',
       body: {},
     });
+  }
+
+  /* ---------------- Sessions and dry run (SPEC-0 §6.8) ---------------- */
+
+  listSessions(): Promise<SessionMeta[]> {
+    return this.request<SessionMeta[]>('/sessions');
+  }
+
+  getSession(sessionId: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>(`/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /** Recording is opt-in and off by default (REQ CAP-020). */
+  startRecording(name: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>('/sessions', { method: 'POST', body: { name } });
+  }
+
+  stopRecording(sessionId: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>(`/sessions/${encodeURIComponent(sessionId)}/stop`, {
+      method: 'POST',
+      body: {},
+    });
+  }
+
+  renameSession(sessionId: string, name: string): Promise<SessionMeta> {
+    return this.request<SessionMeta>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: { name },
+    });
+  }
+
+  deleteSession(sessionId: string): Promise<void> {
+    return this.request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+  }
+
+  /**
+   * Recorded flows, same filter vocabulary as the live ring (SPEC-0 §6.5).
+   *
+   * Same shape as `listFlows`, deliberately: the session browser reuses the
+   * live table and detail components, and a divergent page shape here would be
+   * the first crack in that (SPEC-2 §8.2).
+   */
+  listSessionFlows(
+    sessionId: string,
+    filter: FlowFilter = {},
+    opts: PageOpts = {},
+  ): Promise<FlowPage> {
+    const params = filterToParams(filter);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.cursor) params.set('cursor', opts.cursor);
+    if (opts.detail) params.set('detail', opts.detail);
+    return this.request<FlowPage>(`/sessions/${encodeURIComponent(sessionId)}/flows`, { params });
+  }
+
+  /** Export URL (REQ CAP-024). A plain link, so the browser does the download. */
+  sessionExportUrl(sessionId: string, format: 'har' | 'pporlock'): string {
+    return this.url(
+      `/sessions/${encodeURIComponent(sessionId)}/export`,
+      new URLSearchParams({ format }),
+    );
+  }
+
+  /**
+   * Evaluate candidate modules against a recorded session (REQ CAP-030).
+   *
+   * This **executes the candidate module's Python hooks** (REQ CAP-032). It
+   * touches no live traffic, but "no live traffic" is not "no code ran", and
+   * every surface that offers this must say so.
+   */
+  dryRun(sessionId: string, request: DryRunRequest): Promise<DryRunResult> {
+    return this.request<DryRunResult>(`/sessions/${encodeURIComponent(sessionId)}/dryrun`, {
+      method: 'POST',
+      body: request,
+    });
+  }
+
+  /* ---------------- Configuration (SPEC-0 §6.9) ---------------- */
+
+  /** The *effective* configuration, defaults included (REQ CAP-044). */
+  getConfig(): Promise<DaemonConfig> {
+    return this.request<DaemonConfig>('/config');
+  }
+
+  /**
+   * Change configuration sections. The body is a partial: sections omitted are
+   * left alone, which is why the settings UI sends only what it edits rather
+   * than echoing the whole document back.
+   */
+  putConfig(sections: Record<string, unknown>): Promise<DaemonConfig> {
+    return this.request<DaemonConfig>('/config', { method: 'PUT', body: sections });
   }
 
   /** Candidate rule derived from a flow (REQ WUI-008, MCP-014). */

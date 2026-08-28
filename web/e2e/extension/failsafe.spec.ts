@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { freePorts } from './ports';
 
 /**
  * The fail-safe, end to end, against a real daemon and a real extension.
@@ -32,12 +33,6 @@ let stateDir: string;
 let proxyPort: number;
 let controlPort: number;
 let extensionId: string;
-
-function freePort(base: number): number {
-  // Ports well away from a developer's running daemon so the suite never fights
-  // an interactive session.
-  return base + Math.floor(Math.random() * 400);
-}
 
 async function startFixture(): Promise<void> {
   fixture = spawn(
@@ -111,9 +106,7 @@ async function sw<T>(message: unknown): Promise<T> {
 
 test.beforeAll(async () => {
   test.setTimeout(180_000);
-  proxyPort = freePort(18000);
-  controlPort = freePort(18500);
-  fixturePort = freePort(19000);
+  [proxyPort, controlPort, fixturePort] = (await freePorts(3)) as [number, number, number];
   stateDir = mkdtempSync(join(tmpdir(), 'pporlock-e2e-state-'));
   userDataDir = mkdtempSync(join(tmpdir(), 'pporlock-e2e-chrome-'));
 

@@ -9,7 +9,13 @@ export type Message =
   | { type: 'set_dev_toggle'; toggle: 'anticache' | 'anticomp'; value: boolean }
   | { type: 'bypass_host'; host: string }
   | { type: 'dismiss_error' }
-  | { type: 'health_check' };
+  | { type: 'health_check' }
+  | { type: 'suppress_host'; host: string }
+  | { type: 'unsuppress_host'; host: string }
+  | { type: 'set_banner_enabled'; enabled: boolean }
+  | { type: 'set_proxy_scope'; scope: 'all' | 'scoped'; hosts?: string[] }
+  | { type: 'start_recording'; name: string }
+  | { type: 'stop_recording' };
 
 export interface StatusReply {
   state: DurableState;

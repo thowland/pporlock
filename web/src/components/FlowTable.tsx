@@ -60,19 +60,25 @@ function Flags({ flow, attributionActive }: { flow: FlowRecord; attributionActiv
           STR
         </span>
       )}
+      {/* `!` and `✕` differ by colour at a glance and by shape on inspection,
+          but neither is a word — so each carries one for assistive technology
+          (REQ WUI-015). The same applies to `?` below. */}
       {severity === 'warning' && (
         <span className="flag warn" title="Warning notes on this flow">
-          !
+          <span aria-hidden="true">!</span>
+          <span className="sr-only">has warning notes</span>
         </span>
       )}
       {severity === 'error' && (
         <span className="flag error" title="Error notes on this flow">
-          ✕
+          <span aria-hidden="true">✕</span>
+          <span className="sr-only">has error notes</span>
         </span>
       )}
       {attributionActive && flow.tab_id === null && flow.kind === 'http' && (
         <span className="flag unattributed" title="No tab attributed to this flow">
-          ?
+          <span aria-hidden="true">?</span>
+          <span className="sr-only">unattributed</span>
         </span>
       )}
     </span>
@@ -160,6 +166,19 @@ export function FlowTable({
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
                   onSelect?.(flow);
+                  return;
+                }
+                // Up/Down walk the table, which is how a keyboard user scans
+                // for the flow that went wrong (REQ WUI-015). Tab alone would
+                // stop at every action button on the way.
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                  const row = event.currentTarget;
+                  const next =
+                    event.key === 'ArrowDown' ? row.nextElementSibling : row.previousElementSibling;
+                  if (next instanceof HTMLElement) {
+                    event.preventDefault();
+                    next.focus();
+                  }
                 }
               }}
             >

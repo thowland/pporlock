@@ -6,6 +6,7 @@
  * altering my traffic in a way I should know about.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { describeError } from '../shared/errors';
 import type { ActionReply, StatusReply } from '../shared/messages';
 import type { Message } from '../shared/messages';
 
@@ -29,6 +30,7 @@ export function Popup() {
   const [error, setError] = useState<string | null>(null);
   const [pairCode, setPairCode] = useState('');
   const [tabHost, setTabHost] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState('');
   const [bypassed, setBypassed] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -169,6 +171,31 @@ export function Popup() {
         </div>
       )}
 
+      {state.lastError && !failSafeTripped && (
+        // A recorded error is shown as what it means and what to do, never as
+        // its code (REQ EXT-024). The code stays available as a tooltip for a
+        // bug report.
+        <div className="row">
+          <div
+            className={`alert ${describeError(state.lastError.code).actionable ? 'error' : 'warn'}`}
+            title={state.lastError.code}
+          >
+            <b>{describeError(state.lastError.code).title}</b>
+            {describeError(state.lastError.code).meaning}
+            <div style={{ marginTop: 6 }}>{describeError(state.lastError.code).remedy}</div>
+            <div style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className="link"
+                onClick={() => void act({ type: 'dismiss_error' })}
+              >
+                dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toggleBlockedReason && !failSafeTripped && (
         <div className="row">
           <span className="sub">{toggleBlockedReason}</span>
@@ -270,6 +297,56 @@ export function Popup() {
               </>
             )}
           </div>
+        </>
+      )}
+
+      {state.paired && (
+        <>
+          <hr />
+          {state.recordingSession === null ? (
+            <div className="row">
+              <input
+                type="text"
+                aria-label="Session name"
+                placeholder="session name"
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+              />
+              <button
+                type="button"
+                className="act"
+                disabled={busy || !daemonReachable}
+                onClick={() =>
+                  void act({ type: 'start_recording', name: sessionName.trim() }).then((ok) => {
+                    if (ok) setSessionName('');
+                  })
+                }
+              >
+                record
+              </button>
+            </div>
+          ) : (
+            // Recording is opt-in and off by default (REQ CAP-020). While it is
+            // on it says so unmissably: a proxy quietly writing every flow it
+            // sees to disk is a different, worse tool than this one.
+            <div className="row">
+              <div className="alert warn">
+                <b>● recording</b>
+                Flows are being written to a session on disk. Secrets are masked as they are
+                written, so the file never holds the real value.
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="link"
+                    disabled={busy}
+                    onClick={() => void act({ type: 'stop_recording' })}
+                  >
+                    stop recording
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
 

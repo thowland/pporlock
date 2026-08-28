@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_ROUTE, parseRoute, routeToHash, useHashRoute } from './router';
+import type { Route } from './router';
 
 describe('parseRoute', () => {
   it('maps every route in SPEC-2 §3.1 that this sprint implements', () => {
@@ -58,5 +59,36 @@ describe('useHashRoute', () => {
     const { result } = renderHook(() => useHashRoute());
     act(() => result.current[1]({ view: 'profiles' }));
     expect(result.current[0]).toEqual({ view: 'profiles' });
+  });
+});
+
+describe('session and settings routes  # REQ WUI-010, WUI-011', () => {
+  it('parses the session list, one session, and its dry run', () => {
+    expect(parseRoute('#/sessions')).toEqual({ view: 'sessions' });
+    expect(parseRoute('#/sessions/s1')).toEqual({ view: 'session', id: 's1' });
+    // Dry run hangs off the session it runs against — it is meaningless
+    // without one, and the URL should say which (SPEC-2 §8.3).
+    expect(parseRoute('#/sessions/s1/dryrun')).toEqual({ view: 'dryrun', id: 's1' });
+    expect(parseRoute('#/settings')).toEqual({ view: 'settings' });
+  });
+
+  it('decodes a session id that needed escaping', () => {
+    expect(parseRoute('#/sessions/a%20b')).toEqual({ view: 'session', id: 'a b' });
+  });
+
+  it('treats an unknown third segment as the session itself', () => {
+    expect(parseRoute('#/sessions/s1/nonsense')).toEqual({ view: 'session', id: 's1' });
+  });
+
+  it('round-trips every new route through the hash', () => {
+    const routes: Route[] = [
+      { view: 'sessions' },
+      { view: 'session', id: 's 1' },
+      { view: 'dryrun', id: 's 1' },
+      { view: 'settings' },
+    ];
+    for (const route of routes) {
+      expect(parseRoute(routeToHash(route))).toEqual(route);
+    }
   });
 });

@@ -27,3 +27,12 @@ export interface FlowQuery {
   blocked?: boolean;
   host?: string;
 }
+
+/** Session metadata (SPEC-0 §6.8). Only what the popup needs to show. */
+export interface SessionMeta {
+  session_id: string;
+  name: string;
+  state: 'recording' | 'stopped';
+  flow_count?: number;
+  dropped?: number;
+}

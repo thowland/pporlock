@@ -43,18 +43,25 @@ describe('ApiClient', () => {
     expect(headers['Authorization']).toBe('Bearer secret');
   });
 
-  it('sends the client header on mutating requests only', async () => {
+  it('sends the client header on every request, reads included  # REQ API-013, CAP-043', async () => {
+    // Replaces "sends the client header on mutating requests only". The header
+    // is no longer mutation-scoped: `GET /flows/{id}?unmask=` requires it too,
+    // because unmasking is web-UI-only by construction (SPEC-0 §9.3), and the
+    // daemon refuses the read outright without it.
     const api = new ApiClient(ORIGIN);
     api.setToken('secret');
 
     await api.getState();
     const readHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
-    expect(readHeaders).not.toHaveProperty('X-Pporlock-Client');
+    expect(readHeaders['X-Pporlock-Client']).toBe('ui');
+    // Reads still carry no JSON content type — there is no body to describe.
+    expect(readHeaders).not.toHaveProperty('Content-Type');
 
     await api.setDevToggles({ anticomp: true });
     const writeHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
     // REQ API-013 — this is what a cross-origin form cannot produce.
     expect(writeHeaders['X-Pporlock-Client']).toBe('ui');
+    expect(writeHeaders['Content-Type']).toBe('application/json');
   });
 
   it('never puts the token in a URL', async () => {

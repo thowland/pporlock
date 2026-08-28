@@ -127,10 +127,10 @@ export function DryRunView({ api, sessionId, onBack, onOpenModule, initialModule
     void api
       .listModules()
       .then((list) => {
-        setModules(list.modules);
+        setModules(list);
         // Pre-select only when the caller did not: an arbitrary default would
         // make "run" execute code the user did not choose.
-        setSelected((current) => current || (list.modules[0]?.name ?? ''));
+        setSelected((current) => current || (list[0]?.name ?? ''));
       })
       .catch(() => setModules([]));
   }, [api, sessionId]);

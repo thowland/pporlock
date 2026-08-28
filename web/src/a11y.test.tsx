@@ -59,11 +59,8 @@ function api(): ApiClient {
     total_estimate: 1,
   });
   vi.spyOn(client, 'getFlow').mockResolvedValue(makeFlow());
-  vi.spyOn(client, 'listModules').mockResolvedValue({ modules: [] });
-  vi.spyOn(client, 'listProfiles').mockResolvedValue({
-    profiles: [{ name: 'default', modules: [] }],
-    active: 'default',
-  });
+  vi.spyOn(client, 'listModules').mockResolvedValue([]);
+  vi.spyOn(client, 'listProfiles').mockResolvedValue([{ name: 'default', modules: [] }]);
   vi.spyOn(client, 'listSessions').mockResolvedValue([makeSession()]);
   vi.spyOn(client, 'getSession').mockResolvedValue(makeSession());
   vi.spyOn(client, 'listSessionFlows').mockResolvedValue({

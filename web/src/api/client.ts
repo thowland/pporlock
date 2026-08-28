@@ -12,7 +12,6 @@ import type { FlowRecord, Health } from './types';
 import type {
   ModuleDetail,
   ModuleStatus,
-  ProfileList,
   ProfileSummary,
   ReloadResult,
   RuleIntent,
@@ -154,8 +153,17 @@ export class ApiClient {
 
   /* ---------------- Modules (SPEC-0 §6.6) ---------------- */
 
-  listModules(): Promise<{ modules: ModuleStatus[] }> {
-    return this.request<{ modules: ModuleStatus[] }>('/modules');
+  /**
+   * Modules, as a bare array.
+   *
+   * The contract says array (`contracts/openapi.yaml` `/modules`), and so does
+   * the daemon. This client asked for `{modules: [...]}` and every test agreed,
+   * because every test used a fake that returned what the client expected — so
+   * the module library threw "v.modules is not iterable" the first time it met
+   * a real daemon, and nothing before that had a chance to notice.
+   */
+  listModules(): Promise<ModuleStatus[]> {
+    return this.request<ModuleStatus[]>('/modules');
   }
 
   getModule(name: string): Promise<ModuleDetail> {
@@ -203,8 +211,14 @@ export class ApiClient {
 
   /* ---------------- Profiles (SPEC-0 §6.7) ---------------- */
 
-  listProfiles(): Promise<ProfileList> {
-    return this.request<ProfileList>('/profiles');
+  /**
+   * Profiles, as a bare array. Same correction as listModules.
+   *
+   * There is no `active` field here and there never was: which profile is
+   * active is daemon state, and `GET /state` is where it lives.
+   */
+  listProfiles(): Promise<ProfileSummary[]> {
+    return this.request<ProfileSummary[]>('/profiles');
   }
 
   createProfile(profile: ProfileSummary): Promise<ProfileSummary> {

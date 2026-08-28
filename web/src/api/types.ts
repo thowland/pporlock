@@ -130,7 +130,13 @@ export interface ModuleStatus {
   rule_count: number;
   error: ModuleLoadError | null;
   quarantine: ModuleQuarantine | null;
-  stats: ModuleStats;
+  /**
+   * Optional, and it is not merely theoretical: `contracts/openapi.yaml` does
+   * not require it and the daemon does not yet send it (per-module cost is
+   * REQ PRF-007). Reading through it unconditionally crashed the module
+   * library against a real daemon while every test passed.
+   */
+  stats?: ModuleStats | undefined;
 }
 
 /**

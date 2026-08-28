@@ -34,22 +34,20 @@ function detail(): ModuleDetail {
 
 function api(): ApiClient {
   const client = new ApiClient('http://127.0.0.1:8081');
-  vi.spyOn(client, 'listModules').mockResolvedValue({
-    modules: [
-      {
-        name: 'block-vendors',
-        version: '1.2.0',
-        enabled: true,
-        priority: 100,
-        state: 'loaded',
-        has_python: false,
-        rule_count: 5,
-        error: null,
-        quarantine: null,
-        stats: { flows_matched: 0, flows_modified: 0, errors: 0, avg_ms: 0 },
-      },
-    ],
-  });
+  vi.spyOn(client, 'listModules').mockResolvedValue([
+    {
+      name: 'block-vendors',
+      version: '1.2.0',
+      enabled: true,
+      priority: 100,
+      state: 'loaded',
+      has_python: false,
+      rule_count: 5,
+      error: null,
+      quarantine: null,
+      stats: { flows_matched: 0, flows_modified: 0, errors: 0, avg_ms: 0 },
+    },
+  ]);
   vi.spyOn(client, 'getModule').mockResolvedValue(detail());
   vi.spyOn(client, 'createModule').mockResolvedValue(detail());
   vi.spyOn(client, 'replaceModule').mockResolvedValue(detail());

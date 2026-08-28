@@ -13,10 +13,12 @@ server arrive in Sprint 3 and 4 behind the ``sink`` interface.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Protocol
 
 from ..config import Config
+from ..engine.cost import decide_offload
 from ..engine.evaluator import Evaluator, TimeBudget
 from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.provenance import NoteCode, Provenance, ProvenanceBuilder
@@ -115,6 +117,10 @@ class Interceptor:
         # The evaluator holds an immutable rule-set snapshot. Reload swaps the
         # whole evaluator rather than mutating it, so an in-flight flow finishes
         # against the snapshot it started with (REQ MOD-004).
+        # Development toggles (REQ PXY-043). Both alter traffic in ways that
+        # make normal behaviour unreproducible, so both default off and every
+        # flow processed while one is on carries a note saying so.
+        self.dev_toggles: dict[str, bool] = {"anticache": False, "anticomp": False}
         self.evaluator = (
             evaluator if evaluator is not None else Evaluator(RuleSet(), exclusions=self.exclusions)
         )
@@ -182,6 +188,7 @@ class Interceptor:
 
         request = normalize.normalize_request(flow, flow_id=flow_id, body=flow.request.content)
         budget = TimeBudget(self.config.budget.per_flow_ms)
+        self._apply_dev_toggles(flow, builder)
         decision = self.evaluator.evaluate_request(request, builder, budget)
 
         if decision.kill:
@@ -251,8 +258,63 @@ class Interceptor:
         if not decision.buffer:
             apply_mod.set_stream(flow, True)
 
-    def response(self, flow: Any) -> None:
-        """Response-side evaluation and flow completion."""
+    def _apply_dev_toggles(self, flow: Any, builder: ProvenanceBuilder) -> None:
+        """Apply anticache and anticomp, and record that they were on.
+
+        `anticache` strips conditional-request headers so a full body comes back
+        every time — without it a rewrite rule appears not to fire, because the
+        browser is being handed a 304 with no body to rewrite.
+
+        `anticomp` strips Accept-Encoding so bodies arrive uncompressed. Useful
+        while debugging, and off in normal use because it inflates transfer
+        volume for no benefit.
+
+        Both are recorded on every flow they touch (REQ PXY-044). A capture
+        taken under anticomp is not a capture of normal behaviour, and nothing
+        downstream can tell unless the flow says so.
+        """
+        active = [name for name, on in self.dev_toggles.items() if on]
+        if not active:
+            return
+
+        if self.dev_toggles["anticache"]:
+            for header in ("if-none-match", "if-modified-since", "if-match", "if-range"):
+                if header in flow.request.headers:
+                    del flow.request.headers[header]
+        if self.dev_toggles["anticomp"]:
+            if "accept-encoding" in flow.request.headers:
+                del flow.request.headers["accept-encoding"]
+
+        builder.note(
+            NoteCode.DEV_TOGGLE_ACTIVE,
+            f"{' + '.join(active)} active; this flow does not reflect normal behaviour",
+            toggles=active,
+        )
+
+    def _should_offload(self, request: Any, response: Any) -> bool:
+        """Whether this flow's body work belongs on a worker thread.
+
+        Sprint 9 classified the work; this is what honours the classification.
+        Without it the decision would be advisory — recorded in provenance and
+        ignored in practice — and a document-parsing transform on a large page
+        would stall every other connection the browser has open.
+        """
+        return any(
+            decide_offload(
+                str(t.get("kind", "")), response.body_size, self.evaluator.offload_threshold
+            ).offload
+            for rule in self.evaluator.ruleset.matching_response_body(request, response)
+            for t in _rule_transforms(rule)
+        )
+
+    async def response(self, flow: Any) -> None:
+        """Response-side evaluation and flow completion.
+
+        Async because expensive body work has to genuinely leave the event loop
+        (REQ PXY-024, DD-3). A synchronous hook submitting to a thread pool and
+        blocking on the result would stall the loop exactly as much as doing the
+        work inline — the await is the entire point.
+        """
         builder: ProvenanceBuilder = _unstash(flow, "builder") or ProvenanceBuilder(self.profile)
         request = _unstash(flow, "request")
         started: float | None = _unstash(flow, "started")
@@ -268,11 +330,31 @@ class Interceptor:
         if request is not None:
             # Headers were already applied in responseheaders(); only body work
             # remains here.
-            decision = self.evaluator.evaluate_response_body(
-                request, response, builder, _unstash(flow, "budget")
-            )
+            budget = _unstash(flow, "budget")
+            if self._should_offload(request, response):
+                loop = asyncio.get_running_loop()
+                decision = await loop.run_in_executor(
+                    None,
+                    self.evaluator.evaluate_response_body,
+                    request,
+                    response,
+                    builder,
+                    budget,
+                )
+            else:
+                decision = self.evaluator.evaluate_response_body(request, response, builder, budget)
             if apply_mod.apply_response_mutation(flow, decision.mutation):
                 self.counters.modified += 1
+                # Re-normalise so the captured response is the one the browser
+                # actually received. Provenance explains what changed; the
+                # record should show the result, not the input — the same
+                # reasoning as the request side in Sprint 9.
+                response = normalize.normalize_response(
+                    flow,
+                    flow_id=_flow_id(flow),
+                    body=None if streamed else flow.response.content,
+                    streamed=streamed,
+                )
 
         _unstash(flow, "wants_body")
 
@@ -344,3 +426,15 @@ def _stash(flow: Any, key: str, value: Any) -> None:
 
 def _unstash(flow: Any, key: str) -> Any:
     return flow.metadata.pop(f"pporlock.{key}", None)
+
+
+def _rule_transforms(rule: Any) -> list[dict[str, Any]]:
+    """A rule's transform blocks, single or list."""
+    single = rule.params.get("transform")
+    many = rule.params.get("transforms")
+    out: list[dict[str, Any]] = []
+    if isinstance(single, dict):
+        out.append(single)
+    if isinstance(many, list):
+        out.extend(item for item in many if isinstance(item, dict))
+    return out

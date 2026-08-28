@@ -124,10 +124,12 @@ class TestRequestResponseCycle:
         assert "pporlock.builder" in flow.metadata
         assert "pporlock.request" in flow.metadata
 
-    def test_response_records_the_flow(self, interceptor: Interceptor, sink: RecordingSink) -> None:
+    async def test_response_records_the_flow(
+        self, interceptor: Interceptor, sink: RecordingSink
+    ) -> None:
         flow = StubFlow(response=StubResponse())
         interceptor.request(flow)
-        interceptor.response(flow)
+        await interceptor.response(flow)
         assert len(sink.http_records) == 1
         request, response, provenance, timing = sink.http_records[0]
         assert request.method == "GET"
@@ -135,24 +137,24 @@ class TestRequestResponseCycle:
         assert provenance.profile == "default"
         assert timing["pporlock_ms"] >= 0
 
-    def test_every_flow_carries_provenance(
+    async def test_every_flow_carries_provenance(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
         """REQ CAP-013 — including a flow that matched nothing at all."""
         flow = StubFlow(response=StubResponse())
         interceptor.request(flow)
-        interceptor.response(flow)
+        await interceptor.response(flow)
         assert sink.http_records[0][2] is not None
 
-    def test_response_without_a_prior_request_still_records(
+    async def test_response_without_a_prior_request_still_records(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
         """A hook can fire without its partner — a replayed flow, or a restart
         mid-connection. Recording a partial flow beats dropping it."""
-        interceptor.response(StubFlow(response=StubResponse()))
+        await interceptor.response(StubFlow(response=StubResponse()))
         assert len(sink.http_records) == 1
 
-    def test_the_buffering_guard_streams_a_body_no_rule_wants(
+    async def test_the_buffering_guard_streams_a_body_no_rule_wants(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
         """REQ PXY-021/022 — and it says so, rather than doing nothing quietly."""
@@ -160,7 +162,7 @@ class TestRequestResponseCycle:
         interceptor.request(flow)
         interceptor.responseheaders(flow)
         assert flow.response.stream is True
-        interceptor.response(flow)
+        await interceptor.response(flow)
         provenance = sink.http_records[0][2]
         assert provenance.has_note(NoteCode.RESPONSE_STREAMED)
 
@@ -174,32 +176,32 @@ class TestRequestResponseCycle:
     def test_responseheaders_without_a_response_is_safe(self, interceptor: Interceptor) -> None:
         interceptor.responseheaders(StubFlow())
 
-    def test_streamed_response_carries_no_body(
+    async def test_streamed_response_carries_no_body(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
         flow = StubFlow(response=StubResponse(stream=True, content=b"never buffered"))
         interceptor.request(flow)
-        interceptor.response(flow)
+        await interceptor.response(flow)
         assert sink.http_records[0][1].body is None
 
-    def test_metadata_is_cleaned_up(self, interceptor: Interceptor) -> None:
+    async def test_metadata_is_cleaned_up(self, interceptor: Interceptor) -> None:
         """Per-flow state must not accumulate on long-lived flows."""
         flow = StubFlow(response=StubResponse())
         interceptor.request(flow)
-        interceptor.response(flow)
+        await interceptor.response(flow)
         assert not [k for k in flow.metadata if k.startswith("pporlock.")]
 
     def test_error_hook_counts(self, interceptor: Interceptor) -> None:
         interceptor.error(StubFlow())
         assert interceptor.counters.errors == 1
 
-    def test_sec_fetch_dest_survives_the_round_trip(
+    async def test_sec_fetch_dest_survives_the_round_trip(
         self, interceptor: Interceptor, sink: RecordingSink
     ) -> None:
         request = StubRequest(headers=StubHeaders([(b"Sec-Fetch-Dest", b"script")]))
         flow = StubFlow(request, StubResponse())
         interceptor.request(flow)
-        interceptor.response(flow)
+        await interceptor.response(flow)
         assert sink.http_records[0][0].dest == "script"
 
 

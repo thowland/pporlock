@@ -225,7 +225,11 @@ class ControlApp:
         for name in ("anticache", "anticomp"):
             if name in toggles:
                 self.dev_toggles[name] = bool(toggles[name])
+                # The addon owns the behaviour; the app mirrors it for /state.
+                if self.interceptor is not None:
+                    self.interceptor.dev_toggles[name] = self.dev_toggles[name]
                 self.audit.record(client, "dev_toggle", toggle=name, value=self.dev_toggles[name])
+        self.events.publish("state.changed", {"dev_toggles": dict(self.dev_toggles)})
         return JSONResponse(self._state_payload())
 
     async def get_flows(self, request: Request) -> JSONResponse:

@@ -145,3 +145,151 @@ class TestRunForeground:
 
         monkeypatch.setattr(runner_mod, "_run", clean)
         assert run_foreground(Config()) == 0
+
+
+class TestStartupWiring:
+    """The daemon must actually run what it loaded.
+
+    Every one of these covers something that was implemented, unit tested, and
+    not connected to the running proxy. Unit tests cannot see that gap by
+    construction — they build the objects themselves — so this is where it gets
+    caught.
+    """
+
+    def _config(self, tmp_path: Any) -> Config:
+        config = Config()
+        config.state_dir = str(tmp_path)
+        config.modules.root = str(tmp_path / "modules")
+        return config
+
+    def _write_module(self, root: Any, name: str, body: str) -> None:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "module.yaml").write_text(body)
+
+    def test_the_runner_builds_a_module_registry(self, tmp_path: Any) -> None:
+        """REQ MOD-001. Modules were loadable and reloadable through the API,
+        and the running daemon built no registry at all — so no module rule
+        ever reached live traffic and every module route answered 404."""
+        from pporlock.cli.runner import build_evaluator
+
+        self._write_module(
+            tmp_path / "modules",
+            "warn",
+            "name: warn\npporlock_api: '1'\nenabled: true\n"
+            "rules:\n"
+            "  - name: strip\n"
+            "    action: headers\n"
+            "    match: {host: '*'}\n"
+            "    response: {remove: [content-security-policy]}\n",
+        )
+        _evaluator, registry, profiles, _base, _path, error = build_evaluator(
+            self._config(tmp_path)
+        )
+        assert error is None
+        assert registry is not None
+        assert [m.name for m in registry.modules] == ["warn"]
+        assert profiles.active_name == "default"
+
+    def test_module_rules_reach_the_evaluator(self, tmp_path: Any) -> None:
+        """A registry the evaluator cannot see is a registry that does nothing."""
+        from pporlock.cli.runner import build_evaluator
+
+        self._write_module(
+            tmp_path / "modules",
+            "warn",
+            "name: warn\npporlock_api: '1'\nenabled: true\n"
+            "rules:\n"
+            "  - name: strip\n"
+            "    action: headers\n"
+            "    match: {host: '*'}\n"
+            "    response: {remove: [content-security-policy]}\n",
+        )
+        evaluator, _registry, _profiles, _base, _path, _error = build_evaluator(
+            self._config(tmp_path)
+        )
+        assert len(evaluator.ruleset.response_headers) == 1
+        # And the registry itself, for the Python hooks (REQ MOD-023).
+        assert evaluator.registry is not None
+
+    def test_file_rules_and_module_rules_are_one_set(self, tmp_path: Any) -> None:
+        """Both, not either. They order against each other by priority."""
+        from pporlock.cli.runner import build_evaluator
+
+        (tmp_path / "rules.yaml").write_text(
+            "rules:\n"
+            "  - name: mine\n"
+            "    action: headers\n"
+            "    match: {host: '*'}\n"
+            "    response: {set: {x-mine: '1'}}\n"
+        )
+        self._write_module(
+            tmp_path / "modules",
+            "theirs",
+            "name: theirs\npporlock_api: '1'\nenabled: true\n"
+            "rules:\n"
+            "  - name: theirs\n"
+            "    action: headers\n"
+            "    match: {host: '*'}\n"
+            "    response: {set: {x-theirs: '1'}}\n",
+        )
+        evaluator, _registry, _profiles, base, _path, error = build_evaluator(
+            self._config(tmp_path)
+        )
+        assert error is None
+        names = {r.name for r in evaluator.ruleset.response_headers}
+        assert names == {"mine", "theirs"}
+        # The file rules are handed back separately so reinstalling the module
+        # rules cannot delete them.
+        assert {r.name for r in base.rules} == {"mine"}
+
+    def test_a_broken_module_does_not_stop_startup(self, tmp_path: Any) -> None:
+        """One bad module must not stop the daemon, or a typo costs you the
+        browser as well as the module."""
+        from pporlock.cli.runner import build_evaluator
+
+        self._write_module(tmp_path / "modules", "broken", "name: not-broken\n")
+        self._write_module(
+            tmp_path / "modules", "fine", "name: fine\npporlock_api: '1'\nenabled: true\n"
+        )
+        _evaluator, registry, _profiles, _base, _path, _error = build_evaluator(
+            self._config(tmp_path)
+        )
+        by_name = {m.name: m for m in registry.modules}
+        assert by_name["broken"].error is not None
+        assert by_name["fine"].error is None
+
+    def test_no_modules_directory_is_not_an_error(self, tmp_path: Any) -> None:
+        """A fresh install has no modules and must still start."""
+        from pporlock.cli.runner import build_evaluator
+
+        evaluator, registry, _profiles, _base, _path, error = build_evaluator(
+            self._config(tmp_path)
+        )
+        assert error is None
+        assert registry.modules == ()
+        assert len(evaluator.ruleset.response_headers) == 0
+
+
+class TestApplyModulesKeepsFileRules:
+    def test_reinstalling_module_rules_does_not_delete_rules_yaml(self) -> None:
+        """Enabling a module rebuilt the rule set from modules alone, so the
+        user's own rules.yaml silently stopped applying until the next restart.
+        """
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.control.app import ControlApp
+        from pporlock.engine.ruleset import RuleSet
+
+        base = RuleSet.from_rules(
+            [
+                {
+                    "name": "mine",
+                    "action": "headers",
+                    "match": {"host": "*"},
+                    "response": {"set": {"x-mine": "1"}},
+                }
+            ],
+            module=None,
+        )
+        app = ControlApp(Config(), ring=RingBuffer(), base_ruleset=base)
+        assert {r.name for r in app.base_ruleset.rules} == {"mine"}

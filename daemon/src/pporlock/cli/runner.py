@@ -26,6 +26,8 @@ from ..control.events import EventHub
 from ..control.serialize import serialize_flow
 from ..engine.evaluator import Evaluator
 from ..engine.exclusions import load_exclusions
+from ..engine.modules.registry import ModuleRegistry
+from ..engine.profiles import ProfileManager
 from ..engine.rules_file import load_rules_file
 from ..engine.ruleset import RuleSet
 
@@ -81,6 +83,9 @@ class TeeSink(NullSink):
         super().record_websocket_message(message)
         self.ring_sink.record_websocket_message(message)
 
+    def record_websocket_close(self, flow_id: str, close_code: Any) -> None:
+        self.ring_sink.record_websocket_close(flow_id, close_code)
+
 
 class ConsoleSink(NullSink):
     """Prints a line per flow. Replaced by the ring buffer in Sprint 3.
@@ -116,20 +121,26 @@ class ConsoleSink(NullSink):
         emit(f"  {'TUNNEL':6} ---  {'':>9}   {'':>8}  {host or ip}  [{reason}]")
 
 
-def build_evaluator(config: Config) -> tuple[Evaluator, Path, str | None]:
-    """Load exclusions and rules from disk.
+def build_evaluator(
+    config: Config,
+) -> tuple[Evaluator, ModuleRegistry, ProfileManager, RuleSet, Path, str | None]:
+    """Load exclusions, rules, profiles and modules from disk.
 
     Deliberately synchronous, and called *before* the event loop exists. The
     control server shares the proxy's loop, so filesystem work must not land on
     it (REQ DD-3, API-002) — and startup is the one moment when doing it
-    off-loop costs nothing.
+    off-loop costs nothing. Module loading is the heaviest part of it: it reads
+    every manifest and executes every module's top level.
 
     A broken rules file does not stop the daemon: it is still useful for
     inspection, and the alternative is a user who cannot browse because of a
-    typo. The failure is returned so the caller can report it loudly.
+    typo. The failure is returned so the caller can report it loudly. Modules
+    fail the same way individually — ``load_module`` never raises — so one bad
+    module cannot stop the rest from loading.
     """
     exclusions = load_exclusions()
-    rules_path = Path(config.state_dir).expanduser() / "rules.yaml"
+    state_dir = Path(config.state_dir).expanduser()
+    rules_path = state_dir / "rules.yaml"
     ruleset = RuleSet()
     error: str | None = None
 
@@ -139,20 +150,39 @@ def build_evaluator(config: Config) -> tuple[Evaluator, Path, str | None]:
         except Exception as exc:
             error = str(exc)
 
+    profiles = ProfileManager(state_dir / "profiles")
+    registry = ModuleRegistry(
+        Path(config.modules.root).expanduser(),
+        quarantine_after=config.modules.quarantine_after_failures,
+    )
+
     evaluator = Evaluator(
         ruleset,
         exclusions=exclusions,
         asset_root=rules_path.parent,
         buffer_types=tuple(config.buffering.content_types),
         max_buffer_bytes=config.buffering.max_body_bytes,
+        registry=registry,
     )
-    return evaluator, rules_path, error
+
+    # Modules are loaded here, against this evaluator's transform registry, so a
+    # module registering a transform in on_load has somewhere to register it.
+    registry.reload(evaluator.transforms, profiles.active_name)
+
+    # File rules and module rules are one rule set to the engine; a module's
+    # priority orders its rules against everything else (REQ MOD-023).
+    evaluator.ruleset = RuleSet.combine(ruleset, registry.build_ruleset(profiles.module_filter()))
+
+    return evaluator, registry, profiles, ruleset, rules_path, error
 
 
 async def _run(
     config: Config,
     sink: Any,
     evaluator: Evaluator,
+    registry: ModuleRegistry,
+    profiles: ProfileManager,
+    base_ruleset: RuleSet,
     rules_path: Path,
     rules_error: str | None,
 ) -> int:
@@ -184,7 +214,14 @@ async def _run(
     )
     events = EventHub()
     control = ControlApp(
-        config, ring=ring, interceptor=None, events=events, static_dir=web_assets_dir()
+        config,
+        ring=ring,
+        interceptor=None,
+        events=events,
+        registry=registry,
+        profiles=profiles,
+        base_ruleset=base_ruleset,
+        static_dir=web_assets_dir(),
     )
 
     def publish_flow(record: Any) -> None:
@@ -196,7 +233,10 @@ async def _run(
         events.publish_flow(
             "flow.completed",
             record,
-            serialize_flow(record, "summary"),
+            # Redacted like every other representation that leaves the daemon
+            # (REQ CAP-040). The SSE stream feeds the flow table, and a masked
+            # value there is what the unmask affordance acts on.
+            serialize_flow(record, "summary", control.redactor),
         )
 
     ring_sink = RingSink(
@@ -207,6 +247,7 @@ async def _run(
         # observes before the flow completes (this hook), and when the flow wins
         # the race the POST /attribution handler backfills instead.
         resolve_tab=control.attribution.resolve,
+        session=control.sessions,
     )
     console = sink if isinstance(sink, ConsoleSink) else ConsoleSink(quiet=True)
     tee = TeeSink(ring_sink, console)
@@ -224,6 +265,17 @@ async def _run(
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     emit(f"  exclusions: {len(interceptor.exclusions)} entries")
+    active = registry.active(profiles.module_filter())
+    broken = [m for m in registry.modules if m.error is not None]
+    emit(
+        f"  modules:    {len(active)} active of {len(registry.modules)}"
+        f" in {config.modules.root}" + (f", {len(broken)} failed to load" if broken else "")
+    )
+    for module in broken:
+        # Loudly, and by name. A module that silently is not there is the
+        # failure the loader's never-raise contract exists to prevent.
+        emit(f"    ! {module.name}: {module.error.message if module.error else 'unknown'}")
+    emit(f"  profile:    {profiles.active_name}")
     if rules_error is not None:
         emit(f"  rules:      FAILED to load {rules_path}: {rules_error}")
     else:
@@ -257,9 +309,20 @@ async def _run(
 def run_foreground(config: Config, *, quiet: bool = False) -> int:
     sink: Any = ConsoleSink(quiet=quiet)
     # Loaded before the loop exists, so no filesystem work lands on it.
-    evaluator, rules_path, rules_error = build_evaluator(config)
+    evaluator, registry, profiles, base_ruleset, rules_path, rules_error = build_evaluator(config)
     try:
-        return asyncio.run(_run(config, sink, evaluator, rules_path, rules_error))
+        return asyncio.run(
+            _run(
+                config,
+                sink,
+                evaluator,
+                registry,
+                profiles,
+                base_ruleset,
+                rules_path,
+                rules_error,
+            )
+        )
     except KeyboardInterrupt:
         return 130
     except OSError as exc:

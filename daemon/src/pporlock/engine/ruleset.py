@@ -27,6 +27,11 @@ from .provenance import Action, Phase
 #: Actions that end evaluation of their class at the first match.
 SHORT_CIRCUIT_ACTIONS = frozenset({Action.BLOCK, Action.MAP_LOCAL, Action.REDIRECT})
 
+#: Reserved action namespace for future WebSocket actions (REQ PXY-052). No
+#: action uses it yet; holding it is what makes adding one later additive
+#: rather than a change that could collide with a name a module already chose.
+WS_ACTION_PREFIX = "ws_"
+
 #: The phase each action runs in (REQ PXY-020).
 #:
 #: `headers` is the exception and is resolved per rule rather than per action: a
@@ -108,6 +113,20 @@ def compile_rule(
         raise RuleValidationError("rule has no name", module=module, rule_index=index, field="name")
 
     action_raw = str(raw.get("action") or "").strip()
+    if action_raw.startswith(WS_ACTION_PREFIX):
+        # REQ PXY-052. WebSocket frames are inspection-only in v1 (REQ PXY-051),
+        # but the action namespace for them is reserved now so that adding
+        # ws_send, ws_drop, or ws_rewrite later is additive rather than a
+        # breaking change to modules that meanwhile invented their own
+        # ws_-prefixed action and got a generic "unknown action" for it.
+        raise RuleValidationError(
+            f"{action_raw!r} is reserved: the {WS_ACTION_PREFIX!r} action namespace is "
+            "held for future WebSocket actions. WebSocket frames are "
+            "inspection-only in v1 (REQ PXY-051).",
+            module=module,
+            rule_index=index,
+            field="action",
+        )
     try:
         action = Action(action_raw)
     except ValueError as exc:
@@ -203,8 +222,25 @@ class RuleSet:
         "request_headers",
         "response_body",
         "response_headers",
+        "rules",
         "short_circuit",
     )
+
+    @staticmethod
+    def combine(*sets: RuleSet) -> RuleSet:
+        """One rule set from several sources.
+
+        File rules and module rules are one rule set to the engine — a module's
+        priority orders its rules against everything else, including yours
+        (REQ MOD-023). Building them separately and only ever installing the
+        module half is how enabling a module silently deletes rules.yaml.
+        """
+        rules: list[CompiledRule] = []
+        modules: list[str] = []
+        for ruleset in sets:
+            rules.extend(ruleset.rules)
+            modules.extend(ruleset.modules)
+        return RuleSet(rules, modules=tuple(dict.fromkeys(modules)))
 
     def __init__(self, rules: Sequence[CompiledRule] = (), modules: tuple[str, ...] = ()) -> None:
         enabled = sorted((r for r in rules if r.enabled), key=lambda r: r.sort_key)
@@ -219,6 +255,12 @@ class RuleSet:
         )
         self.response_body = tuple(r for r in enabled if r.action is Action.BODY)
         self.modules = modules
+        # The rules this set was built from, enabled and sorted. Kept because
+        # the partitions cannot be reassembled into a set: file rules and module
+        # rules are compiled separately and have to become one set before the
+        # engine sees them, and reconstructing that from six tuples would be a
+        # second, divergent definition of the ordering.
+        self.rules = tuple(enabled)
 
     def __len__(self) -> int:
         return (

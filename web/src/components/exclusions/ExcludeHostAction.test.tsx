@@ -142,3 +142,43 @@ describe('ExcludeHostAction  # REQ PXY-016', () => {
     expect(rowClick).not.toHaveBeenCalled();
   });
 });
+
+describe('what it says afterwards depends on where you are', () => {
+  const ENTRIES = { entries: [{ pattern: '*.apple.com', comment: 'pinning', source: 'default' }] };
+
+  function client(): ApiClient {
+    const api = new ApiClient('http://127.0.0.1:8081');
+    vi.spyOn(api, 'getExclusions').mockResolvedValue(ENTRIES as never);
+    vi.spyOn(api, 'putExclusions').mockResolvedValue(undefined as never);
+    return api;
+  }
+
+  async function excludeFrom(live: boolean): Promise<string> {
+    render(<ExcludeHostAction api={client()} host="cdn.example.com" surface="test" live={live} />);
+    await userEvent.click(screen.getByRole('button', { name: /exclude/i }));
+    await userEvent.click(screen.getByRole('button', { name: 'Exclude this host' }));
+    return (await screen.findByRole('status')).textContent ?? '';
+  }
+
+  it('tells a live viewer to reload', async () => {
+    expect(await excludeFrom(true)).toMatch(/Reload the page/);
+  });
+
+  it('does not tell a session viewer to reload', async () => {
+    // Telling someone browsing a recorded session to reload is telling them to
+    // expect a change that cannot happen there. The exclusion is the same;
+    // only the honest thing to say afterwards differs.
+    const message = await excludeFrom(false);
+    expect(message).not.toMatch(/Reload the page/);
+    expect(message).toMatch(/recorded session/);
+  });
+
+  it('says the same thing about the exclusion itself when live', async () => {
+    expect(await excludeFrom(true)).toMatch(/tunnelled undecrypted/);
+  });
+
+  it('says the same thing about the exclusion itself on a session', async () => {
+    // The exclusion is identical; only the advice afterwards differs.
+    expect(await excludeFrom(false)).toMatch(/tunnelled undecrypted/);
+  });
+});

@@ -28,13 +28,23 @@ type Phase =
 
 export interface ExcludeHostActionProps {
   api: ApiClient;
+  /**
+   * Whether the flow this was opened from is live traffic.
+   *
+   * The exclusion itself is the same either way — it is about the host, not
+   * the flow. What differs is the honest thing to say afterwards: "reload the
+   * page to see it take effect" is advice about a page you are looking at, and
+   * telling someone browsing a recorded session to reload is telling them to
+   * expect a change that cannot happen there.
+   */
+  live?: boolean;
   /** The host this flow talked to. Absent for a flow with neither request nor SNI. */
   host: string | null | undefined;
   /** Recorded in the entry's comment, so the list says where it came from. */
   surface: string;
 }
 
-export function ExcludeHostAction({ api, host, surface }: ExcludeHostActionProps) {
+export function ExcludeHostAction({ api, host, surface, live = true }: ExcludeHostActionProps) {
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const target = host === null || host === undefined ? '' : normalizeHost(host);
 
@@ -63,8 +73,11 @@ export function ExcludeHostAction({ api, host, surface }: ExcludeHostActionProps
         message:
           `${target} is now excluded. New TLS connections to it are tunnelled undecrypted from ` +
           `here on — this flow is unchanged, and connections the browser already has open stay ` +
-          `decrypted until they close. Reload the page to see it take effect. Remove it again ` +
-          `under Settings.`,
+          `decrypted until they close. ` +
+          (live
+            ? `Reload the page to see it take effect. `
+            : `This is a recorded session, so nothing here will change. `) +
+          `Remove it again under Settings.`,
       });
     } catch (cause) {
       setPhase({

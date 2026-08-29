@@ -256,6 +256,11 @@ export function FlowDetail({
             misbehaving — and it is the only place a session flow's host is
             actionable at all. */}
         <ExcludeHostAction
+          // onUnmask is supplied only for live ring-buffer flows (REQ
+          // CAP-043), so its presence is already this component's live-versus-
+          // recorded signal. Reusing it beats inventing a second one that
+          // could disagree with the first.
+          live={onUnmask !== undefined}
           api={api}
           host={request?.host ?? full.passthrough?.host}
           surface="flow detail"

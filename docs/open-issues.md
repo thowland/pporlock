@@ -527,3 +527,56 @@ and the fallback. Changing it changes the decision, and would be exactly the
 coverage laundering G4 exists to prevent. What this needs is identifying which
 five flows are unattributed and whether they are a class the mechanism cannot
 reach, which is an OI-2 question and not a test-tuning one.
+
+---
+
+## OI-21 — the throughput ceiling is mitmproxy's, and it is one core
+
+**Found:** a user reporting that some sites overwhelm the system. **OPEN** as a
+scoping question; the measurement is done and `make bench-saturation` keeps it
+reproducible.
+
+`bench.run` measures serial added latency (PRF-001/002). Nothing measured
+concurrency, which is what a heavy page actually produces — a hundred
+subresources in flight at once. Measured against the fixture origin on a
+14-core machine:
+
+| | peak rps | p50 @ 32 clients |
+|---|---|---|
+| direct, no proxy | ~3200 | 1.3 ms |
+| bare `mitmdump`, no pporlock addon | ~730 | 42 ms |
+| pporlock, real daemon | ~630 | 47 ms |
+
+Throughput plateaus at ~680 rps and stops responding to concurrency entirely
+(677 rps at 16 clients, 678 at 32) while p50 grows linearly with client count —
+the signature of a saturated single-threaded server. Under load the daemon sits
+at **~85% of one core with thirteen idle**, because mitmproxy is a
+single-threaded asyncio program. More cores do nothing.
+
+**This closes the "can we compile it" question.** Between 86% and 96% of the
+achievable ceiling is already reached (the range is capture: an addon-only
+harness with a `NullSink` measures ~96%, a real daemon with the real `RingSink`
+~86%). A perfect compiler that made every line of pporlock's Python free would
+lift ~630 rps to ~730. mypyc or Cython would win a fraction of that, against
+OI-12's finding that the engine decision path is already 0.004 ms/flow. The
+optimisation target is not this codebase.
+
+**What the user is feeling is probably queueing, not throughput.** 680 rps is
+ample for browsing; 47 ms p50 at 32 concurrent requests is not, and a page with
+200 subresources exceeds that concurrency instantly.
+
+**Options, none free:**
+
+1. *Reduce per-flow work in capture.* The honest ~14% — body caps copy up to
+   512 KiB per flow, the ring holds it, and the SSE hub fans out per flow. Real,
+   bounded, and does not touch the ceiling.
+2. *Run several mitmproxy instances.* The only thing that uses the other
+   thirteen cores. It fragments capture across processes, so the ring, sessions
+   and provenance would all need to merge — a substantial architectural change
+   to a system whose single-process model is load-bearing.
+3. *Restate the goal.* Consistent with OI-12's conclusion: PRF-001 and this are
+   the same finding on two axes, and both say the budget describes an
+   architecture the project did not choose.
+
+Do not close this by tuning. Anything claiming a speed-up should show it on
+`make bench-saturation`, against the baseline row rather than in isolation.

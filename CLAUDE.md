@@ -29,7 +29,7 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 18 issues — 12 closed (one partly), 6 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 19 issues — 12 closed (one partly), 7 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 
@@ -97,6 +97,7 @@ make test / coverage / lint / security
 make e2e         # Playwright — web headless, extension headed (MV3 requires it)
 make fixtures    # fixture origin standalone
 make bench       # PRF-001/002 harness
+make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
 **Current baseline:** daemon 1916, web 494, extension 245, mcp 134, E2E 28. Coverage: daemon 93%, `engine/` 96.8%, web 94.5%, extension 93%, mcp 98.9%.
@@ -188,7 +189,7 @@ Standing rules:
 - **OI-1** (Sprint 6) — Private Network Access for extension→loopback. Resolved; HTTP control channel works.
 - **OI-2** (Sprint 6) — tab attribution needs the optional `<all_urls>` grant; coverage is 0% without it. **Everything consuming `tab_id` must tolerate `null`**, and any feature keyed on it needs a fallback — the in-page banner needed one.
 
-Open issues live in `docs/open-issues.md`. Currently open: OI-6, OI-10 (remaining half), OI-12, OI-13, OI-15, OI-20.
+Open issues live in `docs/open-issues.md`. Currently open: OI-6, OI-10 (remaining half), OI-12, OI-13, OI-15, OI-20, OI-21.
 
 **Not implemented:** MOD-006 (module export/import archive, Should). PXY-053 (WebSocket frame modification) is correctly out of scope — PXY-051 says frames shall not be modifiable in v1, and PXY-052 reserved the `ws_` namespace so adding it later is additive.
 

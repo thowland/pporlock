@@ -332,9 +332,15 @@ Two signatures that are not what you would guess:
 - **`ctx.stub_for(dest, request)`** — the request is required, because the
   Accept-header fallback needs it when `Sec-Fetch-Dest` is absent.
 
-**`ctx.store_*` is in-memory and per-module.** It does not survive a daemon
-restart, and it is not shared between modules. For the pin module that is the
-right lifetime — a pin you cannot clear by restarting would be a trap.
+**`ctx.store_*` is persistent and per-module** (REQ MOD-022). It is SQLite
+backed by `~/.pporlock/module-store.db`, with a write-through in-memory cache so
+a read never touches disk on the proxy's event loop. It survives a daemon
+restart and is not shared between modules.
+
+That is worth knowing before you rely on it either way. For `pin` it means a
+pinned response outlives the restart you were counting on to clear it — use
+`ctx.store_delete` or a versioned key if you want a shorter lifetime. Note also
+that deleting a module does **not** delete its store.
 
 ---
 

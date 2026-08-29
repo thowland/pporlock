@@ -445,8 +445,9 @@ def on_request(request, ctx):
     )
 ```
 
-`ctx.store_*` is in-memory and per-module, so a restart clears the pin. That is
-the right lifetime: a pin you could not clear by restarting would be a trap.
+`ctx.store_*` is **persistent** and per-module (REQ MOD-022) — SQLite behind a
+write-through cache, so the pin outlives a daemon restart. If you want it gone,
+`ctx.store_delete` it; restarting will not do it for you.
 Built step by step in
 [the Python tutorial](tutorial-python-module.md).
 

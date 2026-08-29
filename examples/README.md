@@ -1,6 +1,6 @@
 # Example modules
 
-Eight modules covering every action and both authoring tiers. They are meant to
+Nine modules covering every action and both authoring tiers. They are meant to
 be read as much as run — each one carries the reasoning for its choices in
 comments, including the choices that are not obvious.
 
@@ -18,6 +18,7 @@ every page you load.
 | [`css-tamper`](modules/css-tamper/) | 60 | A user stylesheet served from `assets/` via `map_local` |
 | [`fault-lab`](modules/fault-lab/) | 70 | Python `on_request`, `short_circuit`, and durable state in `ctx.store` |
 | [`ws-inspect`](modules/ws-inspect/) | 80 | `on_websocket_message` — read-only frame inspection |
+| [`gpc-audit`](modules/gpc-audit/) | 90 | `on_report` — sends a Global Privacy Control signal, then audits the cookies set anyway |
 
 Priorities do not collide, because the library is meant to be enabled together
 and priority is what orders one module's rules against another's.
@@ -58,16 +59,16 @@ jail. `module.py` runs in the proxy process with your full user privileges. Dry
 run executes it too, by design — so dry-running an unread module is not safer
 than enabling it.
 
-Three of these ship Python: `cookie-banners`, `fault-lab`, `ws-inspect`. Read
+Four of these ship Python: `cookie-banners`, `fault-lab`, `ws-inspect`, `gpc-audit`. Read
 them. They are short, and reading them is the habit worth forming before you
 read one an agent wrote.
 
-Three of them weaken a page's own protections when enabled, and pporlock will
+Four of them weaken a page's own protections when enabled, and pporlock will
 say so in the page and in provenance:
 
 - `local-bundle` removes subresource-integrity attributes
 - `cookie-banners` and `css-tamper` inject content into the document
-- `header-lab` has a CSP/HSTS rule shipped **disabled** — enable it per host, never globally
+- `header-lab` ships an HSTS-dropping rule **disabled** (`drop-hsts-for-local-testing`) — enable it per host, never globally
 
 ---
 

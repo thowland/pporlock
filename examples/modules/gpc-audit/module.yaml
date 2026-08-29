@@ -1,0 +1,128 @@
+name: gpc-audit
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Send a Global Privacy Control signal, then record which cookies get set
+  anyway. GPC is a legal request not to sell or share personal information
+  (CCPA, and recognised under GDPR in some jurisdictions) — it is not a
+  technical block, and a site is free to ignore it. That gap is the point of
+  this module: it asks, and then it audits the answer.
+author: pporlock examples
+enabled: false
+priority: 90
+
+config:
+  # Cookie names, exact or by prefix, that are recognisably advertising or
+  # cross-site tracking. Deliberately conservative and deliberately incomplete:
+  # a name not on either list is reported as `unclassified`, never as
+  # `essential`. Guessing "essential" would launder the finding this module
+  # exists to make — and the first version of this file did exactly that, see
+  # the note under essential_prefixes.
+  #
+  # Checked before essential_prefixes, so a more specific ad prefix beats a
+  # broader essential one.
+  ad_prefixes:
+    # Google: the `3P` in these names means third-party. They are the
+    # cross-site half of a signed-in Google session and are what personalised
+    # advertising is keyed on.
+    - "__Secure-3P"
+    - "NID"
+    - "IDE"
+    - "DSID"
+    - "ANID"
+    - "1P_JAR"
+    - "AID"
+    - "TAID"
+    # Google Analytics / Ads tags
+    - "_ga"
+    - "_gid"
+    - "_gac_"
+    - "_gcl_"
+    - "__utm"
+    # Meta
+    - "_fbp"
+    - "_fbc"
+    # Microsoft / Bing / Clarity
+    - "MUID"
+    - "_uetsid"
+    - "_uetvid"
+    - "_clck"
+    - "_clsk"
+    # X/Twitter, LinkedIn, Reddit, TikTok, Pinterest, Snap
+    - "personalization_id"
+    - "bcookie"
+    - "bscookie"
+    - "li_sugr"
+    - "_rdt_uuid"
+    - "_ttp"
+    - "_tt_enable_cookie"
+    - "_pin_unauth"
+    - "_scid"
+    # Product analytics and session replay — not advertising, but the same
+    # cross-visit identification an audit should surface.
+    - "_hj"
+    - "ajs_"
+    - "amplitude_"
+    - "mp_"
+    - "optimizely"
+    - "__qca"
+    - "test_cookie"
+
+  # Plausibly required for the site to function. Kept short on purpose.
+  #
+  # NOTE: `__Secure-` and `__Host-` are NOT here, and must not be. They are
+  # cookie *security prefixes* — they constrain how a cookie may be set, and
+  # say nothing about what it is for. Treating them as essential classified
+  # Google's `__Secure-3PSIDCC` and `__Secure-3PSIDTS` as essential, which is
+  # backwards: those are the third-party tracking cookies. A prefix that
+  # describes transport is not evidence about purpose.
+  essential_prefixes:
+    - "__Secure-1P"     # first-party half of a signed-in session
+    - "SIDCC"           # Google session-integrity, first-party
+    - "csrf"
+    - "XSRF"
+    - "session"
+    - "PHPSESSID"
+    - "JSESSIONID"
+    - "sid_"
+
+rules:
+  # The signal itself. Sent on every request, because GPC is a property of the
+  # user agent's owner, not of a particular site — sending it selectively would
+  # weaken the claim that it represents a standing preference.
+  - name: send-gpc
+    action: headers
+    match:
+      host: "*"
+    request:
+      set:
+        Sec-GPC: "1"
+        # DNT is the older, largely-ignored signal. Sent alongside because it
+        # costs nothing and a few sites still honour it; GPC is the one with
+        # legal weight.
+        DNT: "1"
+
+  # The GPC spec defines *two* signals, and a header only satisfies one of them.
+  # Sites overwhelmingly test the DOM property — globalprivacycontrol.org's own
+  # checker is `!!navigator.globalPrivacyControl` — so a proxy that sends only
+  # the header is reported as "GPC not enabled" by the site that defines GPC.
+  #
+  # A proxy cannot set a DOM property. It can inject the script that does.
+  - name: expose-gpc-to-javascript
+    action: body
+    match:
+      content_type: "text/html"
+    transform:
+      kind: inject_script
+      position: head_start          # before any page script can read it
+      reuse_nonce: true             # honour the page's CSP rather than stripping it
+      inline: |
+        (function () {
+          try {
+            if (!('globalPrivacyControl' in navigator)) {
+              Object.defineProperty(navigator, 'globalPrivacyControl', {
+                value: true, configurable: true, enumerable: true
+              });
+            }
+          } catch (e) { /* never break a page over a privacy signal */ }
+        })();

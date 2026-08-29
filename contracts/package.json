@@ -15,5 +15,15 @@
     "ajv-formats": "^3.0.1",
     "json-schema-to-typescript": "^15.0.3",
     "yaml": "^2.6.1"
+  },
+  "license": "GPL-3.0-or-later",
+  "author": "Tim Howland <th@wdogsystems.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thowland/pporlock.git"
+  },
+  "homepage": "https://github.com/thowland/pporlock",
+  "bugs": {
+    "url": "https://github.com/thowland/pporlock/issues"
   }
 }

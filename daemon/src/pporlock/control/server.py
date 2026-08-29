@@ -17,7 +17,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from ..config import Config, assert_loopback
-from .auth import OriginPolicy, PairingWindow, TokenStore
+from .auth import PAIRED_FILENAME, OriginPolicy, PairingWindow, TokenStore
 
 if TYPE_CHECKING:
     from .app import ControlApp
@@ -88,6 +88,10 @@ def build_state(config: Config) -> tuple[TokenStore, OriginPolicy, PairingWindow
     from pathlib import Path
 
     tokens = TokenStore(Path(config.state_dir))
-    policy = OriginPolicy(config.control.listen_host, config.control.listen_port)
+    policy = OriginPolicy(
+        config.control.listen_host,
+        config.control.listen_port,
+        state_path=Path(config.state_dir) / PAIRED_FILENAME,
+    )
     pairing = PairingWindow()
     return tokens, policy, pairing

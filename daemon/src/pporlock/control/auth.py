@@ -42,6 +42,11 @@ VALID_CLIENTS = frozenset({"ui", "extension", "mcp", "cli"})
 
 EXTENSION_ORIGIN = re.compile(r"^chrome-extension://[a-p]{32}$")
 
+#: Sidecar holding the paired extension's id. Lives in ``state_dir`` beside
+#: ``token`` and ``module-state.json``, so it moves with the state directory
+#: rather than being pinned at import (OI-10).
+PAIRED_FILENAME = "paired-extension"
+
 PAIRING_TTL_SECONDS = 120
 PAIRING_CODE_WORDS = 4
 
@@ -121,15 +126,61 @@ def bearer_token(authorization: str | None) -> str | None:
 class OriginPolicy:
     """Which origins may talk to the control server."""
 
-    __slots__ = ("_extension_id", "_self_origins")
+    __slots__ = ("_extension_id", "_self_origins", "state_path")
 
-    def __init__(self, host: str, port: int, extension_id: str | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        extension_id: str | None = None,
+        state_path: Path | None = None,
+    ) -> None:
         self._self_origins = {
             f"http://{host}:{port}",
             f"http://localhost:{port}",
             f"http://127.0.0.1:{port}",
         }
+        self.state_path = state_path
         self._extension_id = extension_id
+        if extension_id is None:
+            self._restore()
+
+    def _restore(self) -> None:
+        """Reload the paired extension across a restart (OI-19).
+
+        Pairing was memory-only, so every daemon restart silently revoked the
+        extension: it still held a valid bearer token — that *is* persisted —
+        but its origin was no longer allowed, so every call came back 403
+        "origin not permitted". The daemon is a launchd agent that restarts at
+        login, which made this a routine occurrence rather than an edge case.
+
+        The stored value is re-validated rather than trusted. It is not secret —
+        an extension id is in the Origin header of every request it makes and on
+        chrome://extensions — but this file decides which origin may drive the
+        control API, so a hand-edited or corrupted one must not be able to
+        widen the allowlist. Anything that is not a well-formed id is discarded
+        and the daemon starts unpaired, which is recoverable with `pporlock
+        pair`; refusing to start would not be.
+        """
+        if self.state_path is None or not self.state_path.is_file():
+            return
+        try:
+            stored = self.state_path.read_text().strip()
+        except OSError:
+            return
+        if EXTENSION_ORIGIN.match(f"chrome-extension://{stored}"):
+            self._extension_id = stored
+
+    def _remember(self) -> None:
+        """Persist the pairing. Best-effort: a failure here must not fail the
+        pairing itself, which has already succeeded in memory."""
+        if self.state_path is None or self._extension_id is None:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(self._extension_id)
+        except OSError:
+            return
 
     @property
     def extension_id(self) -> str | None:
@@ -140,6 +191,7 @@ class OriginPolicy:
         if not EXTENSION_ORIGIN.match(origin):
             raise PairingError(f"not a chrome extension origin: {origin!r}", origin=origin)
         self._extension_id = origin.removeprefix("chrome-extension://")
+        self._remember()
         return self._extension_id
 
     def allows(self, origin: str | None) -> bool:

@@ -64,6 +64,14 @@ setup:
 contracts:
 	cd $(CONTR) && $(NPM) run --silent validate
 	cd $(CONTR) && $(NPM) run --silent generate
+	cd $(CONTR) && $(NPM) run --silent docs
+
+.PHONY: docs
+docs:
+	@# REQ DOC-004. The API reference and the rule schema reference are
+	@# rendered from contracts/, not maintained beside it — a hand-written
+	@# copy of a machine-readable contract is a copy that will disagree.
+	cd $(CONTR) && $(NPM) run --silent docs
 
 .PHONY: daemon
 daemon:
@@ -144,6 +152,8 @@ lint:
 	@echo "==> G5 tsc + eslint + prettier"
 	cd $(WEB) && $(NPM) run --silent typecheck && $(NPM) run --silent lint && $(NPM) run --silent format:check
 	cd $(EXT) && $(NPM) run --silent typecheck && $(NPM) run --silent lint && $(NPM) run --silent format:check
+	@echo "==> G5 generated documentation is current (REQ DOC-004)"
+	cd $(CONTR) && $(NPM) run --silent docs:check
 	@echo "G5 PASS — lint clean"
 
 .PHONY: format

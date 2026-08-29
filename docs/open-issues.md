@@ -230,7 +230,18 @@ never being reached) or it should leave the taxonomy.
 
 ## OI-14 — three routes the OpenAPI does not describe
 
-**Found:** Sprint 16, by TST-005.
+**Found:** Sprint 16, by TST-005. **CLOSED.**
+
+All three are declared now: `GET /rules` and `PUT /rules` (including the 400
+that means a rule did not compile and the running rules are therefore
+unchanged), and `POST /pair/begin`. `POST /flows/{flow_id}/suggest-rule` gained
+the `400` it was already answering.
+
+The `UNDECLARED_ROUTES` allowlist and the test that failed once the OpenAPI
+caught up did their job — the exemption could not quietly become permanent,
+which is the only reason an allowlist is ever acceptable.
+
+### Original finding
 
 - `GET /rules` and `PUT /rules` — served, implemented, tested, used by the web
   UI's rule editor, described in SPEC-0 §6, absent from `contracts/openapi.yaml`.

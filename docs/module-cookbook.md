@@ -608,4 +608,6 @@ achieved what you meant is a separate question, and only the page can answer it.
 - [Troubleshooting](troubleshooting.md) — when the page is subtly wrong
 - [Worked example](worked-example.md) — one problem end to end
 - [`examples/modules/`](../examples/modules/) — the eight modules this file draws on
+- [Rule and manifest schema reference](rule-schema.md) — every field, generated from the JSON Schema
+- [Control API reference](api-reference.md) — every route, generated from the OpenAPI spec
 - `docs/spec-0-contracts.md` §5 and §8 — the normative rule schema and module API

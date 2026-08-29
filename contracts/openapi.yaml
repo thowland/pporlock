@@ -23,6 +23,7 @@ tags:
   - name: state
   - name: flows
   - name: modules
+  - name: rules
   - name: profiles
   - name: sessions
   - name: config
@@ -163,6 +164,14 @@ paths:
                     description: The module the rule would be added to, if known.
                   flow_id: { type: string }
                   intent: { type: string }
+        '400':
+          description: |
+            `intent` was missing or not one of the four supported values. The
+            route validates it and answers 400; declaring only 200 left a
+            generated client with no error case (docs/open-issues.md OI-14).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /events:
     get:
@@ -627,6 +636,95 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/AuditEntry' }
                   next_cursor: { type: [string, 'null'] }
+
+  /pair/begin:
+    post:
+      tags: [extension]
+      summary: Open a pairing window and return the code (REQ API-012)
+      description: |
+        Authenticated, unlike `/pair` itself: only something that can already
+        read the token — the CLI or the web UI — may open a window. That is
+        what makes the code safe to read aloud. It is worthless without a human
+        having just asked for it, and it expires.
+
+        `pporlock pair` is this route.
+      responses:
+        '200':
+          description: A pairing window is open
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, expires_in]
+                properties:
+                  code: { type: string }
+                  expires_in:
+                    type: number
+                    description: Seconds until the window closes.
+
+  /rules:
+    get:
+      tags: [rules]
+      summary: The rules currently in force, as loaded (REQ API-022)
+      description: |
+        The rules the running proxy is evaluating, which is the union of
+        `rules.yaml` and every active module's rules. Disabled rules are not
+        included: this is what is in force, not what is on disk.
+      responses:
+        '200':
+          description: The active rule set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules, count]
+                properties:
+                  count: { type: integer }
+                  rules:
+                    type: array
+                    items: { $ref: './schemas/rule.schema.json' }
+    put:
+      tags: [rules]
+      summary: Replace the rule set without restarting the proxy (REQ MOD-004)
+      description: |
+        The new set is compiled before it is swapped in, so a rule that does not
+        compile leaves the running rules untouched rather than emptying them —
+        a 400 here means nothing changed.
+
+        The swap replaces an immutable snapshot, so a flow already in flight
+        finishes against the rules it started with.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rules]
+              properties:
+                rules:
+                  type: array
+                  items: { $ref: './schemas/rule.schema.json' }
+                module:
+                  type: string
+                  description: Attribution for these rules in provenance. Defaults to "api".
+      responses:
+        '200':
+          description: The rule set now in force
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules, count]
+                properties:
+                  count: { type: integer }
+                  rules:
+                    type: array
+                    items: { $ref: './schemas/rule.schema.json' }
+        '400':
+          description: A rule did not compile. The running rules are unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /pair:
     post:

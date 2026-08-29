@@ -25,6 +25,7 @@ function detail(overrides: Partial<ModuleDetail> = {}): ModuleDetail {
     priority: 100,
     state: 'loaded',
     has_python: true,
+    has_report: false,
     rule_count: 5,
     error: null,
     quarantine: null,

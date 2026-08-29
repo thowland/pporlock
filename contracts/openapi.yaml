@@ -275,6 +275,42 @@ paths:
       responses:
         '204': { description: Deleted }
 
+  /modules/{name}/report:
+    parameters:
+      - { $ref: '#/components/parameters/moduleName' }
+    get:
+      tags: [modules]
+      summary: A module's own report, rendered by the module
+      description: >
+        Modules that accumulate something worth reading — an audit, a tally, a
+        diff — render it themselves through an `on_report` hook, and the daemon
+        serves the result here (OI-29). Served from the control origin rather
+        than through the proxy, because a report about browsing is most wanted
+        when you are not browsing, and a URL that only resolves inside
+        intercepted traffic cannot be linked to from the UI.
+
+
+        The body is module-authored, so it is returned under a `sandbox`
+        Content-Security-Policy — a unique opaque origin with no script and no
+        same-origin access to the control API. Module code is trusted and could
+        reach the token by other means; this refuses to add a convenient path
+        rather than claiming to be a boundary.
+
+
+        404 when the module does not exist or declares no `on_report`. 502 when
+        the module raises, or returns a content type outside text/html,
+        text/plain, text/csv and application/json.
+      responses:
+        '200':
+          description: The report, as the module rendered it
+          content:
+            text/html: { schema: { type: string } }
+            text/plain: { schema: { type: string } }
+            text/csv: { schema: { type: string } }
+            application/json: { schema: {} }
+        '404': { description: No such module, or it provides no report }
+        '502': { description: The module raised, or returned an unusable type }
+
   /modules/reload:
     post:
       tags: [modules]
@@ -955,6 +991,9 @@ components:
           type: string
           enum: [loaded, disabled, quarantined, load_error]
         has_python: { type: boolean }
+        has_report:
+          type: boolean
+          description: Whether the module declares an `on_report` hook (OI-29).
         rule_count: { type: integer }
         error: { oneOf: [{ $ref: '#/components/schemas/ModuleError' }, { type: 'null' }] }
         quarantine:

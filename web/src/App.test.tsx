@@ -99,6 +99,7 @@ describe('App', () => {
       priority: 100,
       state: 'loaded',
       has_python: false,
+      has_report: false,
       rule_count: 0,
       error: null,
       quarantine: null,

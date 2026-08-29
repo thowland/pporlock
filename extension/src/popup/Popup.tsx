@@ -388,7 +388,23 @@ export function Popup() {
           open web UI
         </button>
         <span className="spacer" />
-        <span className="sub">{status.version ? `v${status.version}` : ''}</span>
+        <span className="sub" title="extension version / daemon version">
+          {/* Both, labelled. They are built and installed separately, so one
+              number cannot stand for the pair — and the mismatch is worth
+              seeing, because an extension that was rebuilt but not reloaded is
+              the ordinary case during development (OI-24). */}
+          ext {status.extensionVersion}
+          {status.version ? ` · daemon ${status.version}` : ' · daemon —'}
+          {status.version !== null && status.version !== status.extensionVersion ? (
+            <strong
+              className="version-skew"
+              title="the extension and daemon are different versions"
+            >
+              {' '}
+              ⚠
+            </strong>
+          ) : null}
+        </span>
       </div>
     </div>
   );

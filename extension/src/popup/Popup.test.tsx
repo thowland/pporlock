@@ -19,6 +19,7 @@ function status(
     profiles: ['default'],
     counters: { flows: 42, blocked: 3, modified: 1, passthrough: 2 },
     version: '0.1.0',
+    extensionVersion: '0.1.0',
     ...overrides,
   };
 }
@@ -282,5 +283,59 @@ describe('recording from the popup (REQ CAP-025, EXT-023)', () => {
     render(<Popup />);
     await screen.findByText(/pporlock/);
     expect(screen.queryByRole('button', { name: 'record' })).toBeNull();
+  });
+});
+
+/**
+ * Which version is that? — OI-24.
+ *
+ * The footer used to render a bare `v0.1.0`, and it was the *daemon's*, read
+ * from GET /state. The extension's own version never appeared anywhere.
+ *
+ * The two are built and installed separately: the extension is loaded unpacked
+ * and goes stale the moment it is rebuilt without being reloaded, which is the
+ * ordinary case while developing. An unlabelled number then reports the half
+ * that was updated and says nothing about the half that was not — the reader
+ * concludes they are running new code when they are not.
+ */
+describe('version display', () => {
+  it('names both versions, so neither can be mistaken for the other', async () => {
+    render(<Popup />);
+
+    const footer = await screen.findByTitle('extension version / daemon version');
+
+    expect(footer.textContent).toContain('ext 0.1.0');
+    expect(footer.textContent).toContain('daemon 0.1.0');
+  });
+
+  it('flags a mismatch, because that is the case worth noticing', async () => {
+    // A rebuilt-but-not-reloaded extension against a fresh daemon. Nothing else
+    // in the UI would reveal it, and it is exactly the state that makes a fix
+    // look like it did not work.
+    sendMessage.mockResolvedValue(status({ version: '0.2.0', extensionVersion: '0.1.0' }));
+    render(<Popup />);
+
+    expect(
+      await screen.findByTitle('the extension and daemon are different versions'),
+    ).toBeTruthy();
+  });
+
+  it('does not flag a match', async () => {
+    render(<Popup />);
+    await screen.findByTitle('extension version / daemon version');
+
+    expect(screen.queryByTitle('the extension and daemon are different versions')).toBeNull();
+  });
+
+  it('says the daemon is unknown rather than showing nothing', async () => {
+    // Absent is not zero. A blank slot reads as "no version", which is wrong —
+    // the extension has one and is telling you the daemon did not answer.
+    sendMessage.mockResolvedValue(status({ version: null, daemonReachable: false }));
+    render(<Popup />);
+
+    const footer = await screen.findByTitle('extension version / daemon version');
+
+    expect(footer.textContent).toContain('ext 0.1.0');
+    expect(footer.textContent).toContain('daemon —');
   });
 });

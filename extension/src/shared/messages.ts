@@ -26,7 +26,18 @@ export interface StatusReply {
   controlLevel: string;
   profiles: string[];
   counters: { flows: number; blocked: number; modified: number; passthrough: number } | null;
+  /**
+   * The **daemon's** version, from GET /state. Null when it is unreachable.
+   *
+   * Named for its source because the popup shows it beside the extension's own,
+   * and the two are separately built and separately installed — the extension
+   * is loaded unpacked and goes stale the moment it is rebuilt without being
+   * reloaded. An unlabelled version number is then actively misleading: it
+   * reports the half that was updated (OI-24).
+   */
   version: string | null;
+  /** This extension's own version, from its manifest. Always known. */
+  extensionVersion: string;
 }
 
 export interface ActionReply {

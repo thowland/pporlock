@@ -676,3 +676,35 @@ uses. All returned 200. Their certificates cover both apex and `www`, and
 neither publishes an ECH config. The `https://vumerity.com:443/` redirect comes
 from the origin and is byte-identical with and without the proxy. If it recurs,
 the flow table will now say why — which is the actual deliverable here.
+
+---
+
+## OI-24 — the popup showed one version, and it was the other one's
+
+**Found:** a user asking whether the reported version was stale. **CLOSED**
+(both versions shown, labelled, with a mismatch marker).
+
+The popup footer rendered a bare `v0.1.0`. That number came from
+`GET /state` — it was the **daemon's** version. The extension's own version
+appeared nowhere in the UI.
+
+The version itself was correct: `0.1.0` has been the declared version of the
+daemon, MCP server, web UI and extension since Sprint 0 (`6b5492c`) and has
+never been bumped in any of them. What moves is the sprint tags, which is
+probably what made it look stale.
+
+The real problem is what the number could not tell you. The four components are
+built and installed separately, and the extension is loaded unpacked — so it
+goes stale the moment it is rebuilt without being reloaded, which is the
+ordinary case while developing. In that state the footer reports the half that
+was updated and says nothing about the half that was not, so a fix that has not
+actually been loaded looks like a fix that did not work.
+
+The footer now reads `ext 0.1.0 · daemon 0.1.0`, with a warning marker when
+they differ and `daemon —` when it is unreachable. Absent is shown as unknown
+rather than blank: a missing daemon version is a fact worth stating, not an
+empty slot.
+
+**Not done: nothing was bumped.** Choosing a version scheme and deciding what a
+release means here is a separate decision, and inventing one to make a number
+look fresher would be the wrong kind of fix.

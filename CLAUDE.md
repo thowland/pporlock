@@ -29,7 +29,7 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 21 issues — 14 closed (one partly), 7 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 22 issues — 15 closed (one partly), 7 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 
@@ -100,7 +100,7 @@ make bench       # PRF-001/002 harness
 make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
-**Current baseline:** daemon 1923, web 494, extension 256, mcp 134, E2E 28. Coverage: daemon 93%, `engine/` 96.8%, web 94.5%, extension 93%, mcp 98.9%.
+**Current baseline:** daemon 1923, web 494, extension 260, mcp 134, E2E 28. Coverage: daemon 93%, `engine/` 96.8%, web 94.5%, extension 93%, mcp 98.9%.
 
 If a number drops, something was deleted. Find out what.
 

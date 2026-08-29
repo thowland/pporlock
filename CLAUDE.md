@@ -29,15 +29,40 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 22 issues — 15 closed (one partly), 7 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 23 issues — 16 closed (one partly), 7 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
+
+### Versioning
+
+Semver, one source: the `VERSION` file at the repository root. Everything else
+is generated from it and `make version-check` fails the gate on drift.
+
+| Change | Bump |
+|---|---|
+| A significant merge — a behaviour fix, a new capability, a contract change | `make bump-minor` |
+| A bundle of small ones — docs, tests, tidying | `make bump-patch` |
+
+**Bump on the branch, before the merge.** The number exists so a running system
+can be identified: "which version are you on" is the first question of every
+diagnosis, and it is worthless if the answer has been 0.1.0 since Sprint 0 —
+which it was, through eighteen sprints, until OI-25.
+
+`make version-sync` propagates; `make version` prints it. Never edit a
+`pyproject.toml`, `package.json` or the extension manifest version by hand.
+Python reads its version from installed package metadata, so there is no
+literal to update.
+
+A prerelease (`0.3.0-rc.1`) is fine in `VERSION`. Chrome cannot store one, so
+the manifest gets the numeric core and the full string goes in `version_name` —
+handled automatically.
 
 ### Generated — never hand-edit
 
 | File | Regenerate with |
 |---|---|
 | `contracts/generated/types.ts` | `make contracts` |
+| every version field (`pyproject.toml`, `package.json`, the extension manifest) | `make version-sync` |
 | `docs/api-reference.md` | `make docs` |
 | `docs/rule-schema.md` | `make docs` |
 
@@ -97,10 +122,11 @@ make test / coverage / lint / security
 make e2e         # Playwright — web headless, extension headed (MV3 requires it)
 make fixtures    # fixture origin standalone
 make bench       # PRF-001/002 harness
+make version     # print it   /  version-sync, version-check, bump-minor, bump-patch
 make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
-**Current baseline:** daemon 1923, web 494, extension 260, mcp 134, E2E 28. Coverage: daemon 93%, `engine/` 96.8%, web 94.5%, extension 93%, mcp 98.9%.
+**Current baseline:** daemon 1936, web 494, extension 260, mcp 134, E2E 28. Coverage: daemon 93%, `engine/` 96.8%, web 94.5%, extension 93%, mcp 98.9%.
 
 If a number drops, something was deleted. Find out what.
 

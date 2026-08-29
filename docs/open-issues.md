@@ -708,3 +708,42 @@ empty slot.
 **Not done: nothing was bumped.** Choosing a version scheme and deciding what a
 release means here is a separate decision, and inventing one to make a number
 look fresher would be the wrong kind of fix.
+
+---
+
+## OI-25 — one version, declared nine times and checked nowhere
+
+**Found:** following OI-24. **CLOSED** (single source, generated everywhere,
+gated).
+
+The version appeared independently in nine places: `daemon/pyproject.toml`,
+`mcp/pyproject.toml`, two `package.json`s, the extension manifest, and four
+Python literals. Nothing checked that they agreed, and predictably nothing ever
+moved them — every one still said `0.1.0` from Sprint 0 (`6b5492c`) while
+eighteen sprints and a dozen fixes shipped.
+
+That is not a cosmetic problem. "Which version are you on" is the first
+question of every diagnosis, and a number that has never changed cannot answer
+it. It is the same failure as OI-24 one level down: the system knew what it was
+and had no way to say so.
+
+`VERSION` at the repository root is now the source. `scripts/version.py`
+propagates it, `make version-check` fails the gate on drift, and `bump-minor` /
+`bump-patch` move it. Python no longer carries a literal at all — the daemon and
+MCP server read their own installed distribution metadata, so the number
+reported at runtime is the version of the package actually installed rather
+than a string someone remembered to edit.
+
+**Policy** (the user's, recorded so it is not re-derived): a significant merge
+bumps the minor; a bundle of small ones bumps the patch. Bump on the branch,
+before the merge.
+
+**One trap handled rather than discovered later.** A Chrome manifest `version`
+must be one to four dotted integers, so `0.3.0-rc.1` is not a legal value and
+an extension carrying one fails to load — at install time, far from the change
+that caused it. The manifest takes the numeric core and the full semver goes in
+`version_name`, which is the field Chrome provides for this and which the popup
+now prefers.
+
+Set to **0.2.0**. The eighteen sprints and everything before this are 0.1.0 as
+a matter of record; retroactively renumbering merged history would be fiction.

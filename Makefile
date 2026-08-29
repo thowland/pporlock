@@ -44,6 +44,30 @@ help:
 	@echo "  bench        PRF-001/002 harness"
 	@echo "  clean"
 
+# ---------------------------------------------------------------- version ---
+# One source of truth: the VERSION file. Everything else is generated from it
+# and `version-check` fails the gate on drift (OI-25).
+.PHONY: version
+version:
+	@python3 scripts/version.py show
+
+.PHONY: version-sync
+version-sync:
+	@python3 scripts/version.py sync
+
+.PHONY: version-check
+version-check:
+	@python3 scripts/version.py check
+
+# A significant change bumps the minor; a bundle of small ones bumps the patch.
+.PHONY: bump-minor
+bump-minor:
+	@python3 scripts/version.py bump minor
+
+.PHONY: bump-patch
+bump-patch:
+	@python3 scripts/version.py bump patch
+
 # ------------------------------------------------------------------ setup ---
 .PHONY: setup
 setup:
@@ -141,6 +165,8 @@ endif
 # -------------------------------------------------------------- G5: lint ---
 .PHONY: lint
 lint:
+	@echo "==> G5 version"
+	python3 scripts/version.py check
 	@echo "==> G5 ruff"
 	cd $(DAEMON) && $(UV) run ruff format --check . && $(UV) run ruff check .
 	cd $(MCP)    && $(UV) run ruff format --check . && $(UV) run ruff check .

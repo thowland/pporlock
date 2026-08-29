@@ -1452,3 +1452,86 @@ Every one of these four bugs survived a green suite of ~1800 tests. Each was
 found by *using* the system as a module author would, rather than by testing it
 as its authors did. Examples are not documentation garnish here; they are the
 only thing that exercises the public API the way a stranger will.
+
+---
+
+## Sprint 18 — Gap closure
+
+**Requirements:** PXY-016, DOC-004 · **Issues:** OI-8, OI-9, OI-14
+**1916 daemon tests, 494 web, 22 E2E**
+
+The tail the plan left behind: the one unmet Must, one Should with a working
+backend and no UI, and three recorded issues.
+
+### PXY-016 — exclude this host, one click from any flow
+
+The action sits in the flow-table row and the detail panel, host pre-filled. The
+confirmation states the consequence rather than asking "are you sure": the
+connection is tunnelled undecrypted, so you keep seeing *that* it happened and
+lose everything about its content, and it applies to new connections only.
+Settings gains an exclusions list; removing an entry the user added is one click,
+removing a shipped default takes a second click behind a warning naming why that
+default exists.
+
+**The wire shape was checked rather than assumed, and it mattered.** `GET` and
+`PUT /exclusions` are both an envelope — `{"entries": [...]}` — and
+`put_exclusions` reads `body.get("entries", [])`. **A client sending a bare array
+would have been read as empty and silently deleted all 33 shipped exclusions**,
+every one of which exists because interception breaks that host. Pinned in
+`wire-shapes.test.ts`, which stubs `fetch` rather than the client, and proven end
+to end by an E2E that excludes a host and then asks the daemon what it stored.
+
+### DOC-004 — the contract published as documentation
+
+`docs/api-reference.md` and `docs/rule-schema.md` are generated from `contracts/`
+by `make docs`. `make gate` fails on drift and the pre-commit hook rejects a
+hand-edited copy — including the subtler case of regenerating while leaving the
+`contracts/` change out of the commit, which would publish a reference to an API
+the repository does not serve. Both guards were verified to fire before being
+trusted.
+
+### OI-8, OI-9, OI-14
+
+Full detail in `docs/open-issues.md`. The findings worth carrying:
+
+- **Enablement is user state; the manifest is the author's file.** Recording the
+  first in the second means rewriting a file the daemon does not own. A sidecar
+  seeds from the manifest on first sight and wins thereafter — so editing
+  `enabled:` in a manifest after that does nothing, which is a real consequence
+  and is now documented.
+- **`PUT /exclusions` updated the interceptor's list and not the evaluator's.**
+  Separate references, so after any change the two disagreed about which hosts
+  were excluded — and the dry runner stopped predicting live behaviour
+  (REQ CAP-031).
+- **The active profile was never persisted.** A restart returned to `default`, so
+  the startup application of profile exclusions had no effect at all: OI-9's fix
+  would have worked until the first restart and then silently stopped. Closed
+  alongside it.
+- **`/rules` returns a shape its own contract could not accept.** Compiled rules
+  carry `rule_id`, `module` and `priority`; both operations pointed at the
+  authoring schema, which is `unevaluatedProperties: false` on purpose. A
+  `CompiledRule` schema now describes what is served. It cannot `$ref` the
+  authoring one — `unevaluatedProperties` in a referenced schema cannot see an
+  adjacent `allOf` branch's properties — and loosening the authoring schema would
+  have let someone write `priority:` on a rule and have the editor accept it.
+- **An allowlist removed rather than emptied.** `UNDECLARED_ROUTES` and its guard
+  test are gone: an empty allowlist already catches the next undeclared route,
+  while `frozenset() & declared` is vacuously empty forever — the
+  exemption-that-becomes-permanent the guard existed to prevent.
+
+### Remaining after this sprint
+
+Unimplemented: **MOD-006** (module export/import as an archive, Should).
+**PXY-053** (WebSocket frame modification) is correctly out of scope — PXY-051
+says frames shall not be modifiable in v1.
+
+Open issues: OI-6 (no audit tool in MCP), OI-10's remaining half (`state_dir`
+assigned post-construction does not cascade), OI-12 (PRF-001 unmet and not by
+tuning), OI-13 (`SKIPPED_SHORT_CIRCUIT` declared and never emitted), OI-15
+(may a module extend the note taxonomy).
+
+**Sprint 16's G1 exit demo has still never been run on a fresh machine.** Every
+component is verified against a live daemon on a machine that already has the
+toolchain, the CA and a Chrome profile. Given this project's record — three of
+its worst bugs survived a green suite and were found only by running the real
+thing — that remains the highest-value outstanding item.

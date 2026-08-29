@@ -14,6 +14,10 @@
 
 export type ExtErrorCode =
   | 'daemon_unreachable'
+  // Distinct from unreachable on purpose (OI-22): the daemon answered the
+  // socket but not in time. It is probably alive and overloaded, and the
+  // remedy is not the same one.
+  | 'daemon_unresponsive'
   | 'unpaired'
   | 'token_rejected'
   | 'proxy_not_controllable'

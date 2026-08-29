@@ -10,6 +10,7 @@ import type { ExtErrorCode } from './state';
  */
 const ALL_CODES: ExtErrorCode[] = [
   'daemon_unreachable',
+  'daemon_unresponsive',
   'unpaired',
   'token_rejected',
   'proxy_not_controllable',

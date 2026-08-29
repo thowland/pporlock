@@ -8,7 +8,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ControlApi } from '../shared/api';
 import { StateStore } from '../shared/state';
-import { FAILURE_THRESHOLD, HealthMonitor } from './health';
+import {
+  HEALTH_TIMEOUT_MAX_MS,
+  HEALTH_TIMEOUT_MS,
+  HealthMonitor,
+  REFUSED_THRESHOLD,
+  UNRESPONSIVE_THRESHOLD,
+  classifyFailure,
+} from './health';
 import { ProxyController } from './proxy';
 import { FakeProxyApi, FakeStorage } from '../test/fakes';
 
@@ -111,7 +118,7 @@ describe('HealthMonitor', () => {
     const h = harness();
     await h.store.save({ proxyEnabled: true, proxyApplied: true });
 
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
 
     expect(h.proxyApi.clearCalls).toBeGreaterThan(0);
     expect(h.proxyApi.config).toBeNull();
@@ -122,7 +129,7 @@ describe('HealthMonitor', () => {
     const h = harness();
     await h.store.save({ proxyEnabled: true });
 
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
 
     const state = await h.store.load();
     expect(state.proxyEnabled).toBe(false);
@@ -136,7 +143,7 @@ describe('HealthMonitor', () => {
     dead();
     const h = harness();
     await h.store.save({ proxyEnabled: true });
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
 
     const message = (await h.store.load()).lastError?.message ?? '';
     expect(message).toMatch(/working again/i);
@@ -147,7 +154,7 @@ describe('HealthMonitor', () => {
     dead();
     const h = harness();
     await h.store.save({ proxyEnabled: true });
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
     expect(h.trips).toContain('daemon_unreachable');
   });
 
@@ -157,7 +164,7 @@ describe('HealthMonitor', () => {
     dead();
     const h = harness();
     await h.store.save({ proxyEnabled: true });
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
 
     healthy();
     await h.monitor.check();
@@ -233,7 +240,7 @@ describe('HealthMonitor', () => {
     h.proxyApi.failOnClear = true;
     await h.store.save({ proxyEnabled: true });
 
-    for (let i = 0; i < FAILURE_THRESHOLD; i += 1) await h.monitor.check();
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
 
     expect((await h.store.load()).failSafeTrippedAt).not.toBeNull();
     expect(h.trips).toHaveLength(1);
@@ -255,5 +262,200 @@ describe('HealthMonitor', () => {
     h.monitor.start(50);
     h.monitor.stop();
     h.monitor.stop();
+  });
+});
+
+/**
+ * A daemon that is alive and too busy to answer — OI-22.
+ *
+ * `slow()` aborts the way our own timeout does, which is what the extension
+ * sees when the daemon is saturated rather than gone. Before this distinction
+ * existed, that was indistinguishable from a dead daemon and disabled a
+ * perfectly working system. It was diagnosed by the user re-enabling the
+ * extension without restarting the daemon: proof the daemon had been alive the
+ * whole time.
+ */
+function slow(): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(
+      (_url: string, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+            return;
+          }
+          signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted.', 'AbortError')),
+          );
+        }),
+    ),
+  );
+}
+
+describe('classifyFailure', () => {
+  it('reads an aborted fetch as a timeout', () => {
+    expect(classifyFailure(new DOMException('aborted', 'AbortError'))).toBe('timeout');
+  });
+
+  it('reads a transport failure to loopback as refused', () => {
+    // Nothing is listening on a port on this machine.
+    expect(classifyFailure(new TypeError('Failed to fetch'))).toBe('refused');
+  });
+
+  it('defaults an unrecognised error to refused, the stricter path', () => {
+    // The safe direction: an unexpected shape gets the pre-existing behaviour,
+    // so this change can never make the fail-safe trip later than it used to
+    // for a genuinely dead daemon.
+    expect(classifyFailure({ weird: true })).toBe('refused');
+  });
+});
+
+describe('HealthMonitor — slow is not dead (OI-22)', () => {
+  it('does NOT trip at the refused threshold when checks merely time out', async () => {
+    // The regression that disabled a working system. Two timeouts used to be
+    // a trip; a busy daemon now gets more rope than a missing one.
+    vi.useFakeTimers();
+    try {
+      slow();
+      const h = harness();
+      await h.store.save({ proxyEnabled: true });
+
+      for (let i = 0; i < REFUSED_THRESHOLD; i += 1) {
+        const check = h.monitor.check();
+        await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+        await check;
+      }
+
+      expect(h.trips).toEqual([]);
+      expect(h.proxyApi.clearCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still trips eventually, so a wedged daemon is not tolerated forever', async () => {
+    // The fail-safe must remain a fail-safe. More patient, not absent.
+    vi.useFakeTimers();
+    try {
+      slow();
+      const h = harness();
+      await h.store.save({ proxyEnabled: true });
+
+      for (let i = 0; i < UNRESPONSIVE_THRESHOLD; i += 1) {
+        const check = h.monitor.check();
+        await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+        await check;
+      }
+
+      expect(h.trips).toEqual(['daemon_unresponsive']);
+      expect(h.proxyApi.clearCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tell the user to start a daemon that is already running', async () => {
+    // OI-18's lesson applied here: a confident wrong instruction costs more
+    // than none, because it gets followed.
+    vi.useFakeTimers();
+    try {
+      slow();
+      const h = harness();
+      await h.store.save({ proxyEnabled: true });
+      for (let i = 0; i < UNRESPONSIVE_THRESHOLD; i += 1) {
+        const check = h.monitor.check();
+        await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+        await check;
+      }
+
+      const state = await h.store.load();
+      expect(state.lastError?.code).toBe('daemon_unresponsive');
+      expect(state.lastError?.message).not.toContain('pporlock run');
+      expect(state.lastError?.message).toContain('overloaded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a refused daemon still trips at two, unchanged', async () => {
+    // The guard on the guard. Making the busy case patient must not have made
+    // the dead case slower — that would be a regression in the thing the
+    // fail-safe exists for.
+    dead();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
+
+    expect(h.trips).toEqual(['daemon_unreachable']);
+  });
+
+  it('escalates the timeout budget so a later check is more patient', async () => {
+    vi.useFakeTimers();
+    try {
+      slow();
+      const h = harness();
+      await h.store.save({ proxyEnabled: true });
+
+      expect(h.monitor.timeoutBudgetMs).toBe(HEALTH_TIMEOUT_MS);
+
+      const first = h.monitor.check();
+      await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+      await first;
+
+      expect(h.monitor.timeoutBudgetMs).toBe(HEALTH_TIMEOUT_MS * 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('one good answer clears the slate', async () => {
+    // Recovery matters more here than before: a transient stall under load is
+    // now the expected case, not an anomaly.
+    vi.useFakeTimers();
+    try {
+      slow();
+      const h = harness();
+      await h.store.save({ proxyEnabled: true });
+      const check = h.monitor.check();
+      await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+      await check;
+      expect(h.monitor.consecutiveFailures).toBe(1);
+
+      vi.useRealTimers();
+      healthy();
+      expect(await h.monitor.check()).toBe(true);
+      expect(h.monitor.consecutiveFailures).toBe(0);
+      expect(h.monitor.timeoutBudgetMs).toBe(HEALTH_TIMEOUT_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a mixture of timeouts and refusals still terminates', async () => {
+    // Without the total-failure ceiling, alternating causes could reset each
+    // other's counter forever and the fail-safe would never fire.
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+
+    for (let i = 0; i < UNRESPONSIVE_THRESHOLD; i += 1) {
+      if (i % 2 === 0) {
+        vi.useRealTimers();
+        dead();
+        await h.monitor.check();
+      } else {
+        vi.useFakeTimers();
+        slow();
+        const check = h.monitor.check();
+        await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MAX_MS + 1_000);
+        await check;
+        vi.useRealTimers();
+      }
+      if (h.trips.length > 0) break;
+    }
+
+    expect(h.trips.length).toBe(1);
   });
 });

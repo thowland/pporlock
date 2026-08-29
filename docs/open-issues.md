@@ -580,3 +580,51 @@ ample for browsing; 47 ms p50 at 32 concurrent requests is not, and a page with
 
 Do not close this by tuning. Anything claiming a speed-up should show it on
 `make bench-saturation`, against the baseline row rather than in isolation.
+
+---
+
+## OI-22 — the fail-safe could not tell a busy daemon from a dead one
+
+**Found:** by a user, whose extension kept disabling itself on complex sites.
+**CLOSED** (failure kinds distinguished; thresholds and messages split).
+
+`HealthMonitor.check` wrapped the health request in `catch { ok = false }`,
+discarding *why* it failed. Two consecutive failures of any kind tripped the
+fail-safe, cleared Chrome's proxy and told the user to start a daemon that was
+already running.
+
+**The diagnosis came from the user, not the tests:** they could re-enable the
+extension without restarting the daemon. That is only possible if the daemon
+was alive throughout, which makes every one of those trips a false positive.
+
+The two causes are now separate facts:
+
+| | Meaning | Trips after |
+|---|---|---|
+| `refused` | Nothing is listening. Definitive. | 2 — unchanged |
+| `timeout` | No answer within the budget. A saturated daemon is still a live one. | 5, with the budget doubling each time to a 12 s cap |
+
+A total-failure ceiling of 5 catches any mixture, so alternating causes cannot
+reset each other's counter forever and leave the fail-safe permanently disarmed.
+
+**The change can only make tripping less likely, never more.** An unrecognised
+error shape classifies as `refused` and gets the pre-existing behaviour, so a
+genuinely dead daemon is never detected more slowly than before. The E2E suite
+still SIGKILLs a real daemon and asserts the proxy clears.
+
+The message is split too, for the reason OI-18 records: telling someone to run
+`pporlock run` when it is already running sends them to re-run the one thing
+that cannot help. `daemon_unresponsive` says the daemon may be overloaded and
+points at `pporlock status`.
+
+**A negative result worth keeping: the listen backlog is not the problem.**
+The other half of this work was to be raising the accept backlog, on the theory
+that a saturated single-threaded acceptor refuses connections and Chrome shows
+that as a hard failure. It does not. mitmproxy calls `asyncio.start_server`
+with the default backlog of 100, and **800 simultaneous connections were
+accepted with zero refusals — on both the proxy and control ports, against both
+an idle and a fully saturated daemon.** No change was made, because the premise
+did not survive measurement. The refusals the user saw are better explained by
+the false trips above: the proxy is cleared mid-page-load and requests already
+in flight fail. If refusals persist after this fix, that theory is wrong and
+this is the place to start again.

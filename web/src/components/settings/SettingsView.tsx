@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client';
 import type { DaemonConfig, RedactionConfig } from '../../api/types';
+import { ExclusionsSection } from './ExclusionsSection';
 
 /**
  * SPEC-0 §9.2. Held here only to answer "is this value a default?" — the list
@@ -234,6 +235,12 @@ export function SettingsView({ api }: { api: ApiClient }) {
           onChange={(json_key_patterns) => setDraft({ ...draft, json_key_patterns })}
         />
       </section>
+
+      {/* Exclusions save themselves as they are edited rather than joining the
+          redaction draft: they are a different route (`PUT /exclusions`), and a
+          shared Save button would imply that leaving the page without pressing
+          it left the host decrypted. */}
+      <ExclusionsSection api={api} />
     </div>
   );
 }

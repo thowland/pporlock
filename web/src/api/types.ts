@@ -311,3 +311,36 @@ export interface DaemonConfig {
   redaction: RedactionConfig;
   [section: string]: unknown;
 }
+
+/* ------------------------------------------------------------------ *
+ * Exclusions (SPEC-0 §6.9 — REQ PXY-013/014/015/016)                  *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Where an entry came from. `default` is the shipped list; `user` is what this
+ * machine added; `profile` is contributed by the active profile (REQ MOD-044).
+ */
+export type ExclusionSource = 'default' | 'user' | 'profile';
+
+/**
+ * One exclusion. `pattern` is an SNI glob or a CIDR literal.
+ *
+ * `comment` and `source` are optional in `contracts/openapi.yaml` and always
+ * present in what the daemon sends (`ExclusionEntry.to_dict`). They are typed
+ * as optional so a hand-written PUT body — or an older daemon — is still a
+ * valid entry, and normalized on the way in.
+ */
+export interface ExclusionEntry {
+  pattern: string;
+  comment?: string;
+  source?: ExclusionSource;
+}
+
+/**
+ * `GET /exclusions` and `PUT /exclusions` both carry the envelope, not a bare
+ * array — the daemon returns `ExclusionList.to_dict()`, which is
+ * `{"entries": [...]}`, and PUT reads `body["entries"]`.
+ */
+export interface Exclusions {
+  entries: ExclusionEntry[];
+}

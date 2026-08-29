@@ -30,6 +30,9 @@ function config(overrides: Partial<DaemonConfig['redaction']> = {}): DaemonConfi
 function api(payload: DaemonConfig = config()): ApiClient {
   const client = new ApiClient('http://127.0.0.1:8081');
   vi.spyOn(client, 'getConfig').mockResolvedValue(payload);
+  // Stubbed so this file exercises the redaction form without reaching for a
+  // real daemon on behalf of the exclusion list beside it.
+  vi.spyOn(client, 'getExclusions').mockResolvedValue({ entries: [] });
   vi.spyOn(client, 'putConfig').mockImplementation((sections) =>
     Promise.resolve({ ...payload, ...(sections as Partial<DaemonConfig>) } as DaemonConfig),
   );

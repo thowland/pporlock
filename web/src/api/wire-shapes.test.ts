@@ -106,3 +106,45 @@ describe('the shapes a page would break on', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain('t0ken');
   });
 });
+
+describe('exclusions travel in an envelope  # REQ PXY-014/016', () => {
+  /**
+   * Copied from what the daemon sends: `get_exclusions` returns
+   * `ExclusionList.to_dict()`, which is `{"entries": [...]}` with every entry
+   * carrying pattern, comment, and source — and `{"entries": []}` when no
+   * interceptor is attached. `contracts/openapi.yaml` `Exclusions` agrees.
+   * Not a bare array, which is the mistake `/modules` already made once.
+   */
+  const EXCLUSIONS = {
+    entries: [
+      {
+        pattern: '*.apple.com',
+        comment: 'update: macOS software update, OCSP, and notarization.',
+        source: 'default' as const,
+      },
+    ],
+  };
+
+  it('GET /exclusions', async () => {
+    respondWith(EXCLUSIONS);
+    const exclusions = await client().getExclusions();
+    expect(Array.isArray(exclusions.entries)).toBe(true);
+    expect(exclusions.entries[0]?.pattern).toBe('*.apple.com');
+    expect(exclusions.entries[0]?.source).toBe('default');
+  });
+
+  it('GET /exclusions with no interceptor attached is an empty envelope', async () => {
+    respondWith({ entries: [] });
+    await expect(client().getExclusions()).resolves.toEqual({ entries: [] });
+  });
+
+  it('PUT /exclusions sends the envelope the daemon reads, not a bare array', async () => {
+    // `put_exclusions` does `body.get("entries", [])` — a bare array would be
+    // read as an empty list and silently delete all 33 shipped entries.
+    const fetchMock = respondWith(EXCLUSIONS);
+    await client().putExclusions(EXCLUSIONS.entries);
+    const init = fetchMock.mock.calls[0]?.[1] as { method: string; body: string };
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ entries: EXCLUSIONS.entries });
+  });
+});

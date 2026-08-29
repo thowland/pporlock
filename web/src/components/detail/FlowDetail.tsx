@@ -11,6 +11,7 @@ import type { FlowRecord, HeaderPairs } from '../../api/types';
 import { formatBytes, formatMs, formatTime, statusClass } from '../../lib/format';
 import { headerFieldPath, parseMasked } from '../../lib/redaction';
 import { ProvenanceView } from './ProvenanceView';
+import { ExcludeHostAction } from '../exclusions/ExcludeHostAction';
 
 type Tab = 'overview' | 'request' | 'response' | 'provenance';
 
@@ -250,6 +251,15 @@ export function FlowDetail({
           {request?.url ?? full.passthrough?.host ?? full.flow_id}
         </span>
         <span className="spacer" />
+        {/* The same one-click exclusion as the table row (REQ PXY-016), here
+            because the detail panel is where a user ends up when a host is
+            misbehaving — and it is the only place a session flow's host is
+            actionable at all. */}
+        <ExcludeHostAction
+          api={api}
+          host={request?.host ?? full.passthrough?.host}
+          surface="flow detail"
+        />
         <button type="button" className="action" onClick={onClose} aria-label="Close detail">
           ✕
         </button>

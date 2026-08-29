@@ -13,6 +13,7 @@ import { ApiClient } from './api/client';
 import type { FlowFilter, FlowRecord, Rule } from './api/types';
 import { FlowDetail } from './components/detail/FlowDetail';
 import { DisconnectedBanner } from './components/DisconnectedBanner';
+import { ExcludeHostAction } from './components/exclusions/ExcludeHostAction';
 import { FilterBar } from './components/FilterBar';
 import { FlowTable } from './components/FlowTable';
 import { StatusBar } from './components/StatusBar';
@@ -128,7 +129,18 @@ export function App({ api }: { api: ApiClient }) {
               setSelectedId(flow.flow_id);
             }}
             renderActions={(flow: FlowRecord) => (
-              <CreateRuleMenu api={api} flow={flow} onRule={startRuleFromFlow} />
+              <>
+                <CreateRuleMenu api={api} flow={flow} onRule={startRuleFromFlow} />
+                {/* One click from the row to a tunnelled host (REQ PXY-016).
+                    A passthrough flow already carries its host in a different
+                    place, and excluding an already-excluded host is answered
+                    rather than duplicated. */}
+                <ExcludeHostAction
+                  api={api}
+                  host={flow.request?.host ?? flow.passthrough?.host}
+                  surface="flow table"
+                />
+              </>
             )}
           />
         </div>

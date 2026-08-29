@@ -64,8 +64,16 @@ CLI on your `PATH`. Every `pporlock ...` command from here on assumes you have
 done one of these two things:
 
 ```bash
-uv tool install ./daemon    # installs `pporlock` into ~/.local/bin
+uv tool install --editable ./daemon    # installs `pporlock` into ~/.local/bin
 ```
+
+**`--editable` is not optional here.** A plain `uv tool install` copies the
+daemon into its own venv, and from there it cannot see this checkout — so it
+cannot find the web UI that `make web` builds into `web/dist`, and rebuilding
+does not help. The symptom is a daemon that starts fine and reports the web UI
+missing however many times you build it. Editable keeps the CLI pointed at the
+repo, which is also what you want on a single-user single-machine tool you will
+be editing.
 
 Confirm `~/.local/bin` is on your `PATH` — `uv tool install` will say so if it
 is not — and check with:

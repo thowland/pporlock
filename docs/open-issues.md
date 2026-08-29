@@ -829,3 +829,40 @@ describes what happened rather than `headers`. Both are small; the reason this
 is filed rather than fixed is that it wants a decision about what the action is
 *called* — a module-synthesised response is not `map_local`, and inventing a
 value has contract consequences for every client that renders the field.
+
+---
+
+## OI-28 — the DevTools panel was never built
+
+**Found:** by a user opening the pporlock tab in DevTools and seeing nothing.
+**CLOSED** (entry point declared, guard added).
+
+`devtools.ts` registers the panel with
+
+```js
+chrome.devtools.panels.create('pporlock', '', 'src/devtools/panel.html');
+```
+
+and that path appears nowhere else — not in the manifest, not in an import.
+CRXJS discovers pages by walking the manifest, and `vite.config.ts` listed only
+`src/popup/options.html` as an extra entry point. So nothing in the chain knew
+`panel.html` existed and it was never emitted.
+
+**Everything looked fine.** The build succeeded. The extension loaded. Chrome
+created a DevTools tab named "pporlock" — the registration worked, the panel was
+just pointing at a file that was not there — and rendered it blank, with no
+error in the page console, the extension console, or the build output.
+
+A page referenced only from a **string literal inside JavaScript** is invisible
+to the bundler, the manifest validator, the type checker and every unit test,
+because all of them see the panel's *source*, which was present and correct the
+whole time. `PanelView.test.tsx` passed throughout.
+
+**Guard:** `src/build-inputs.test.ts` extracts the path from every
+`panels.create()` call and asserts it is an entry point the build knows about —
+declared to rollup or reachable from the manifest. It was watched failing
+against the original config before being kept.
+
+Verified by loading the built extension in Chrome and opening
+`chrome-extension://<id>/src/devtools/panel.html`: 200, React mounts, and it
+renders its "Not paired" state on an unpaired profile, with no page errors.

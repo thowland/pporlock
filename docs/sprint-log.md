@@ -1535,3 +1535,159 @@ component is verified against a live daemon on a machine that already has the
 toolchain, the CA and a Chrome profile. Given this project's record — three of
 its worst bugs survived a green suite and were found only by running the real
 thing — that remains the highest-value outstanding item.
+
+---
+
+## 0.8.0 — Module settings, and `user-agent-switcher`
+
+**Issues:** OI-31 (new, closed); OI-15 extended · **Contract:** `settings` on the
+module manifest, `has_settings` / `settings` / `config` on the module API,
+`config` on `PATCH /modules/{name}`
+**2033 daemon tests, 518 web**
+
+Not a sprint — one piece of issue-driven work, recorded here because it added a
+manifest key and a hook, and those are things a later reader will want the
+reasoning for.
+
+### The gap
+
+A module's `config:` block always reached `ctx.config`, and nothing could ask a
+module *what* it could be configured with. So the only way to change one value
+was the file editor: "browse as GPTBot instead of Googlebot" meant opening Monaco
+and finding the right line. The module library already won this argument for
+`enabled` — a toggle rather than a YAML edit — and there was no reason `enabled`
+should be the only setting that got one.
+
+`settings:` declares a flat list of typed fields (SPEC-0 §5.2.1). The daemon
+validates against it; the web UI renders a form from it and knows nothing about
+any particular module. A module that declares nothing is unchanged, and gets no
+gear — one on every row would open an empty dialog for most of them, which
+teaches people the control does nothing.
+
+**Not JSON Schema**, which was the tempting shortcut. The expressive half of JSON
+Schema is unrenderable as a form; a declaration that can say more than the UI can
+show is a declaration whose author will be surprised. Six types, no nesting, no
+conditionals — everything declarable renders as exactly one control.
+
+### Decisions that were nearly wrong
+
+- **Where values live.** In the module-state sidecar, not the manifest — OI-8's
+  rule, unchanged: the daemon does not rewrite a file it does not own. The
+  consequence is the good one: improving a `default:` still moves every value
+  nobody has changed.
+- **Serving the *effective* default.** The first version served each field's
+  declared `default`, so a client comparing against it could not tell "the user
+  set this" from "the manifest's `config:` block already overrode it" — and
+  opening the dialog and saving would have written the module's own shipped value
+  back as a user override, freezing it against every later improvement. The
+  daemon now serves the value in force when nothing is set. Pinned by a test.
+- **A refused PATCH writes nothing.** Not the good fields with the bad one
+  dropped: a module running on a mixture of what the user asked for and what
+  survived validation is worse than one that refused outright.
+- **A settings change does not reload the module.** A reload re-runs `on_load`,
+  which for `gpc-audit` would mean discarding the audit. `ctx.config` is replaced
+  in place, and `on_config` — new, optional — lets a module that derives
+  something at load time recompute.
+- **No secret type.** The sidecar's docstring says "nothing here is a secret",
+  and a `password` field would have quietly made that false. Values are stored
+  and served in clear and the docs say so; the file is written `0600` anyway,
+  because "no secrets today" is a property of the current type list.
+
+### `user-agent-switcher`
+
+The tenth example, and what the feature was for: present the browser as
+Googlebot, GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, Claude-SearchBot,
+Claude-User, PerplexityBot or bingbot, so you can see the page a site serves for
+indexing rather than the one it serves you.
+
+The part that is easy to get wrong is not the `User-Agent`. Chrome sends
+`Sec-CH-UA` client hints that name the real browser; left in place they flatly
+contradict the disguise, which hands a site a *more* distinctive signal than an
+unmodified Chrome would have. The module removes them, and says why in a comment
+rather than in a list nobody reads.
+
+It is also honest about its ceiling in the module docstring, the settings help
+text and `examples/README.md`: it changes headers. A site verifying Googlebot by
+reverse DNS sees your address. A difference you find is a lead, not a verdict.
+
+**A finding, recorded on OI-15 rather than worked around silently.** There is no
+note code for *a module did the ordinary thing it is enabled to do*, and the
+nearest surface — `ctx.log` — is drained by the evaluator and read by nothing at
+all. So the module keeps a tally and renders it through `on_report`, which works
+and is a workaround for a missing surface rather than a use of one.
+
+**One unrelated finding, and it is not small.** `make gate` failed on
+`test_start_brings_it_back`. Checked against `master` with the branch stashed:
+2 failures in 6 plain runs, and **3 in 3 under coverage — which is how `make
+gate` runs it.** The merge gate does not currently pass on `master`. Recorded as
+OI-32 and left unfixed: the answer is a decision about whether the daemon's 1.0s
+`proxy_stop` budget is right, which is a behaviour question and not a test tweak.
+The first gate run on this branch passed, which was the lucky one, and is exactly
+how it stayed unnoticed.
+
+### The §2.5 walk
+
+Four areas touched, walked by hand rather than left to the scanners:
+
+- **Trusted module boundary.** A settings form changes what module code does, so
+  it is an authoring surface and says so: the footer states that settings are
+  read by unsandboxed module code with full access to intercepted traffic, and a
+  test asserts the sentence is there. The MCP surface deliberately gains
+  *nothing* — it cannot set a module's settings at all, which keeps MCP-030's
+  shape: an agent may write a module's files, and only a person turns behaviour
+  on.
+- **Deserialization / schema strictness.** Settings parsing rejects unknown keys
+  in a declaration and in an option, the same strictness the manifest already had
+  (REQ MOD-014), and it is a load error rather than a warning. `PATCH` refuses an
+  undeclared key rather than storing it.
+- **Logging hygiene.** The audit records *which* settings changed, never the
+  values: a setting's value is arbitrary user text and the audit log is not the
+  place to accumulate it. Nothing else logs a config value.
+- **Redaction.** The sidecar's "nothing here is a secret" claim survives because
+  there is no secret setting type — checked as a deliberate omission, not an
+  oversight — and the file is now written `0600` regardless. Session capture and
+  the redaction path are untouched.
+
+Path containment was considered and is unaffected: a module can put a path in a
+string setting, but `ctx.asset_path` resolves symlinks and checks containment
+exactly as before, and settings add no new file-reading route.
+
+### Verified by using it, not only by testing it
+
+The whole of this project's record says a green suite is not the check. So, on a
+daemon started by `pporlock run` against an isolated `state_dir`, with the module
+copied in and a header-echoing origin behind the proxy:
+
+- `GET /modules` reports `has_settings`, `GET /modules/{name}` serves the
+  declaration and the effective config.
+- `PATCH` with a bad enum value returns 400 naming the eleven it will take;
+  `identtiy` returns "not a declared setting"; neither writes anything.
+- The sidecar on disk holds only the changed keys, mode `0600`.
+- **Real traffic through the real proxy** comes out as
+  `…compatible; Googlebot/2.1; +http://www.google.com/bot.html`, with
+  `sec-ch-ua` and `sec-ch-ua-mobile` gone and `Accept-Language` replaced.
+- Changing the identity through the API changes the *next* request with no
+  restart and no reload — the point of `set_config` not reloading.
+- `scope: documents` leaves a request with no `Sec-Fetch-Dest` alone and rewrites
+  one that has `document`.
+
+Then the same thing through the built web UI in a real browser, because OI-30 is
+the case where a component with passing tests could not have worked on the first
+click: the gear appears on the row and only on that row, the dialog renders one
+control per declared field with its help text, and selecting **PerplexityBot**
+and pressing **Save** wrote three keys to the sidecar — not the two it had not
+changed — and the very next request through the proxy went out as
+`PerplexityBot/1.0`.
+
+Then made durable: `web/e2e/web/module-settings.spec.ts` — five specs against a
+real daemon, the shipped module copied in rather than a purpose-built one, and
+the assertion that matters made against the **origin** rather than against
+pporlock's own report of itself. That needed one new fixture endpoint,
+`/echo/headers`, which answers with the headers the origin received: every other
+check of a header rewrite asks the thing under test whether it did the rewrite.
+
+**And the guard was watched failing.** `set_config` was sabotaged to stop
+updating the live `ctx.config`; the "saving a setting changes the next request"
+spec went red and the other four stayed green, which is the right shape — then
+it was restored and all five passed again. A guard nobody has watched fail is
+not a guard.

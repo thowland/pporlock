@@ -129,6 +129,12 @@ export interface ModuleStatus {
   has_python: boolean;
   /** Whether the module declares `on_report`, so the library can link to it (OI-29). */
   has_report: boolean;
+  /**
+   * Whether the module declares user-settable `settings`, so the library shows
+   * a settings control only where there is something to set rather than
+   * opening an empty dialog. The declaration itself arrives with the detail.
+   */
+  has_settings: boolean;
   rule_count: number;
   error: ModuleLoadError | null;
   quarantine: ModuleQuarantine | null;
@@ -141,6 +147,36 @@ export interface ModuleStatus {
   stats?: ModuleStats | undefined;
 }
 
+/** What a declared setting may hold. Six types, all renderable as one control. */
+export type ModuleSettingValue = string | boolean | number | string[];
+
+/** One choice of an `enum` setting. */
+export interface ModuleSettingOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+/**
+ * One user-settable field, as the module's author declared it in `settings:`.
+ *
+ * Deliberately not JSON Schema, on the daemon's side and therefore on this
+ * one: a declaration that can say more than a form can show is a declaration
+ * whose author will be surprised. There is no secret type — a value set here
+ * is stored and served in clear.
+ */
+export interface ModuleSetting {
+  key: string;
+  type: 'string' | 'text' | 'boolean' | 'integer' | 'enum' | 'string_list';
+  label: string;
+  description?: string;
+  default?: ModuleSettingValue | undefined;
+  options?: ModuleSettingOption[] | undefined;
+  placeholder?: string | undefined;
+  min?: number | undefined;
+  max?: number | undefined;
+}
+
 /**
  * `GET /modules/{name}`. Files are keyed by their on-disk name so the editor
  * never has to know how many there are.
@@ -148,6 +184,14 @@ export interface ModuleStatus {
 export interface ModuleDetail extends ModuleStatus {
   files: Record<string, string>;
   assets?: string[];
+  /**
+   * Optional for the same reason `stats` is: a daemon older than the settings
+   * feature sends neither, and reading through an absent field unconditionally
+   * is what crashed the module library against a real daemon once already.
+   */
+  settings?: ModuleSetting[] | undefined;
+  /** The effective `ctx.config`: declared defaults, the manifest, then the user. */
+  config?: Record<string, ModuleSettingValue> | undefined;
 }
 
 export const MODULE_YAML = 'module.yaml';

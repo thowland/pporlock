@@ -42,7 +42,56 @@
     "config": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Free-form; passed to ctx.config (SPEC-0 §8.2)"
+      "description": "Free-form; the author's defaults. Merged under any declared `settings` the user has changed, then passed to ctx.config (SPEC-0 §8.2)."
+    },
+    "settings": {
+      "type": "array",
+      "default": [],
+      "description": "Fields a user may change from the module library without editing this file. Values the user sets are stored in the module-state sidecar and never written back here (module enablement works the same way; OI-8). Deliberately not JSON Schema: everything declarable here renders as exactly one form control. There is no secret type — a value set here is stored and served in clear.",
+      "items": {
+        "type": "object",
+        "required": ["key"],
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,62}$",
+            "description": "The key this field sets in ctx.config."
+          },
+          "label": { "type": "string", "description": "Shown in the form. Defaults to the key." },
+          "type": {
+            "type": "string",
+            "enum": ["string", "text", "boolean", "integer", "enum", "string_list"],
+            "default": "string"
+          },
+          "description": { "type": "string", "description": "Help text under the control." },
+          "default": {
+            "description": "Checked against `type` at load, so a declaration whose own default its field would reject is a load error rather than a form that is invalid the moment it opens."
+          },
+          "options": {
+            "type": "array",
+            "description": "Enum choices, required for an enum and meaningless elsewhere. A bare string is shorthand for a value and label of the same text.",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "required": ["value"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "value": { "type": "string", "minLength": 1 },
+                    "label": { "type": "string" },
+                    "description": { "type": "string" }
+                  }
+                }
+              ]
+            }
+          },
+          "placeholder": { "type": "string", "description": "string and text fields only." },
+          "min": { "type": "integer", "description": "integer fields only." },
+          "max": { "type": "integer", "description": "integer fields only." }
+        }
+      }
     }
   }
 }

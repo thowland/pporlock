@@ -68,12 +68,66 @@ author: you
 enabled: false             # default false — creating never enables
 priority: 100              # lower runs earlier; default 100
 config: {}                 # free-form; reaches your code as ctx.config
+settings: []               # user-settable fields; see §2.1
 rules: []                  # see §3
 ```
 
 Validation is strict: **an unknown top-level key is an error, not a warning**
 (REQ MOD-014). A typo in a key name is otherwise a rule that silently never
 runs, which is the failure this whole system exists to make impossible.
+
+### 2.1 Settings — letting a user change a value without editing this file
+
+`config:` is yours. `settings:` declares which parts of it someone else may
+change, from a form the module library renders on the module's row:
+
+```yaml
+settings:
+  - key: identity            # the ctx.config key this field sets
+    label: Identify as       # shown on the form; defaults to the key
+    type: enum               # string | text | boolean | integer | enum | string_list
+    description: >
+      Help text under the control. Say what changing it does, not what the
+      field is — the label already says that.
+    default: googlebot
+    options:                 # enum only; a bare string is value and label alike
+      - { value: googlebot, label: Googlebot }
+      - { value: claudebot, label: ClaudeBot }
+
+  - key: hosts
+    type: string_list        # a textarea, one entry per line
+    default: ["*"]
+
+  - key: strip_client_hints
+    type: boolean
+    default: true
+
+  - key: every
+    type: integer
+    min: 1                   # integer only
+    max: 100
+    default: 3
+```
+
+Six types and no nesting, on purpose: everything declarable renders as exactly
+one control, so a form can never fail to show what you declared.
+
+Things worth knowing before you use it:
+
+- **Read `ctx.config` in the hook, not in `on_load`.** A settings change
+  replaces the live config in place; the module is deliberately *not* reloaded,
+  because a reload would re-run `on_load` and throw away whatever the module has
+  accumulated. If you must derive something at load time, define `on_config(ctx)`
+  and recompute there — it is called after every accepted change.
+- **Your `config:` block still wins over a field's `default:`.** An author who
+  writes both means the `config:` block; that is what the module ships with.
+- **A bad declaration is a load error**, including a `default` your own field
+  would reject. `POST /validate` reports it before anything is installed.
+- **Values are not written back into `module.yaml`.** They live in the
+  module-state sidecar, like `enabled` — the daemon does not rewrite a file it
+  does not own. Editing a `default:` still moves any value nobody has changed.
+- **There is no secret type.** A setting's value is stored and served in clear.
+  Take a credential from the environment instead.
 
 ---
 
@@ -166,6 +220,7 @@ def on_request(request, ctx): ...
 def on_response(request, response, ctx): ...
 def on_websocket_message(message, request, ctx): ...
 def on_report(ctx): ...
+def on_config(ctx): ...
 ```
 
 **The context comes last on the flow hooks**, after the objects the hook is
@@ -179,6 +234,11 @@ is written this way and is the thing to copy.
 API, so it is outside the per-flow budget. Return
 `{"content_type": ..., "body": ...}`, a plain string, or `None`; the daemon
 serves it at `GET /modules/<name>/report` and the module library links to it.
+
+`on_config(ctx)` is not a flow hook either — it is called after a user changes
+one of your declared settings (§2.1), for the rare module that derives something
+from its config at load time. Most modules need it only to log the change, and
+plenty need it not at all.
 
 Hooks are interleaved with declarative rules by module priority (REQ MOD-023) —
 the Python tier is not a separate pass bolted on after the rules.

@@ -148,3 +148,63 @@ describe('exclusions travel in an envelope  # REQ PXY-014/016', () => {
     expect(JSON.parse(init.body)).toEqual({ entries: EXCLUSIONS.entries });
   });
 });
+
+describe('module settings arrive as a declaration plus values  # SPEC-0 §8.2', () => {
+  /**
+   * Copied from what the daemon sends: `get_module` adds `settings` (a list of
+   * declarations, `ModuleSetting.to_dict()` with `default` replaced by the
+   * value in force when nothing is set) and `config` (the effective
+   * `ctx.config`) to the module status. `contracts/openapi.yaml`
+   * `ModuleDetail` agrees.
+   *
+   * Both, in one response, because a client rendering a form needs the fields
+   * and what is in them — and two round trips is two chances for them to
+   * disagree about which module it is looking at.
+   */
+  const DETAIL = {
+    ...MODULE_STATUS,
+    has_settings: true,
+    settings: [
+      {
+        key: 'identity',
+        type: 'enum',
+        label: 'Identify as',
+        description: 'Which crawler to present.',
+        default: 'googlebot-smartphone',
+        options: [
+          { value: 'googlebot-smartphone', label: 'Googlebot', description: '' },
+          { value: 'claudebot', label: 'ClaudeBot', description: '' },
+        ],
+      },
+      { key: 'hosts', type: 'string_list', label: 'Hosts', description: '', default: ['*'] },
+    ],
+    config: { identity: 'claudebot', hosts: ['*'] },
+    files: { 'module.yaml': 'name: relax-csp\n' },
+  };
+
+  it('GET /modules/{name} carries both', async () => {
+    respondWith(DETAIL);
+    const detail = await client().getModule('relax-csp');
+    expect(detail.settings?.[0]?.options?.[1]?.value).toBe('claudebot');
+    expect(detail.config?.identity).toBe('claudebot');
+  });
+
+  it('a daemon that sends neither does not crash the client', async () => {
+    // The same mistake `stats` taught: reading through an optional field
+    // unconditionally crashed the module library against a real daemon while
+    // every test passed.
+    respondWith({ ...MODULE_STATUS, has_settings: false, files: {} });
+    const detail = await client().getModule('relax-csp');
+    expect(detail.settings ?? []).toEqual([]);
+  });
+
+  it('PATCH sends config under its own key, alongside nothing else', async () => {
+    // `patch_module` refuses any key but enabled, priority and config, and
+    // rejects the whole request rather than writing part of it.
+    const fetchMock = respondWith(MODULE_STATUS);
+    await client().patchModule('relax-csp', { config: { identity: 'claudebot' } });
+    const init = fetchMock.mock.calls[0]?.[1] as { method: string; body: string };
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(init.body)).toEqual({ config: { identity: 'claudebot' } });
+  });
+});

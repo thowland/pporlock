@@ -24,6 +24,7 @@ from ...errors import ModuleApiVersionError, ModuleLoadError, PporlockError
 from ..cost import ModuleStat
 from ..ruleset import DEFAULT_PRIORITY, CompiledRule, compile_rule
 from .context import MODULE_API_VERSION, SUPPORTED_API_VERSIONS
+from .settings import ModuleSetting, SettingsError, effective_config, parse_settings
 
 MANIFEST_NAME = "module.yaml"
 PYTHON_NAME = "module.py"
@@ -40,6 +41,9 @@ KNOWN_MANIFEST_KEYS = frozenset(
         "priority",
         "rules",
         "config",
+        # A module's user-settable fields (see settings.py). Optional, and
+        # additive under SPEC-0 §8.1 — a module that declares none is unchanged.
+        "settings",
     }
 )
 
@@ -60,6 +64,10 @@ HOOK_NAMES = (
     "on_response",
     "on_websocket_message",
     "on_report",
+    # Called when a declared setting is changed through the API, so a module
+    # that derives something from its config in `on_load` can recompute it.
+    # Modules that simply read `ctx.config` per flow need not declare it.
+    "on_config",
 )
 
 MODULE_NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -95,7 +103,15 @@ class LoadedModule:
     author: str = ""
     enabled: bool = False
     priority: int = DEFAULT_PRIORITY
+    #: The author's `config:` block, exactly as written. Never rewritten by the
+    #: daemon — user-set values live in the sidecar (see `config_overrides`).
     config: dict[str, Any] = field(default_factory=dict)
+    #: The fields the author declared as user-settable, in declaration order.
+    settings: tuple[ModuleSetting, ...] = ()
+    #: What the user changed, keyed by setting. Loaded from the module-state
+    #: sidecar by the registry; only keys the user actually set appear, so an
+    #: edit to a manifest default still moves an untouched value.
+    config_overrides: dict[str, Any] = field(default_factory=dict)
     rules: tuple[CompiledRule, ...] = ()
     python: Any = None
     state: str = "loaded"
@@ -109,6 +125,24 @@ class LoadedModule:
     failures: int = 0
     quarantine_reason: str | None = None
     quarantined_at: str | None = None
+
+    @property
+    def settings_defaults(self) -> dict[str, Any]:
+        """What each declared field holds when the user has set nothing.
+
+        Not the same as a field's declared `default`: an author who writes both
+        a `default:` on the field and a value in `config:` means the `config:`
+        block, because that is what the module ships with. Clients render one
+        "default" and need it to be the one that is actually in force, or a
+        form that shows the wrong baseline will write the manifest's own value
+        back as if the user had chosen it.
+        """
+        return effective_config(self.settings, self.config, None)
+
+    @property
+    def effective_config(self) -> dict[str, Any]:
+        """What `ctx.config` holds: declared defaults, the manifest, the user."""
+        return effective_config(self.settings, self.config, self.config_overrides)
 
     @property
     def has_python(self) -> bool:
@@ -139,6 +173,9 @@ class LoadedModule:
             # So the UI can offer a report only where one exists, rather than
             # linking every module to a 404 (OI-29).
             "has_report": callable(getattr(self.python, "on_report", None)),
+            # So the library can offer a settings control only where the module
+            # declares something to set, rather than opening an empty form.
+            "has_settings": bool(self.settings),
             "rule_count": len(self.rules),
             "description": self.description,
             "author": self.author,
@@ -251,6 +288,11 @@ def load_module(path: Path) -> LoadedModule:
         priority=int(raw.get("priority", DEFAULT_PRIORITY)),
         config=dict(raw.get("config") or {}),
     )
+
+    try:
+        module.settings = parse_settings(raw.get("settings"))
+    except SettingsError as exc:
+        return _fail(name, path, ModuleError("module_invalid_settings", str(exc)))
 
     entries = raw.get("rules") or []
     if not isinstance(entries, list):

@@ -253,7 +253,20 @@ paths:
               schema: { $ref: '#/components/schemas/ModuleStatus' }
     patch:
       tags: [modules]
-      summary: Set enabled or priority only
+      summary: Set enabled, priority, or the module's declared settings
+      description: >
+        Still narrow: everything else about a module lives in its files, and a
+        PATCH that could rewrite behaviour would bypass the reload that makes a
+        change visible in the module's load state.
+
+
+        `config` carries values for the fields the module's author declared in
+        `settings:`, and nothing else — an undeclared key, or a value of the
+        wrong type, is a 400 and **nothing is written**, so a form with one bad
+        field does not half apply. A module that declares no settings accepts no
+        `config` at all. Values are persisted in the module-state sidecar rather
+        than written back into the author's manifest, and take effect on the
+        running module without reloading it.
       requestBody:
         required: true
         content:
@@ -263,12 +276,20 @@ paths:
               properties:
                 enabled: { type: boolean }
                 priority: { type: integer }
+                config:
+                  type: object
+                  additionalProperties: true
+                  description: >
+                    Replaces the module's overrides wholesale. Omitting a key
+                    resets it to its declared default, which is the only way
+                    "reset this field" could be expressed.
       responses:
         '200':
           description: Updated
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ModuleStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
     delete:
       tags: [modules]
       summary: Remove a module
@@ -969,6 +990,45 @@ components:
         next_cursor: { type: [string, 'null'] }
         total_estimate: { type: integer }
 
+    ModuleSetting:
+      type: object
+      description: >
+        One user-settable field, as declared in the manifest. The vocabulary is
+        deliberately small enough that every field renders as exactly one form
+        control; see `schemas/module-manifest.schema.json`. There is no secret
+        type — a value set here is stored in the module-state sidecar and
+        served back in clear.
+      required: [key, type, label]
+      properties:
+        key: { type: string, description: The key this field sets in ctx.config. }
+        type:
+          type: string
+          enum: [string, text, boolean, integer, enum, string_list]
+        label: { type: string }
+        description: { type: string }
+        default:
+          description: >
+            The value in force when the user has set nothing — the field's own
+            declared default unless the manifest's `config:` block states one,
+            in which case that wins. Served this way so a client can send only
+            what the user actually changed; comparing against a declared
+            default the manifest had already overridden would write the
+            module's own shipped value back as a user override, freezing it
+            against any later improvement to it.
+        options:
+          type: array
+          description: Present on an enum, absent otherwise.
+          items:
+            type: object
+            required: [value, label]
+            properties:
+              value: { type: string }
+              label: { type: string }
+              description: { type: string }
+        placeholder: { type: string }
+        min: { type: integer }
+        max: { type: integer }
+
     ModuleError:
       type: object
       required: [code, message]
@@ -994,6 +1054,14 @@ components:
         has_report:
           type: boolean
           description: Whether the module declares an `on_report` hook (OI-29).
+        has_settings:
+          type: boolean
+          description: >
+            Whether the module declares user-settable `settings` in its
+            manifest, so the library can offer a settings control only where
+            there is something to set rather than opening an empty form. The
+            declaration itself, and the current values, come from
+            `GET /modules/{name}`.
         rule_count: { type: integer }
         error: { oneOf: [{ $ref: '#/components/schemas/ModuleError' }, { type: 'null' }] }
         quarantine:
@@ -1026,6 +1094,21 @@ components:
         - type: object
           properties:
             manifest: { $ref: './schemas/module-manifest.schema.json' }
+            settings:
+              type: array
+              description: >
+                The module's declared settings, in declaration order. Served
+                alongside `config` because a client rendering a settings form
+                needs both, and fetching them separately is a chance for them
+                to disagree.
+              items: { $ref: '#/components/schemas/ModuleSetting' }
+            config:
+              type: object
+              additionalProperties: true
+              description: >
+                The effective `ctx.config`: declared defaults, overlaid by the
+                manifest's own `config` block, overlaid by what the user has
+                set through `PATCH`.
             files:
               type: object
               additionalProperties: { type: string }

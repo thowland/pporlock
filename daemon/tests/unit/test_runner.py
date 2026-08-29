@@ -535,6 +535,54 @@ class TestStartupWiring:
         _e2, restarted, _p2, _b2, _path2, _err2 = build_evaluator(config)
         assert restarted.get("csp").priority == 7
 
+    def test_a_setting_changed_through_the_daemons_api_survives_a_restart(
+        self, tmp_path: Any
+    ) -> None:
+        """Declared module settings, through the daemon's own app.
+
+        The same shape as enablement, and for the same reason: a value that
+        reverts on restart is worse than one that cannot be set, because it
+        looks like it worked. Asserted on `ctx.config` of the module the
+        *restarted* registry built, not on the sidecar — the file is a means,
+        and a value that reaches disk but not the module is the failure this
+        checks for.
+        """
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        self._write_module(
+            tmp_path / "modules",
+            "ua",
+            "name: ua\npporlock_api: '1'\nenabled: true\n"
+            "settings:\n"
+            "  - key: identity\n"
+            "    type: enum\n"
+            "    default: googlebot\n"
+            "    options: [googlebot, claudebot]\n",
+        )
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+        client = TestClient(control.asgi)
+        headers = {
+            "Authorization": f"Bearer {control.tokens.ensure()}",
+            "X-Pporlock-Client": "ui",
+        }
+        response = client.patch(
+            "/modules/ua", headers=headers, json={"config": {"identity": "claudebot"}}
+        )
+        assert response.status_code == 200
+
+        _e2, restarted, _p2, _b2, _path2, _err2 = build_evaluator(config)
+        context = restarted.context("ua")
+        assert context is not None
+        assert context.config["identity"] == "claudebot"
+
     def test_a_corrupt_sidecar_does_not_stop_the_daemon_starting(self, tmp_path: Any) -> None:
         """As a malformed profile is skipped rather than fatal. The modules fall
         back to their manifest defaults and the reason is reported."""

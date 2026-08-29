@@ -43,6 +43,7 @@ from .loader import (
     PYTHON_NAME,
     WRITABLE_FILES,
 )
+from .settings import SettingsError, parse_settings
 
 Severity = str
 
@@ -236,8 +237,33 @@ def _validate_manifest(name: str, source: str) -> list[ValidationIssue]:
             )
         )
 
+    issues.extend(_validate_settings(raw, source))
     issues.extend(_validate_rules(name, raw, source))
     return issues
+
+
+def _validate_settings(raw: dict[str, Any], source: str) -> list[ValidationIssue]:
+    """Check a `settings:` declaration the same way the loader will.
+
+    Calls `parse_settings` rather than re-deriving its rules, so a declaration
+    the validator accepts is one the loader accepts — the same reason the rule
+    check calls `compile_rule`. Reported against the `settings:` line, which is
+    the closest placement available without a positional parse.
+    """
+    if "settings" not in raw:
+        return []
+    try:
+        parse_settings(raw.get("settings"))
+    except SettingsError as exc:
+        return [
+            ValidationIssue(
+                "module_invalid_settings",
+                str(exc),
+                file=MANIFEST_NAME,
+                line=_manifest_line(source, "settings"),
+            )
+        ]
+    return []
 
 
 def _validate_rules(name: str, raw: dict[str, Any], source: str) -> list[ValidationIssue]:

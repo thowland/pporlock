@@ -23,6 +23,7 @@ from ..provenance import NoteCode, ProvenanceBuilder, Severity
 from ..ruleset import CompiledRule, RuleSet
 from .context import ModuleContext, ModuleStore
 from .loader import LoadedModule, load_all, unload_python
+from .settings import coerce_config
 from .state import STATE_FILENAME, ModuleStateStore
 
 DEFAULT_QUARANTINE_AFTER = 10
@@ -129,6 +130,13 @@ class ModuleRegistry:
             if persisted is not None:
                 module.enabled = persisted.enabled
                 self._recompile_priority(module, persisted.priority)
+                # Settings the user set survive a reload for the same reason
+                # enablement does: they are the user's answer about the module,
+                # not about this particular load of it. Overrides for keys the
+                # rewritten manifest no longer declares are ignored by
+                # `effective_config` rather than dropped from the file, so
+                # renaming a field back restores what was there.
+                module.config_overrides = dict(persisted.config)
             else:
                 # First sighting: the manifest seeds the sidecar, once.
                 self.state.set(module.name, enabled=module.enabled, priority=module.priority)
@@ -153,7 +161,7 @@ class ModuleRegistry:
         return ModuleContext(
             name=module.name,
             version=module.version,
-            config=module.config,
+            config=module.effective_config,
             profile=profile,
             assets=module.assets,
             store=self._stores[module.name],
@@ -311,6 +319,38 @@ class ModuleRegistry:
             module.quarantine_reason = None
             module.quarantined_at = None
         return module
+
+    def set_config(
+        self, name: str, values: dict[str, Any]
+    ) -> tuple[LoadedModule | None, list[str]]:
+        """Replace a module's settings overrides, persisting them. Blocking.
+
+        Returns the module and the list of rejected fields; nothing is written
+        when anything is rejected, so a form with one bad value does not half
+        apply. A module that declares no settings rejects everything, which is
+        how `config` stays the author's file rather than a second, hidden one.
+
+        The live `ctx.config` is replaced in place rather than by reloading the
+        module. A reload would re-execute `module.py` and take `on_load` with
+        it — turning "change a dropdown" into "restart the module", which for a
+        module accumulating an audit would silently be "throw the audit away".
+        Modules that derive something from config at load time declare
+        `on_config` and recompute there.
+        """
+        module = self._modules.get(name)
+        if module is None:
+            return None, []
+        accepted, errors = coerce_config(module.settings, values)
+        if errors:
+            return module, errors
+
+        module.config_overrides = accepted
+        self.state.set_config(name, accepted)
+        context = self._contexts.get(name)
+        if context is not None:
+            context.config = module.effective_config
+            self._call_lifecycle(module, "on_config")
+        return module, []
 
     def set_priority(self, name: str, priority: int) -> LoadedModule | None:
         """Reorder a module against the others, persisting it (OI-8). Blocking."""

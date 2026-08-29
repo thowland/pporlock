@@ -22,7 +22,8 @@ For *how* to use these, read [the module cookbook](module-cookbook.md). This is 
 | `enabled` | `boolean` |  | Creating or updating a module never enables it (REQ MCP-030); enabling is a separate explicit action. |
 | `priority` | `integer` |  | Lower runs earlier. Orders rules across modules (SPEC-0 §5.4). |
 | `rules` | array of `rule.schema` |  |  |
-| `config` | `object` |  | Free-form; passed to ctx.config (SPEC-0 §8.2) |
+| `config` | `object` |  | Free-form; the author's defaults. Merged under any declared `settings` the user has changed, then passed to ctx.config (SPEC-0 §8.2). |
+| `settings` | array of `object` |  | Fields a user may change from the module library without editing this file. |
 
 Validation is strict: an unknown top-level key is an error, not a warning (REQ MOD-014). A typo in a key name is otherwise a setting that silently never applies.
 

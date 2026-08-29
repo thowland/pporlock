@@ -1000,6 +1000,18 @@ class ControlApp:
         if module is None:
             return self._not_found(f"no module {name}")
         payload = module.to_dict()
+        # The declaration and the current values, together: a client rendering
+        # a settings form needs both, and two round trips to build one form is
+        # two chances for them to disagree.
+        # `default` is served as the value in force when nothing is set —
+        # the field's own default unless the manifest's `config:` block states
+        # one — so a client comparing against it can send only what the user
+        # actually changed. See `LoadedModule.settings_defaults`.
+        unset = module.settings_defaults
+        payload["settings"] = [
+            setting.to_dict() | {"default": unset[setting.key]} for setting in module.settings
+        ]
+        payload["config"] = module.effective_config
         payload.update(await self.offload(_read_module_files, module.path))
         return JSONResponse(payload)
 
@@ -1067,11 +1079,17 @@ class ControlApp:
         return JSONResponse(module.to_dict(), status_code=status)
 
     async def patch_module(self, request: Request) -> JSONResponse:
-        """Set enabled and/or priority. Nothing else.
+        """Set enabled, priority, and the module's declared settings. Nothing else.
 
-        Narrow on purpose: everything else about a module lives in files, and a
-        PATCH that could rewrite behaviour would bypass the reload that makes a
-        change visible in the module's load state.
+        Still narrow on purpose: everything else about a module lives in files,
+        and a PATCH that could rewrite behaviour would bypass the reload that
+        makes a change visible in the module's load state.
+
+        `config` is the exception that proves it, and only because the module's
+        author declared exactly which fields it covers (`settings:` in the
+        manifest). An undeclared key is a 400, not a silent write — a settings
+        form is a place where a typo is easy and a value that goes nowhere is
+        indistinguishable from one that does nothing.
         """
         name = request.path_params["name"]
         module = self.registry.get(name) if self.registry is not None else None
@@ -1079,7 +1097,7 @@ class ControlApp:
             return self._not_found(f"no module {name}")
 
         body = await request.json()
-        unknown = set(body) - {"enabled", "priority"}
+        unknown = set(body) - {"enabled", "priority", "config"}
         if unknown:
             raise ConfigError(f"cannot patch {', '.join(sorted(unknown))}", module=name)
 
@@ -1094,6 +1112,10 @@ class ControlApp:
             except (TypeError, ValueError) as exc:
                 raise ConfigError(f"priority must be an integer: {body['priority']!r}") from exc
             await self.offload(self.registry.set_priority, name, priority)
+        if "config" in body:
+            _, errors = await self.offload(self.registry.set_config, name, body["config"])
+            if errors:
+                raise ConfigError("; ".join(errors), module=name)
 
         self.apply_modules()
         # REQ MCP-031 — enabling a module changes what happens to traffic, so
@@ -1104,6 +1126,11 @@ class ControlApp:
             module=name,
             enabled=module.enabled,
             priority=module.priority,
+            # Keys, not values, and only when settings were actually part of
+            # the request. Which settings someone changed is the auditable
+            # fact; the values are the module's business and can be arbitrary
+            # user text, which the audit log is not the place to accumulate.
+            **({"settings": sorted(body["config"])} if "config" in body else {}),
         )
         self.events.publish("state.changed", {"modules": self._module_summary()})
         return JSONResponse(module.to_dict())

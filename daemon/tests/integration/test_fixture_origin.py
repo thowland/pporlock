@@ -90,6 +90,23 @@ def test_json_fixture_is_patchable(fixture_origin) -> None:
         assert payload["content"] == "keep me"
 
 
+def test_echo_headers_reports_what_the_origin_received(fixture_origin) -> None:
+    """The endpoint that lets a test ask the *origin* what arrived.
+
+    Every other check of a header rewrite asks pporlock whether it rewrote the
+    header, which is the thing under test reporting on itself. This is how the
+    module-settings E2E can assert that a `User-Agent` really changed on the
+    wire rather than in a mutation object.
+    """
+    import json
+
+    with _get(f"{fixture_origin.base_url}/echo/headers", {"User-Agent": "pporlock-test/1.0"}) as r:
+        received = json.loads(r.read())
+        # Lowercased, so a caller does not have to guess the sender's casing.
+        assert received["user-agent"] == "pporlock-test/1.0"
+        assert "host" in received
+
+
 def test_unknown_path_is_404(fixture_origin) -> None:
     import urllib.error
 

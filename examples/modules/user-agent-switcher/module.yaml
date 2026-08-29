@@ -1,0 +1,112 @@
+name: user-agent-switcher
+version: "1.0.0"
+pporlock_api: "1"
+description: >
+  Browse as a crawler. Presents your browser as Googlebot, one of the OpenAI or
+  Anthropic fetchers, or another indexer, so you can see the page a site serves
+  for indexing rather than the one it serves you — and spot the difference.
+author: pporlock examples
+enabled: false
+# Late, so a UA a rule of your own has already set is not overwritten by this;
+# `first match wins` means the earlier writer keeps the field (SPEC-0 §5.4).
+priority: 85
+
+# Every value below is changeable from the module library's settings dialog —
+# that is what `settings:` is for. The `config:` block is not repeated here
+# because each field's `default` is the shipped value.
+settings:
+  - key: identity
+    label: Identify as
+    type: enum
+    description: >
+      Which crawler to present. These are the documented strings each operator
+      publishes; a site that checks nothing else will treat the request as
+      coming from that crawler.
+    default: googlebot-smartphone
+    options:
+      - value: googlebot-smartphone
+        label: Googlebot (smartphone)
+        description: What Google indexes with by default. Start here.
+      - value: googlebot-desktop
+        label: Googlebot (desktop)
+        description: The desktop crawler, still used for some sites.
+      - value: gptbot
+        label: OpenAI GPTBot
+        description: OpenAI's training crawler.
+      - value: oai-searchbot
+        label: OpenAI OAI-SearchBot
+        description: Indexes for ChatGPT search results.
+      - value: chatgpt-user
+        label: OpenAI ChatGPT-User
+        description: Fetches a page because a user asked ChatGPT to.
+      - value: claudebot
+        label: Anthropic ClaudeBot
+        description: Anthropic's training crawler.
+      - value: claude-searchbot
+        label: Anthropic Claude-SearchBot
+        description: Indexes for Claude's search results.
+      - value: claude-user
+        label: Anthropic Claude-User
+        description: Fetches a page because a user asked Claude to.
+      - value: perplexitybot
+        label: PerplexityBot
+        description: Perplexity's indexing crawler.
+      - value: bingbot
+        label: Bingbot
+        description: Microsoft's crawler, which also feeds some AI answers.
+      - value: custom
+        label: Custom
+        description: Use the string in "Custom user agent" below.
+
+  - key: custom_user_agent
+    label: Custom user agent
+    type: text
+    description: >
+      Used only when "Identify as" is Custom. Left empty with Custom selected,
+      the module does nothing rather than sending an empty User-Agent.
+    placeholder: "Mozilla/5.0 (compatible; MyBot/1.0; +https://example.com/bot)"
+    default: ""
+
+  - key: hosts
+    label: Hosts
+    type: string_list
+    description: >
+      Glob patterns, one per line. Matched against the request host, so
+      "*.example.com" covers subdomains and "*" covers everything. Narrowing
+      this is the difference between auditing one site and telling every site
+      you visit that you are a crawler.
+    default:
+      - "*"
+
+  - key: scope
+    label: Apply to
+    type: enum
+    description: >
+      Real crawlers fetch subresources too, so "every request" is the honest
+      simulation. "Documents only" leaves scripts, images and XHR as your
+      browser, which is useful when a site's API rejects unknown clients.
+    default: all
+    options:
+      - value: all
+        label: Every request
+      - value: documents
+        label: Documents only (top-level pages and frames)
+
+  - key: strip_client_hints
+    label: Remove Chrome client hints
+    type: boolean
+    description: >
+      Chrome sends Sec-CH-UA headers naming itself, and a site that reads them
+      sees Chrome no matter what User-Agent says. Removing them is what makes
+      the disguise consistent. Leave on unless you are specifically testing how
+      a site treats the hints.
+    default: true
+
+  - key: accept_language
+    label: Accept-Language
+    type: string
+    description: >
+      Sent instead of your browser's. Crawlers advertise a narrow set, and
+      Accept-Language is one of the signals sites vary content on. Empty leaves
+      your browser's value alone.
+    default: "en-US,en;q=0.9"

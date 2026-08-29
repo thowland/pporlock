@@ -335,6 +335,137 @@ class TestWsInspect:
         assert not builder.build().has_note(NoteCode.MODULE_ERROR)
 
 
+class TestUserAgentSwitcher:
+    """The module the module-settings feature exists for.
+
+    Everything it does is driven from `ctx.config`, so these run it through the
+    registry with settings applied the way the API applies them — not by
+    hand-building a context, which would not prove the settings reach it.
+    """
+
+    def registry(self, installed: Path) -> ModuleRegistry:
+        return registry_for(installed)
+
+    def evaluator(self, registry: ModuleRegistry) -> Evaluator:
+        return Evaluator(registry.build_ruleset(["user-agent-switcher"]), registry=registry)
+
+    def headers_for(self, ev: Evaluator, **kwargs: Any) -> dict[str, str]:
+        builder = ProvenanceBuilder("default")
+        decision = ev.evaluate_request(request(**kwargs), builder)
+        return dict(decision.mutation.set_headers)
+
+    def test_it_sends_googlebot_out_of_the_box(self, installed: Path) -> None:
+        """The default has to be the useful one. A module whose shipped setting
+        does nothing is a module people conclude is broken."""
+        sent = self.headers_for(self.evaluator(self.registry(installed)))
+        assert "Googlebot/2.1" in sent["user-agent"]
+
+    def test_every_identity_the_form_offers_produces_a_user_agent(self, installed: Path) -> None:
+        """The manifest's enum and the module's lookup table are two lists that
+        have to agree. An identity the form offers but the table lacks presents
+        as "enabled and changes nothing", which is the hardest failure to spot.
+        """
+        registry = self.registry(installed)
+        module = registry.get("user-agent-switcher")
+        assert module is not None
+        (identity,) = [s for s in module.settings if s.key == "identity"]
+        offered = [o.value for o in identity.options if o.value != "custom"]
+        assert len(offered) >= 8
+
+        for value in offered:
+            _, errors = registry.set_config("user-agent-switcher", {"identity": value})
+            assert errors == []
+            sent = self.headers_for(self.evaluator(registry))
+            assert sent.get("user-agent"), f"{value} sends no user agent"
+
+    def test_it_removes_the_client_hints_that_would_contradict_it(self, installed: Path) -> None:
+        """Chrome's Sec-CH-UA names the real browser. Left behind, it hands the
+        site a *more* interesting signal than an unmodified Chrome would have."""
+        builder = ProvenanceBuilder("default")
+        decision = self.evaluator(self.registry(installed)).evaluate_request(
+            request(headers=(("sec-ch-ua", '"Chromium";v="125"'), ("accept", "text/html"))),
+            builder,
+        )
+        assert "sec-ch-ua" in decision.mutation.remove_headers
+        assert "sec-ch-ua-platform" in decision.mutation.remove_headers
+
+    def test_the_hint_removal_can_be_turned_off(self, installed: Path) -> None:
+        registry = self.registry(installed)
+        registry.set_config("user-agent-switcher", {"strip_client_hints": False})
+        builder = ProvenanceBuilder("default")
+        decision = self.evaluator(registry).evaluate_request(request(), builder)
+        assert decision.mutation.remove_headers == []
+
+    def test_the_host_list_is_what_scopes_it(self, installed: Path) -> None:
+        """The difference between auditing one site and announcing yourself as
+        a crawler to every site you visit."""
+        registry = self.registry(installed)
+        registry.set_config("user-agent-switcher", {"hosts": ["*.example.org"]})
+        ev = self.evaluator(registry)
+        assert "user-agent" not in self.headers_for(ev, host="example.com")
+        assert "user-agent" in self.headers_for(ev, host="www.example.org")
+
+    def test_documents_only_leaves_subresources_alone(self, installed: Path) -> None:
+        registry = self.registry(installed)
+        registry.set_config("user-agent-switcher", {"scope": "documents"})
+        ev = self.evaluator(registry)
+        assert "user-agent" in self.headers_for(ev, dest="document")
+        assert "user-agent" not in self.headers_for(ev, dest="script")
+
+    def test_a_custom_identity_with_an_empty_box_sends_nothing(self, installed: Path) -> None:
+        """Not an empty User-Agent. Some servers answer that with a 400, which
+        would read as the site blocking crawlers."""
+        registry = self.registry(installed)
+        registry.set_config(
+            "user-agent-switcher", {"identity": "custom", "custom_user_agent": "   "}
+        )
+        assert self.headers_for(self.evaluator(registry)) == {}
+
+    def test_a_custom_string_is_sent_verbatim(self, installed: Path) -> None:
+        registry = self.registry(installed)
+        registry.set_config(
+            "user-agent-switcher",
+            {"identity": "custom", "custom_user_agent": "MyBot/1.0"},
+        )
+        assert self.headers_for(self.evaluator(registry))["user-agent"] == "MyBot/1.0"
+
+    def test_a_setting_change_takes_effect_without_a_reload(self, installed: Path) -> None:
+        """The whole point of `set_config` not reloading: the module keeps its
+        store, and the next request already uses the new value."""
+        registry = self.registry(installed)
+        ev = self.evaluator(registry)
+        assert "Googlebot" in self.headers_for(ev)["user-agent"]
+        registry.set_config("user-agent-switcher", {"identity": "claudebot"})
+        assert "ClaudeBot" in self.headers_for(ev)["user-agent"]
+
+    def test_its_report_counts_what_it_sent(self, installed: Path) -> None:
+        """The question that comes up every time is "was this page actually
+        fetched as the crawler, or did I leave the host list narrow?"."""
+        registry = self.registry(installed)
+        ev = self.evaluator(registry)
+        self.headers_for(ev)
+        self.headers_for(ev)
+        rendered = registry.report("user-agent-switcher")
+        assert rendered is not None
+        content_type, body = rendered
+        assert "text/html" in content_type
+        assert b"Googlebot/2.1" in body
+        assert b"<td>2</td>" in body
+
+    def test_the_report_escapes_a_custom_string_off_the_wire(self, installed: Path) -> None:
+        """The identity can be arbitrary user text and the report is rendered in
+        the browser of the person auditing. gpc-audit learned this first."""
+        registry = self.registry(installed)
+        registry.set_config(
+            "user-agent-switcher",
+            {"identity": "custom", "custom_user_agent": "<script>alert(1)</script>"},
+        )
+        self.headers_for(self.evaluator(registry))
+        rendered = registry.report("user-agent-switcher")
+        assert rendered is not None
+        assert b"<script>alert" not in rendered[1]
+
+
 class TestAssetsAreReachable:
     @pytest.mark.parametrize("name,asset", [("css-tamper", "user.css"), ("local-bundle", "app.js")])
     def test_the_map_local_target_exists(self, name: str, asset: str) -> None:

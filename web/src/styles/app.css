@@ -1446,3 +1446,77 @@ fieldset.patternlist code {
   overflow: auto;
   font-size: 12px;
 }
+
+/* ------------------------------------------------------- module settings --- */
+
+/*
+ * A module's own settings form (SPEC-2 §7.1). Laid out below the table rather
+ * than over it, like the report panel above, so the row the user came from
+ * stays visible while they change what it does.
+ */
+.modsettings {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 12px;
+  background: var(--bg-raised);
+}
+.modsettings .banner {
+  margin: 8px 12px;
+}
+.setting {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.setting-label {
+  font-size: 12px;
+  color: var(--text);
+}
+.setting input[type='text'],
+.setting input[type='number'],
+.setting select,
+.setting textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.setting textarea {
+  resize: vertical;
+}
+.setting input[type='checkbox'] {
+  justify-self: start;
+}
+/* Under the control, in its column — the label column is the anchor and a help
+   line that wrapped under it would read as part of the next field. */
+.setting-help {
+  grid-column: 2;
+  font-size: 11px;
+  margin: 0;
+}
+.setting-empty {
+  padding: 12px;
+  margin: 0;
+}
+.setting-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.setting-actions p {
+  flex: 1;
+  margin: 0;
+  font-size: 11px;
+}
+button.action.primary {
+  color: var(--text);
+  border-color: var(--accent);
+}

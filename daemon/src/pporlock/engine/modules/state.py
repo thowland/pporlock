@@ -6,17 +6,23 @@ rewrites a file it does not own — losing the author's comments, key order and
 formatting the first time someone flips a switch in the UI — so it does not.
 
 Instead a sidecar file next to the module root holds ``{name: {enabled,
-priority}}``. The manifest **seeds** an entry the first time a module is seen
-and the sidecar wins thereafter. That is exactly the in-memory rule
+priority, config}}``, where ``config`` is only what the user changed through a
+module's declared settings (``engine/modules/settings.py``). The manifest
+**seeds** an entry the first time a module is seen and the sidecar wins
+thereafter. That is exactly the in-memory rule
 ``ModuleRegistry.reload`` already applied across a reload; this only makes it
 survive the process. The consequence is worth stating plainly: editing
 ``enabled:`` in a manifest after the module has been seen once does nothing.
 The API is where enablement is set, which is also the only place it is audited.
 
 **Nothing here is a secret.** The file holds a module name — already constrained
-to ``MODULE_NAME_PATTERN`` — a boolean and an integer. No token, no header, no
-capture. There is deliberately no redaction pass over it, because there is
-nothing for one to do; a test asserts the written shape so that stays true.
+to ``MODULE_NAME_PATTERN`` — a boolean, an integer, and values for fields the
+module's author declared as user-settable. No token, no header, no capture.
+There is deliberately no redaction pass over it, because there is nothing for
+one to do: the settings vocabulary has no secret type, exactly so that this
+sentence stays true (see ``settings.py``). The file is written ``0600`` all the
+same, because "no secrets today" is a property of the current setting types and
+not something a future one should be able to quietly falsify.
 
 **A corrupt sidecar is not fatal.** It is skipped the way a malformed profile
 is: every module falls back to its manifest default, the reason is recorded on
@@ -31,7 +37,7 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +53,18 @@ class ModuleState:
 
     enabled: bool
     priority: int
+    #: User-set values for the module's declared settings. Only keys the user
+    #: actually changed — a default is not an override, and storing it as one
+    #: would freeze it against a later edit to the module.
+    config: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"enabled": self.enabled, "priority": self.priority}
+        # Omitted when empty: every module gets a row on first sighting, and a
+        # `"config": {}` on all of them is noise in a file people do read.
+        if self.config:
+            payload["config"] = dict(self.config)
+        return payload
 
 
 class ModuleStateStore:
@@ -95,7 +113,15 @@ class ModuleStateStore:
                 continue
             if not isinstance(priority, int):
                 continue
-            parsed[str(name)] = ModuleState(enabled=enabled, priority=priority)
+            # A config that is not an object is dropped and the rest of the row
+            # kept: losing a toggle because someone hand-edited the settings
+            # block into a list would be a disproportionate response.
+            config = entry.get("config")
+            parsed[str(name)] = ModuleState(
+                enabled=enabled,
+                priority=priority,
+                config=dict(config) if isinstance(config, dict) else {},
+            )
         self._state = parsed
 
     # -- queries ---------------------------------------------------------
@@ -110,17 +136,40 @@ class ModuleStateStore:
         return len(self._state)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            name: {"enabled": s.enabled, "priority": s.priority}
-            for name, s in sorted(self._state.items())
-        }
+        return {name: s.to_dict() for name, s in sorted(self._state.items())}
 
     # -- mutation --------------------------------------------------------
 
     def set(self, name: str, *, enabled: bool, priority: int) -> None:
-        """Record a module's state and write it through."""
+        """Record a module's enablement and ordering, and write it through.
+
+        Config is left alone: this is called on every reload to seed a row, and
+        a seed that cleared the user's settings would undo them on restart.
+        """
         current = self._state.get(name)
-        new = ModuleState(enabled=bool(enabled), priority=int(priority))
+        new = ModuleState(
+            enabled=bool(enabled),
+            priority=int(priority),
+            config=dict(current.config) if current is not None else {},
+        )
+        if current == new:
+            return
+        self._state[name] = new
+        self.save()
+
+    def set_config(self, name: str, config: dict[str, Any]) -> None:
+        """Replace a module's settings overrides and write them through.
+
+        Replace rather than merge, because "reset this field to its default"
+        has to be expressible, and under a merge it would not be — a key the
+        caller omits would keep its old value forever.
+        """
+        current = self._state.get(name)
+        new = ModuleState(
+            enabled=current.enabled if current is not None else False,
+            priority=current.priority if current is not None else 100,
+            config=dict(config),
+        )
         if current == new:
             return
         self._state[name] = new
@@ -166,6 +215,9 @@ class ModuleStateStore:
                 dir=str(self.path.parent), prefix=f".{self.path.name}.", suffix=".tmp"
             )
             try:
+                # mkstemp is already 0600; set it explicitly so the mode is a
+                # stated property of this file rather than an inherited one.
+                os.chmod(tmp_name, 0o600)
                 with os.fdopen(handle, "w") as fh:
                     fh.write(payload)
                 os.replace(tmp_name, self.path)

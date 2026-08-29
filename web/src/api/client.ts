@@ -11,6 +11,7 @@ import { filterToParams } from './types';
 import type { FlowRecord, Health } from './types';
 import type {
   ModuleDetail,
+  ModuleSettingValue,
   ModuleStatus,
   ProfileSummary,
   ReloadResult,
@@ -250,10 +251,18 @@ export class ApiClient {
     });
   }
 
-  /** `PATCH` carries `enabled` and `priority` only — never file content. */
+  /**
+   * `PATCH` carries `enabled`, `priority` and declared settings — never file
+   * content.
+   *
+   * `config` replaces the module's overrides wholesale, which is how "reset
+   * this field to its default" is expressed: omit the key. An undeclared key
+   * or a value of the wrong type is a 400 and nothing is written, so a form
+   * with one bad field never half applies.
+   */
   patchModule(
     name: string,
-    changes: { enabled?: boolean; priority?: number },
+    changes: { enabled?: boolean; priority?: number; config?: Record<string, ModuleSettingValue> },
   ): Promise<ModuleStatus> {
     return this.request<ModuleStatus>(`/modules/${encodeURIComponent(name)}`, {
       method: 'PATCH',

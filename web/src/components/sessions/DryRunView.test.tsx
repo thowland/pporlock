@@ -17,6 +17,7 @@ const MODULE: ModuleStatus = {
   state: 'disabled',
   has_python: true,
   has_report: false,
+  has_settings: false,
   rule_count: 2,
   error: null,
   quarantine: null,

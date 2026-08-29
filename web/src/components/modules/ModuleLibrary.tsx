@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client';
 import type { ModuleStatus } from '../../api/types';
 import { ModuleReport } from './ModuleReport';
+import { ModuleSettings } from './ModuleSettings';
 
 interface Props {
   api: ApiClient;
@@ -33,6 +34,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reportFor, setReportFor] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -126,6 +128,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
               <th className="num">Rules</th>
               <th>Python</th>
               <th>Report</th>
+              <th>Settings</th>
               <th className="num">Matched</th>
               <th className="num">Modified</th>
               <th className="num">Errors</th>
@@ -143,6 +146,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
                 onToggle={(enabled) => void patch(module.name, { enabled })}
                 onPriority={(priority) => void patch(module.name, { priority })}
                 onReport={setReportFor}
+                onSettings={setSettingsFor}
                 onMove={(delta) => move(index, delta)}
                 canMoveUp={index > 0}
                 canMoveDown={index < modules.length - 1}
@@ -158,6 +162,18 @@ export function ModuleLibrary({ api, onOpen }: Props) {
       {reportFor !== null && (
         <ModuleReport api={api} name={reportFor} onClose={() => setReportFor(null)} />
       )}
+
+      {/* Refreshed on save: a settings change can alter what the module does
+          on the next flow, and a table still showing the old state is how you
+          end up debugging a change you already made. */}
+      {settingsFor !== null && (
+        <ModuleSettings
+          api={api}
+          name={settingsFor}
+          onClose={() => setSettingsFor(null)}
+          onSaved={() => void refresh()}
+        />
+      )}
     </div>
   );
 }
@@ -168,6 +184,7 @@ function ModuleRow({
   onOpen,
   onToggle,
   onReport,
+  onSettings,
   onPriority,
   onMove,
   canMoveUp,
@@ -178,6 +195,7 @@ function ModuleRow({
   onOpen: (name: string) => void;
   onToggle: (enabled: boolean) => void;
   onReport: (name: string) => void;
+  onSettings: (name: string) => void;
   onPriority: (priority: number) => void;
   onMove: (delta: number) => void;
   canMoveUp: boolean;
@@ -227,6 +245,24 @@ function ModuleRow({
             <span className="dim">—</span>
           )}
         </td>
+        <td>
+          {/* Only where the module declares something to set. A gear on every
+              row would open an empty dialog for most of them, which teaches
+              people the control does nothing. */}
+          {module.has_settings ? (
+            <button
+              type="button"
+              className="action"
+              aria-label={`Settings for ${module.name}`}
+              title="Module settings"
+              onClick={() => onSettings(module.name)}
+            >
+              ⚙
+            </button>
+          ) : (
+            <span className="dim">—</span>
+          )}
+        </td>
         {/* An em dash rather than 0: "no statistics yet" and "matched nothing"
             are different facts, and showing 0 for the first is a lie. */}
         <td className="num dim">{module.stats?.flows_matched.toLocaleString() ?? '—'}</td>
@@ -259,7 +295,7 @@ function ModuleRow({
 
       {problem !== null && (
         <tr className="module-problem">
-          <td colSpan={12}>
+          <td colSpan={14}>
             <div className="banner error" role="alert">
               <strong>{problem.code}</strong> {problem.message}
               {typeof problem.line === 'number' && (
@@ -275,7 +311,7 @@ function ModuleRow({
 
       {quarantine !== null && (
         <tr className="module-problem">
-          <td colSpan={12}>
+          <td colSpan={14}>
             <div className="banner warn" role="alert">
               <strong>Quarantined</strong> after {quarantine.failures} consecutive failures since{' '}
               {quarantine.since}: {quarantine.reason}

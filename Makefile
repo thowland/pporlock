@@ -60,6 +60,7 @@ version-check:
 	@python3 scripts/version.py check
 
 # A significant change bumps the minor; a bundle of small ones bumps the patch.
+# Bump on the branch, before the merge.
 .PHONY: bump-minor
 bump-minor:
 	@python3 scripts/version.py bump minor
@@ -67,6 +68,51 @@ bump-minor:
 .PHONY: bump-patch
 bump-patch:
 	@python3 scripts/version.py bump patch
+
+# ---------------------------------------------------------------- release ---
+# Tag whatever is merged, from the VERSION file. Separate from the bump on
+# purpose: the bump belongs on the branch and the tag belongs on the merge
+# commit, so tagging cannot pick up a version that was never merged.
+#
+# Every check below exists because the failure it prevents is annoying to undo:
+# a tag on the wrong commit, a tag that duplicates one already pushed, or a tag
+# on a tree whose VERSION disagrees with its manifests.
+.PHONY: tag-release
+tag-release:
+	@set -e; \
+	version=$$(python3 scripts/version.py show); \
+	branch=$$(git rev-parse --abbrev-ref HEAD); \
+	if [ "$$branch" != "$(RELEASE_BRANCH)" ]; then \
+		echo "refusing: on '$$branch', not '$(RELEASE_BRANCH)'"; \
+		echo "  (override with: make tag-release RELEASE_BRANCH=$$branch)"; exit 1; \
+	fi; \
+	if [ -n "$$(git status --porcelain)" ]; then \
+		echo "refusing: working tree is dirty — a tag should name a committed state"; exit 1; \
+	fi; \
+	python3 scripts/version.py check; \
+	if git rev-parse -q --verify "refs/tags/v$$version" >/dev/null; then \
+		echo "refusing: v$$version already exists"; \
+		echo "  bump first (make bump-minor / bump-patch), or delete the tag deliberately"; exit 1; \
+	fi; \
+	git tag -a "v$$version" -m "$$version"; \
+	echo "tagged v$$version at $$(git rev-parse --short HEAD)"; \
+	echo "push it with: make push-release"
+
+# Pushes the branch and its tags. Separate from tag-release so that tagging —
+# which is local and cheap to undo — is not the same keystroke as publishing,
+# which is neither.
+.PHONY: push-release
+push-release:
+	@set -e; \
+	if ! git remote get-url origin >/dev/null 2>&1; then \
+		echo "no 'origin' remote configured"; exit 1; \
+	fi; \
+	echo "==> pushing $(RELEASE_BRANCH) and tags to $$(git remote get-url origin)"; \
+	git push origin $(RELEASE_BRANCH); \
+	git push origin --tags
+
+# What a release is cut from. Override on the command line if you rename it.
+RELEASE_BRANCH ?= master
 
 # ------------------------------------------------------------------ setup ---
 .PHONY: setup

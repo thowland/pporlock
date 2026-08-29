@@ -1,6 +1,6 @@
 [project]
 name = "pporlock-mcp"
-version = "0.7.0"
+version = "0.7.1"
 description = "MCP stdio server for pporlock — HTTP client of the control API"
 requires-python = "==3.12.*"
 license = { text = "GPL-3.0-or-later" }

@@ -226,7 +226,11 @@ class Interceptor:
             flow.kill()
             self.counters.blocked += 1
         elif apply_mod.apply_request_mutation(flow, decision.mutation):
-            if decision.short_circuit is not None:
+            # `decision.blocked` is a refusal, not merely a short-circuit. A
+            # map_local or redirect handed the browser a response it used, so it
+            # counts as a modification — counting it as blocked made the status
+            # bar report failures that never happened (OI-26).
+            if decision.blocked:
                 self.counters.blocked += 1
             else:
                 self.counters.modified += 1

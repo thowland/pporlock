@@ -72,7 +72,11 @@ class FlowRecord:
     provenance: Provenance | None = None
     timing: Timing = field(default_factory=Timing)
     modified: bool = False
+    #: The client was denied what it asked for. Not "short-circuited" — see
+    #: `short_circuit`, and OI-26 for why the distinction is load-bearing.
     blocked: bool = False
+    #: Which of the three short-circuiting actions ended request evaluation.
+    short_circuit: str | None = None
     # Set when the exchange never completed — refused, TLS failure, timeout.
     # `response` is None in that case, so without this the record says only
     # that something happened (OI-23).

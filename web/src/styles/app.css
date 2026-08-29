@@ -330,6 +330,13 @@ table.flows tbody tr:hover {
 .flag.modified {
   color: var(--accent);
 }
+/* Served locally and redirected are successes, so they take the accent rather
+   than the error colour that `blocked` carries — the whole point of OI-26 is
+   that they should not read as failures at a glance. */
+.flag.local,
+.flag.redirected {
+  color: var(--accent);
+}
 .flag.streamed {
   color: var(--text-faint);
 }

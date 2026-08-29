@@ -500,3 +500,30 @@ refused.
 exiting...` with no detail when its port is already held. Hit three times while
 verifying this. Same shape as OI-18 — a true message that names nothing
 actionable.
+
+---
+
+## OI-20 — attribution coverage is below the OI-2 criterion, deterministically
+
+**Found:** while adding the restart E2E spec. **OPEN.**
+
+`attribution.spec.ts::OI-2 DECISION` measures 0.9038 (47 of 52 flows) against a
+0.95 threshold, and does so on every run — the same ratio to sixteen decimal
+places four times in a row. It is not flake, and re-running will not clear it.
+
+It is not caused by the OI-17/18/19 work: none of those diffs touch the
+attribution path, and the spec uses a fresh temp `state_dir` and never restarts
+its daemon, so the pairing sidecar is written and never read during it. The
+failure is a coverage *ratio*, not an auth error — a broken pairing would show
+up as a 403 on `POST /attribution` instead.
+
+The likely cause is environmental drift: OI-2's criterion was established by a
+spike that measured 100% with `<all_urls>` granted, and which requests
+`chrome.webRequest` reports has moved with Chrome versions before.
+
+**Do not lower the threshold to close this.** 0.95 is the OI-2 decision
+criterion — the number that chooses between the primary attribution mechanism
+and the fallback. Changing it changes the decision, and would be exactly the
+coverage laundering G4 exists to prevent. What this needs is identifying which
+five flows are unattributed and whether they are a class the mechanism cannot
+reach, which is an OI-2 question and not a test-tuning one.

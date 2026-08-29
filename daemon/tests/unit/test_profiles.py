@@ -282,3 +282,61 @@ class TestActivating:
         manager.activate("debug")
         (root / "debug.yaml").unlink()
         assert manager.active.name == DEFAULT_PROFILE
+
+
+class TestTheActiveProfileSurvivesARestart:
+    """Activation is user state, and a restart used to discard it.
+
+    That mattered beyond the inconvenience: the active profile's
+    ``exclusions_add`` are applied at startup (OI-9), so a daemon that always
+    came back on ``default`` applied none of them — the feature worked until
+    the first restart and then quietly stopped.
+    """
+
+    def _manager(self, tmp_path: Path) -> ProfileManager:
+        return ProfileManager(tmp_path / "profiles", state_path=tmp_path / "active-profile")
+
+    def _with_profile(self, tmp_path: Path, name: str) -> ProfileManager:
+        manager = self._manager(tmp_path)
+        manager.save(Profile(name=name))
+        return manager
+
+    def test_it_comes_back_active(self, tmp_path: Path) -> None:
+        self._with_profile(tmp_path, "banking").activate("banking")
+        assert self._manager(tmp_path).active_name == "banking"
+
+    def test_the_default_needs_no_file_to_be_restored(self, tmp_path: Path) -> None:
+        assert self._manager(tmp_path).active_name == DEFAULT_PROFILE
+
+    def test_deleting_the_active_profile_is_remembered_too(self, tmp_path: Path) -> None:
+        manager = self._with_profile(tmp_path, "banking")
+        manager.activate("banking")
+        manager.delete("banking")
+        assert manager.active_name == DEFAULT_PROFILE
+        # Not merely in this process: a restart must not resurrect a profile
+        # that no longer exists.
+        assert self._manager(tmp_path).active_name == DEFAULT_PROFILE
+
+    def test_a_profile_deleted_behind_our_back_falls_back(self, tmp_path: Path) -> None:
+        manager = self._with_profile(tmp_path, "banking")
+        manager.activate("banking")
+        (tmp_path / "profiles" / "banking.yaml").unlink()
+        assert self._manager(tmp_path).active_name == DEFAULT_PROFILE
+
+    def test_an_unreadable_state_file_does_not_stop_startup(self, tmp_path: Path) -> None:
+        """`default` is always valid, so there is nothing here a user could act
+        on — but a daemon refusing to start over a one-line file would be a
+        real problem."""
+        self._with_profile(tmp_path, "banking").activate("banking")
+        (tmp_path / "active-profile").unlink()
+        (tmp_path / "active-profile").mkdir()  # a directory: read_text raises
+        assert self._manager(tmp_path).active_name == DEFAULT_PROFILE
+
+    def test_an_unwritable_location_does_not_fail_the_activation(self, tmp_path: Path) -> None:
+        """The profile is active in this process either way. Refusing to switch
+        because a sidecar could not be written is the wrong trade."""
+        manager = ProfileManager(tmp_path / "profiles", state_path=tmp_path / "nodir" / "x" / "p")
+        manager.save(Profile(name="banking"))
+        (tmp_path / "nodir").write_text("not a directory")
+        assert manager.activate("banking").name == "banking"
+        assert manager.active_name == "banking"

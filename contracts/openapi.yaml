@@ -682,7 +682,7 @@ paths:
                   count: { type: integer }
                   rules:
                     type: array
-                    items: { $ref: './schemas/rule.schema.json' }
+                    items: { $ref: '#/components/schemas/CompiledRule' }
     put:
       tags: [rules]
       summary: Replace the rule set without restarting the proxy (REQ MOD-004)
@@ -719,7 +719,7 @@ paths:
                   count: { type: integer }
                   rules:
                     type: array
-                    items: { $ref: './schemas/rule.schema.json' }
+                    items: { $ref: '#/components/schemas/CompiledRule' }
         '400':
           description: A rule did not compile. The running rules are unchanged.
           content:
@@ -993,6 +993,49 @@ components:
             assets:
               type: array
               items: { type: string }
+
+    CompiledRule:
+      description: |
+        A rule **as the engine holds it**, which is not the shape a human
+        writes.
+
+        `rule.schema.json` is the authoring schema — what goes in `rules.yaml`
+        or a manifest's `rules:` list. It is `unevaluatedProperties: false`
+        deliberately, so a misspelled rule key is an error rather than a
+        setting that silently does nothing. A compiled rule additionally
+        carries three fields the server assigns and the author never writes.
+
+        This schema does not `$ref` the authoring one, and that is not
+        laziness: `unevaluatedProperties` inside a referenced schema cannot see
+        properties contributed by an adjacent `allOf` branch, so composing the
+        two produces a schema nothing can satisfy. Loosening the authoring
+        schema instead would have let an author write `priority:` on a *rule*
+        and have the editor accept it — and rule-versus-module priority is
+        already the easiest thing to confuse here.
+
+        So the authoring shape is validated where authoring happens (the
+        loader, and `POST /validate`), and this describes what the route
+        returns. Action-specific keys are open because they have already been
+        compiled and are well-formed by construction.
+      type: object
+      required: [name, action, enabled, rule_id, module, priority]
+      additionalProperties: true
+      properties:
+        name: { type: string }
+        action: { $ref: './schemas/rule.schema.json#/$defs/action' }
+        enabled: { type: boolean }
+        match: { $ref: './schemas/rule.schema.json#/$defs/match' }
+        rule_id:
+          type: string
+          description: Server-assigned and stable within a load. `module:index`.
+        module:
+          type: string
+          description: |
+            Which module contributed the rule. Rules from `rules.yaml` carry the
+            module named in the PUT, defaulting to `api`.
+        priority:
+          type: integer
+          description: Inherited from the module. Lower runs earlier.
 
     ValidationResult:
       type: object

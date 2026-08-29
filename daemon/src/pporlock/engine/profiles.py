@@ -70,11 +70,47 @@ class Profile:
 class ProfileManager:
     """Profiles on disk, one YAML file each."""
 
-    __slots__ = ("_active", "root")
+    __slots__ = ("_active", "root", "state_path")
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, state_path: Path | None = None) -> None:
         self.root = root
+        #: Where the active profile name is remembered across restarts.
+        #:
+        #: Which profile is active is user state, like module enablement, and
+        #: belongs beside it rather than in a profile file — a profile does not
+        #: know whether it is the chosen one, and writing that into one would
+        #: mean rewriting two files on every switch to keep them agreeing.
+        self.state_path = state_path or (root.parent / "active-profile")
         self._active = DEFAULT_PROFILE
+        self._restore()
+
+    def _restore(self) -> None:
+        """Read the remembered profile, falling back to default.
+
+        A profile that has since been deleted, or an unreadable file, falls
+        back silently: `default` is always valid and always exists, so there is
+        nothing here a user could act on. What must not happen is the daemon
+        refusing to start because a one-line file went missing.
+        """
+        try:
+            name = self.state_path.read_text().strip()
+        except OSError:
+            return
+        if name and any(p.name == name for p in self.all_profiles()):
+            self._active = name
+
+    def _remember(self) -> None:
+        """Persist the active profile. Best effort, and deliberately quiet.
+
+        Failing to write it must not fail the activation: the profile *is*
+        active in this process either way, and refusing to switch because a
+        sidecar could not be written would be the wrong trade.
+        """
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(f"{self._active}\n")
+        except OSError:
+            pass
 
     def _path(self, name: str) -> Path:
         return self.root / f"{name}.yaml"
@@ -124,6 +160,7 @@ class ProfileManager:
         path.unlink()
         if self._active == name:
             self._active = DEFAULT_PROFILE
+            self._remember()
         return True
 
     def activate(self, name: str) -> Profile:
@@ -131,6 +168,7 @@ class ProfileManager:
         if profile is None:
             raise ConfigError(f"no such profile: {name}")
         self._active = name
+        self._remember()
         return profile
 
     @property

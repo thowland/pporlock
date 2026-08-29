@@ -104,31 +104,84 @@ Cosmetic, but it reads as a merge artefact and should go.
 
 ## OI-8 — Module enablement does not survive a daemon restart
 
-**Found:** Sprint 11.
+**Found:** Sprint 11. **CLOSED** — sidecar state file.
 
-Enablement is registry state, not manifest state. Persisting it means rewriting
-user-authored `module.yaml` files, which is a design call rather than a bug fix.
+Enablement and priority are *user* state; the manifest is the *author's* file.
+Recording the first in the second means the daemon rewrites a file it does not
+own, losing comments and formatting the first time someone flips a switch in the
+UI. So it does not.
 
-**To close:** decide where user state lives. Writing it back into the manifest
-means the daemon edits files the user owns; a sidecar state file avoids that but
-adds a second source of truth for "is this module on". Needs deciding before
-v1.0.
+`<state_dir>/module-state.json` holds `{name: {enabled, priority}}`. The manifest
+**seeds** an entry the first time a module is seen and the sidecar wins
+thereafter — exactly the in-memory rule `ModuleRegistry.reload` already applied
+across a reload; it just did not outlive the process. One consequence is worth
+stating plainly: **editing `enabled:` in a manifest after first sight does
+nothing.** The API is where enablement is set, and the only place it is audited.
 
----
+The path is passed explicitly by `cli/runner.build_evaluator` from
+`config.state_dir`, deliberately *not* derived from `modules.root` — that is
+separately configurable (OI-10) and holds module content, not user state.
+
+- Every change writes through immediately. This daemon is a launchd agent that
+  gets killed rather than stopped; there is no shutdown hook to trust.
+- Writes are atomic (temp file + rename), so a crash leaves the previous file
+  rather than a truncated one that would read as corrupt.
+- `reload` prunes rows for modules no longer on disk, so a reinstall does not
+  inherit a decision made about different code. A module that merely failed to
+  *load* keeps its state: a typo is not a deletion.
+- A corrupt or unwritable sidecar is skipped the way a malformed profile is —
+  manifest defaults, the reason on `registry.state.error`, and the startup banner
+  prints it. Silently reverting every module to "off" would look like the modules
+  had stopped working.
+- The file holds a module name, a boolean and an integer. No secret, so no
+  redaction concern; a test asserts the written shape so that stays true.
+
+Verified against a daemon started by `pporlock run`, not only in unit tests
+(OI-11's lesson): enable through the API, restart, `GET /rules` still serves the
+module's rules at the priority that was set.
+
 
 ## OI-9 — `Profile.exclusions_add` is persisted but not applied
 
-**Found:** Sprint 11.
+**Found:** Sprint 11. **CLOSED** — semantics defined, then implemented.
 
-Parsed and stored, never applied on activation. Unwinding exclusions on a
-profile switch has no defined semantics in the requirements, and inventing them
-mid-sprint would be a design decision made by accident.
+The effective exclusion list is the **base** list (shipped defaults plus the
+user's own) **plus** the active profile's `exclusions_add`, the additions tagged
+`source: "profile"`. `ControlApp.apply_exclusions` recomputes it from the base on
+profile activation, on deletion of the active profile, and on `PUT /exclusions`,
+and installs it on both the interceptor and its evaluator. Because it always
+recomputes from the base, switching away takes the outgoing profile's entries
+off; the base is never mutated by a profile.
 
-**To close:** define what happens to a connection already tunnelled under the
-outgoing profile's exclusions, then implement.
+`PUT /exclusions` replaces the *base* and drops entries marked
+`source: "profile"`, so a GET-then-PUT round trip in the UI cannot silently adopt
+a profile's additions as the user's own — which would have made them impossible
+to get rid of.
 
+**The connection already tunnelled cannot be un-tunnelled.** `ignore_connection`
+means mitmproxy never terminated the TLS: there are no plaintext bytes to reach
+into and no session key to acquire after the fact. So a list change applies to
+**new connections only**, and Chrome holds keep-alive connections — a host can
+keep tunnelling for as long as one stays open after the entry that excluded it
+has gone. The inverse holds too: an addition does not reach into a connection
+already being decrypted. Stated in the docstring, covered by tests, and guarded
+by one asserting `ignore_connection = True` appears exactly once in the addon, so
+a second decision point in a later sprint fails the claim rather than rotting it.
 
----
+**A bug fell out.** `interceptor.exclusions` and `interceptor.evaluator.exclusions`
+are separate references, and `PUT /exclusions` updated only the first. The two
+then disagreed about which hosts were excluded — which is how a dry run stops
+predicting live behaviour (REQ CAP-031).
+
+**And a dependency, now also closed.** The active profile itself was not
+persisted: `ProfileManager._active` was in-memory, so a restart returned to
+`default` and with it to the base exclusion list. The startup application of
+profile exclusions therefore had no effect at all, and the feature worked until
+the first restart and then silently stopped. The active profile is now remembered
+in `<state_dir>/active-profile`; a profile deleted meanwhile falls back to
+`default`, and neither an unreadable file nor an unwritable location stops the
+daemon or fails the activation.
+
 
 ## OI-10 — `state_dir` does not cascade to `modules.root`
 
@@ -232,29 +285,33 @@ never being reached) or it should leave the taxonomy.
 
 **Found:** Sprint 16, by TST-005. **CLOSED.**
 
-All three are declared now: `GET /rules` and `PUT /rules` (including the 400
-that means a rule did not compile and the running rules are therefore
-unchanged), and `POST /pair/begin`. `POST /flows/{flow_id}/suggest-rule` gained
-the `400` it was already answering.
+`contracts/openapi.yaml` declares `GET /rules`, `PUT /rules` and
+`POST /pair/begin`, and `POST /flows/{flow_id}/suggest-rule` has its `400`.
 
-The `UNDECLARED_ROUTES` allowlist and the test that failed once the OpenAPI
-caught up did their job — the exemption could not quietly become permanent,
-which is the only reason an allowlist is ever acceptable.
+The `UNDECLARED_ROUTES` allowlist and its guard test are **both removed**, not
+emptied. With an empty allowlist `test_every_served_route_is_declared` already
+catches the next undeclared route, which is all the allowlist protected; the
+guard's `frozenset() & declared` would have been vacuously empty forever, which
+is precisely the "exemption that quietly becomes permanent" it existed to
+prevent.
 
-### Original finding
+**A mismatch surfaced while closing it, and it is fixed.** `rule.schema.json` is
+the schema a human writes a rule *against*, and it is
+`unevaluatedProperties: false` deliberately, so a misspelled rule key is an error
+rather than a setting that silently does nothing. `GET`/`PUT /rules` return
+**compiled** rules, which additionally carry `rule_id`, `module` and `priority` —
+so a compiled rule could not validate against the schema those responses pointed
+at.
 
-- `GET /rules` and `PUT /rules` — served, implemented, tested, used by the web
-  UI's rule editor, described in SPEC-0 §6, absent from `contracts/openapi.yaml`.
-- `POST /pair/begin` — served, and driven by `pporlock pair`. `/pair`
-  (redemption) is declared; the half that mints the code is not.
-- `POST /flows/{flow_id}/suggest-rule` declares only `200` but validates
-  `intent` and answers `400`, so a generated client has no error case.
+There is now a `CompiledRule` schema describing what the routes actually return.
+It deliberately does not `$ref` the authoring schema: `unevaluatedProperties`
+inside a referenced schema cannot see properties contributed by an adjacent
+`allOf` branch, so composing the two produces a schema nothing can satisfy.
+Loosening the authoring schema instead would have let someone write `priority:`
+on a *rule* and have the editor accept it — and rule-versus-module priority is
+already the easiest thing here to confuse. The authoring shape is validated where
+authoring happens: the loader, and `POST /validate`.
 
-The first two sit in a named `UNDECLARED_ROUTES` allowlist with a test that
-**fails once the OpenAPI catches up**, so the exemption cannot quietly become
-permanent.
-
----
 
 ## OI-15 — should a module be able to extend the note taxonomy?
 

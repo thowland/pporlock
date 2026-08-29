@@ -35,6 +35,7 @@ from ..capture.session import SessionMeta, SessionStore
 from ..capture.suggest import suggest_rule
 from ..config import Config, save_config, update_config
 from ..engine.evaluator import Evaluator
+from ..engine.exclusions import ExclusionList
 from ..engine.modules.loader import (
     ASSETS_DIR,
     MANIFEST_NAME,
@@ -327,6 +328,7 @@ class ControlApp:
         profiles: ProfileManager | None = None,
         static_dir: Any = None,
         base_ruleset: RuleSet | None = None,
+        base_exclusions: ExclusionList | None = None,
         sessions: SessionStore | None = None,
         version: str = "0.1.0",
     ) -> None:
@@ -370,6 +372,19 @@ class ControlApp:
         self.tokens.ensure()
         self.dev_toggles = {"anticache": False, "anticomp": False}
         self.active_profile = profiles.active_name if profiles else DEFAULT_PROFILE
+        # The exclusion list as the *user* set it: shipped defaults plus their
+        # own file, with no profile additions folded in. Kept separately from
+        # the effective list so that switching profiles can take the outgoing
+        # profile's additions back off again (OI-9). Without a base to return
+        # to, "remove that profile's entries" is not answerable.
+        self.base_exclusions = (
+            base_exclusions
+            if base_exclusions is not None
+            else (interceptor.exclusions if interceptor is not None else ExclusionList())
+        )
+        #: base + the active profile's ``exclusions_add``. What the proxy uses.
+        self.exclusions = self.base_exclusions
+        self.apply_exclusions()
         self.asgi = self._build()
 
     # -- helpers ---------------------------------------------------------
@@ -449,6 +464,48 @@ class ControlApp:
         # The evaluator interleaves Python hooks with declarative rules, so it
         # needs the registry as well as the rules built from it (REQ MOD-023).
         self.interceptor.evaluator.registry = self.registry
+
+    def apply_exclusions(self) -> ExclusionList:
+        """Recompute the effective exclusion list and install it (REQ MOD-044, OI-9).
+
+        The effective list is the base list — shipped defaults plus the user's
+        own — plus the active profile's ``exclusions_add``, tagged ``source:
+        "profile"`` so ``GET /exclusions`` shows which entries are on loan from
+        the profile rather than the user's own. Switching profiles recomputes
+        from the base, which is what takes the outgoing profile's additions off
+        again; the base is never mutated by a profile.
+
+        **A connection already tunnelled cannot be un-tunnelled.** The exclusion
+        decision is made once, at the ClientHello, and setting
+        ``ignore_connection`` means mitmproxy never terminated the TLS: there
+        are no plaintext bytes to reach into and no session key to acquire
+        after the fact. Removing an entry — by switching profiles or by
+        ``PUT /exclusions`` — therefore applies to *new* connections only, and
+        a browser holding a keep-alive connection to that host will keep
+        tunnelling over it until it is closed. The inverse holds too: an
+        addition does not reach into a connection already being decrypted. This
+        is a property of TLS, not a deferred feature, and it is covered by a
+        test so it stays stated rather than discovered.
+
+        A new ``ExclusionList`` is built rather than the live one mutated, for
+        the same reason a rule swap builds a new snapshot: a connection being
+        decided right now finishes against a consistent list.
+        """
+        profile = self.profiles.active if self.profiles is not None else None
+        additions = list(profile.exclusions_add) if profile is not None else []
+        self.exclusions = (
+            self.base_exclusions.with_additions(additions)
+            if additions
+            else ExclusionList(list(self.base_exclusions.entries))
+        )
+        if self.interceptor is not None:
+            self.interceptor.exclusions = self.exclusions
+            # The evaluator holds its own reference and is what the dry runner
+            # and the engine's own ClientHello phase consult. Updating only the
+            # interceptor left the two disagreeing about which hosts are
+            # excluded, which is how a dry run stops predicting live behaviour.
+            self.interceptor.evaluator.exclusions = self.exclusions
+        return self.exclusions
 
     def _state_payload(self) -> dict[str, Any]:
         from mitmproxy import version as mitm_version
@@ -632,17 +689,29 @@ class ControlApp:
         return Response(status_code=204)
 
     async def get_exclusions(self, _: Request) -> JSONResponse:
-        if self.interceptor is None:
-            return JSONResponse({"entries": []})
-        return JSONResponse(self.interceptor.exclusions.to_dict())
+        """The effective list, each entry carrying where it came from.
+
+        ``source`` distinguishes the shipped defaults from the user's own from
+        the active profile's ``exclusions_add`` (OI-9). A profile entry is not
+        the user's and will disappear when they switch away, so a UI that could
+        not tell them apart would invite someone to "remove" an entry that
+        comes straight back.
+        """
+        return JSONResponse(self.exclusions.to_dict())
 
     async def put_exclusions(self, request: Request) -> JSONResponse:
-        from ..engine.exclusions import ExclusionList
+        """Replace the *base* list. Profile additions are re-applied on top.
 
+        A PUT that wrote the effective list back as the base would silently
+        adopt the active profile's additions as the user's own, and they would
+        then survive switching away from that profile.
+        """
         body = await request.json()
         entries = body.get("entries", [])
-        if self.interceptor is not None:
-            self.interceptor.exclusions = ExclusionList.from_dicts(entries)
+        self.base_exclusions = ExclusionList.from_dicts(
+            [e for e in entries if e.get("source") != "profile"]
+        )
+        self.apply_exclusions()
         self.audit.record(
             request.scope.get("pporlock_client", "cli"), "put_exclusions", count=len(entries)
         )
@@ -978,7 +1047,8 @@ class ControlApp:
 
         await self.offload(_write_module_files, directory, dict(files))
         await self.offload(self.reload_modules)
-        registry.set_enabled(name, enabled)
+        # Offloaded: set_enabled persists to the module-state sidecar (OI-8).
+        await self.offload(registry.set_enabled, name, enabled)
         self.apply_modules()
 
         module = registry.get(name)
@@ -1005,13 +1075,17 @@ class ControlApp:
         if unknown:
             raise ConfigError(f"cannot patch {', '.join(sorted(unknown))}", module=name)
 
+        # Offloaded: both setters write the module-state sidecar so the change
+        # survives a restart (OI-8), and filesystem work must not land on the
+        # proxy's event loop (REQ API-002).
         if "enabled" in body:
-            self.registry.set_enabled(name, bool(body["enabled"]))
+            await self.offload(self.registry.set_enabled, name, bool(body["enabled"]))
         if "priority" in body:
             try:
-                self.registry.set_priority(name, int(body["priority"]))
+                priority = int(body["priority"])
             except (TypeError, ValueError) as exc:
                 raise ConfigError(f"priority must be an integer: {body['priority']!r}") from exc
+            await self.offload(self.registry.set_priority, name, priority)
 
         self.apply_modules()
         # REQ MCP-031 — enabling a module changes what happens to traffic, so
@@ -1218,6 +1292,9 @@ class ControlApp:
             return self._not_found(f"no profile {name}")
         self.active_profile = self.profiles.active_name
         self.apply_modules()
+        # Deleting the active profile falls back to ``default``, which has no
+        # additions — so its exclusions come off too (OI-9).
+        self.apply_exclusions()
         self.audit.record(self._client(request), "delete_profile", profile=name)
         self.events.publish("state.changed", {"active_profile": self.active_profile})
         return Response(status_code=204)
@@ -1243,6 +1320,10 @@ class ControlApp:
             if self.interceptor is not None:
                 self.interceptor.dev_toggles[toggle] = bool(value)
         self.apply_modules()
+        # REQ MOD-044. The outgoing profile's additions come off and the
+        # incoming one's go on, both recomputed from the user's base list.
+        # New connections only — see ``apply_exclusions``.
+        self.apply_exclusions()
 
         self.audit.record(self._client(request), "activate_profile", profile=profile.name)
         self.events.publish("state.changed", {"active_profile": profile.name})

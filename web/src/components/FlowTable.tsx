@@ -46,8 +46,21 @@ function Flags({ flow, attributionActive }: { flow: FlowRecord; attributionActiv
         </span>
       )}
       {flow.blocked && (
-        <span className="flag blocked" title="Short-circuited by a rule">
+        <span className="flag blocked" title="Blocked — the client was denied this response">
           BLK
+        </span>
+      )}
+      {/* map_local and redirect short-circuit too, and both succeed. They used
+          to render as BLK, which made an enabled css-tamper look like it was
+          breaking the page it was styling (OI-26). */}
+      {flow.short_circuit === 'map_local' && (
+        <span className="flag local" title="Served from a module's assets, not the network">
+          LOC
+        </span>
+      )}
+      {flow.short_circuit === 'redirect' && (
+        <span className="flag redirected" title="Redirected to a different target by a rule">
+          RDR
         </span>
       )}
       {flow.modified && (

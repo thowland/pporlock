@@ -74,14 +74,64 @@ class TestHttpRecording:
         assert record.request is not None
         assert not record.request.body_truncated
 
-    def test_blocked_is_derived_from_short_circuit(self) -> None:
+    # Replaces `test_blocked_is_derived_from_short_circuit`, which asserted that
+    # any short-circuit set `blocked`. That was the bug, not the contract: three
+    # actions short-circuit and only one denies the client (REQ MOD-012,
+    # OI-26). The three cases below pin each one separately.
+
+    def _short_circuited(self, action: Action) -> Any:
         builder = ProvenanceBuilder("default")
-        builder.short_circuit("block-vendors:2")
+        builder.record(
+            phase=Phase.REQUEST_SHORT_CIRCUIT,
+            module="m",
+            rule_id="m:2",
+            action=action,
+            outcome=Outcome.APPLIED,
+            duration_ms=0.1,
+        )
+        builder.short_circuit("m:2")
+        ring = RingBuffer()
+        RingSink(ring).record_http(request(), response(), builder.build(), {})
+        return ring.get("f0")
+
+    def test_a_block_is_blocked(self) -> None:
+        """The client was denied what it asked for. This is the only one."""
+        record = self._short_circuited(Action.BLOCK)
+        assert record is not None
+        assert record.blocked
+        assert record.short_circuit == "block"
+
+    def test_a_map_local_is_not_blocked(self) -> None:
+        """The reported bug: enabling css-tamper made its own stylesheet — served
+        successfully, status 200 — appear in the flow table as blocked.
+
+        A local file was served. That is a modification of where the response
+        came from, not a refusal, and the flags column is how a hundred rows are
+        scanned for the one that went wrong.
+        """
+        record = self._short_circuited(Action.MAP_LOCAL)
+        assert record is not None
+        assert not record.blocked
+        assert record.modified
+        assert record.short_circuit == "map_local"
+
+    def test_a_redirect_is_not_blocked(self) -> None:
+        """The request was sent elsewhere and answered. Also not a refusal."""
+        record = self._short_circuited(Action.REDIRECT)
+        assert record is not None
+        assert not record.blocked
+        assert record.modified
+        assert record.short_circuit == "redirect"
+
+    def test_a_flow_that_was_not_short_circuited_says_so(self) -> None:
+        """Null, not a guess. An absent short-circuit is a fact worth stating."""
+        builder = ProvenanceBuilder("default")
         ring = RingBuffer()
         RingSink(ring).record_http(request(), response(), builder.build(), {})
         record = ring.get("f0")
         assert record is not None
-        assert record.blocked
+        assert record.short_circuit is None
+        assert not record.blocked
 
     def test_modified_is_derived_from_applied_entries(self) -> None:
         builder = ProvenanceBuilder("default")

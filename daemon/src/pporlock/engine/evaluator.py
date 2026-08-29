@@ -61,10 +61,24 @@ class RequestDecision:
     short_circuit: SyntheticResponse | None = None
     kill: bool = False
     wants_body: bool = True
+    #: Which action ended request evaluation, when one did.
+    #:
+    #: Three actions short-circuit and only one of them is a block (REQ
+    #: MOD-012). Collapsing them lost the distinction between a request that
+    #: was refused and one that was answered from disk or sent elsewhere —
+    #: both succeeded, and calling either "blocked" misreports the flow
+    #: (OI-26).
+    short_circuit_action: Action | None = None
 
     @property
     def blocked(self) -> bool:
-        return self.short_circuit is not None or self.kill
+        """Whether the client was denied the response it asked for.
+
+        `kill` and a `block` stub are refusals. `map_local` and `redirect`
+        short-circuit too, and are not: the browser got a response, just not
+        from the origin.
+        """
+        return self.kill or self.short_circuit_action is Action.BLOCK
 
 
 @dataclass(slots=True)
@@ -293,6 +307,19 @@ class Evaluator:
             self._apply_map_local(rule, request, decision, builder, started)
         elif rule.action is Action.REDIRECT:
             self._apply_redirect(rule, decision, builder, started)
+
+        # Recorded only when the action actually took effect. A rule that
+        # matched and then failed — an unknown stub, an asset outside the
+        # module — leaves the flow to proceed normally, and must not be
+        # reported as having short-circuited it. Each action signals success
+        # differently: a block kills or substitutes, map_local substitutes, a
+        # redirect retargets.
+        if (
+            decision.kill
+            or decision.short_circuit is not None
+            or decision.mutation.redirect is not None
+        ):
+            decision.short_circuit_action = rule.action
 
     def _apply_block(
         self,

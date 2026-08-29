@@ -747,3 +747,55 @@ now prefers.
 
 Set to **0.2.0**. The eighteen sprints and everything before this are 0.1.0 as
 a matter of record; retroactively renumbering merged history would be fiction.
+
+---
+
+## OI-26 — `map_local` and `redirect` were reported as blocked
+
+**Found:** a user enabling `css-tamper` and seeing its own stylesheet appear in
+the flow table as blocked. **CLOSED** (contract, SPEC-0, daemon and UI).
+
+Three actions short-circuit request evaluation — `block`, `map_local`,
+`redirect` (REQ MOD-012) — and the sink derived a single flag from all three:
+
+```python
+blocked = provenance.short_circuited_by is not None
+```
+
+So `css-tamper`'s `serve-user-stylesheet` rule, which serves a file from the
+module's `assets/` and returns **200**, produced a row flagged `BLK`. The module
+was working exactly as designed and the flow table said it had blocked the page
+it was styling. The row also carried `modified` at the same time, contradicting
+the invariant the sink's own comment asserted.
+
+**This was not drift — the contract said the same thing.** SPEC-0 §6.5 read
+"`blocked` is true when the flow was short-circuited", and `flow.schema.json`
+described the field as "The flow was short-circuited". Implementation and
+contract agreed with each other and both misdescribed the system: a field named
+`blocked` that is true when a file was served successfully will be misread by
+everyone, every time. Fixing the code alone would have re-introduced the drift
+this project keeps finding, so the schema and SPEC-0 were corrected too.
+
+Now `blocked` means the client was **denied** the response it asked for — a
+`block`, by stub or by kill — and a new `short_circuit` field names which of
+the three ended evaluation, or null. `map_local` and `redirect` count as
+modifications, because both hand the browser a response it uses. The web UI
+renders `LOC` and `RDR` in the accent colour rather than `BLK` in the error
+colour, so they no longer read as failures at a glance.
+
+**A regression caught by an existing test, worth recording.** The first attempt
+set the action at the top of `_apply_short_circuit`, before dispatch — which
+reported a *failed* block (an unknown stub, an asset outside the module) as
+having blocked a flow that actually proceeded. `test_an_unknown_stub_is_an_error
+_not_a_crash` failed immediately. The action is now recorded only when the
+decision shows it took effect, and each action signals that differently: a block
+kills or substitutes, `map_local` substitutes, a redirect retargets.
+
+**Test replaced, not deleted (G4):** `test_blocked_is_derived_from_short_circuit`
+asserted that any short-circuit sets `blocked`, which is the bug stated as a
+requirement. It is replaced by four cases pinning each action separately plus
+the no-short-circuit case.
+
+**Counters changed with it.** `counters.blocked` counted every short-circuit, so
+the status bar reported blocks that never happened; it now counts refusals, and
+`map_local`/`redirect` count as modified.

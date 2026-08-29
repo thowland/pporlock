@@ -134,6 +134,7 @@ def serialize_flow(
         "tab_id": record.tab_id,
         "modified": record.modified,
         "blocked": record.blocked,
+        "short_circuit": record.short_circuit,
         "redacted": redacted,
     }
 

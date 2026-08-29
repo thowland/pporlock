@@ -84,7 +84,7 @@
     },
     "blocked": {
       "type": "boolean",
-      "description": "The flow was short-circuited"
+      "description": "The client was denied the response it asked for \u2014 a `block` rule, by stub or by kill. NOT merely 'short-circuited': `map_local` and `redirect` also end request evaluation early, and both return a response the browser uses. See `short_circuit` for which action ended evaluation (OI-26)."
     },
     "provenance": {
       "$ref": "https://pporlock.local/schemas/provenance.schema.json"
@@ -124,6 +124,19 @@
           "description": "True when the client went away, false when the upstream did. A browser cancelling a request and an origin refusing one look identical in a count and are not the same event."
         }
       }
+    },
+    "short_circuit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "block",
+        "map_local",
+        "redirect",
+        null
+      ],
+      "description": "Which action ended request evaluation, if one did (REQ MOD-012). `map_local` means the response came from a module's assets and `redirect` that the request was sent elsewhere \u2014 both succeeded, and neither is a block."
     }
   },
   "$defs": {

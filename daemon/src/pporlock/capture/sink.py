@@ -78,12 +78,14 @@ class RingSink:
             if cut:
                 capped_response = replace_response_body(response, body, truncated=True)
 
-        blocked = provenance.short_circuited_by is not None
-        # "Modified" means headers or a body were changed. A short-circuited
-        # flow was blocked, not modified — showing both flags on one row makes
-        # the flags column, which is how you scan a hundred rows for the one
-        # that went wrong, harder rather than easier to read.
-        modified = _was_modified(provenance)
+        short_circuit = _short_circuit_action(provenance)
+        # A `block` denied the client. `map_local` and `redirect` also end
+        # evaluation early, and both hand the browser a response it uses — so
+        # they are modifications, not blocks. Reporting them as blocked is what
+        # made an enabled css-tamper look like it was breaking the page it was
+        # styling (OI-26).
+        blocked = short_circuit == "block"
+        modified = _was_modified(provenance) or short_circuit in ("map_local", "redirect")
 
         tab_id = request.tab_id if request is not None else None
         if tab_id is None and request is not None and self.resolve_tab is not None:
@@ -101,6 +103,7 @@ class RingSink:
             timing=Timing(pporlock_ms=timing.get("pporlock_ms")),
             modified=modified,
             blocked=blocked,
+            short_circuit=short_circuit,
         )
         self._emit(record)
 
@@ -216,6 +219,24 @@ class RingSink:
 
 #: Actions that change an existing message rather than replacing it.
 _MODIFYING_ACTIONS = frozenset({Action.HEADERS, Action.BODY})
+
+
+def _short_circuit_action(provenance: Provenance) -> str | None:
+    """Which action ended request evaluation, by name.
+
+    `short_circuited_by` records the rule, not what it did, so the action is
+    recovered from the entry that rule wrote. Three actions can appear here and
+    only one of them is a block (REQ MOD-012).
+    """
+    rule_id = provenance.short_circuited_by
+    if rule_id is None:
+        return None
+    for entry in provenance.entries:
+        if entry.rule_id == rule_id:
+            return str(entry.action.value)
+    # A short-circuit with no matching entry should not happen; naming the rule
+    # without claiming an action is better than guessing "block".
+    return None
 
 
 def _was_modified(provenance: Provenance) -> bool:

@@ -259,7 +259,12 @@ The persisted and API-exposed representation. This is the shape in `GET /flows`,
 
 - `body` is omitted entirely from list responses (`GET /flows`); it appears only in detail responses (`GET /flows/{id}`). See §6.3.
 - `body_encoding` disambiguates: text bodies are sent as UTF-8 strings for readability, binary as base64.
-- `modified` is true when any header or body mutation was applied. `blocked` is true when the flow was short-circuited.
+- `modified` is true when any header or body mutation was applied. `blocked` is true when the
+  client was **denied** the response it asked for — a `block` rule, by stub or by kill.
+  It is deliberately *not* "short-circuited": `map_local` and `redirect` end request
+  evaluation early too (REQ MOD-012) and both return a response the browser uses, so
+  reporting them as blocked misdescribes a flow that succeeded. `short_circuit` names
+  which of the three ended evaluation, and is null when none did (OI-26).
 - `redacted` reports whether redaction was applied to this representation (REQ CAP-040).
 
 ### 3.5 WebSocket flows

@@ -441,6 +441,199 @@ class TestStartupWiring:
         assert log.stat().st_size == 0
         assert (directory / "pporlock.out.log.1").stat().st_size == 5000
 
+    # -- OI-8: module enablement survives a restart ----------------------
+
+    def test_the_registry_the_daemon_builds_persists_to_the_state_directory(
+        self, tmp_path: Any
+    ) -> None:
+        """OI-8, and OI-11's lesson applied to persistence.
+
+        A sidecar written to a path a *test* constructed proves nothing about a
+        daemon that writes somewhere else. This asserts the path
+        ``build_evaluator`` actually gives the registry, against the configured
+        ``state_dir`` — not against ``modules.root``, which is separately
+        configurable (OI-10) and is module content rather than user state.
+        """
+        from pporlock.cli.runner import build_evaluator
+        from pporlock.engine.modules.state import STATE_FILENAME
+
+        config = self._config(tmp_path)
+        config.modules.root = str(tmp_path / "elsewhere" / "modules")
+        _evaluator, registry, _profiles, _base, _path, _error = build_evaluator(config)
+
+        assert registry.state.path == Path(config.state_dir) / STATE_FILENAME
+
+    def test_enabling_a_module_through_the_daemons_api_survives_a_restart(
+        self, tmp_path: Any
+    ) -> None:
+        """OI-8 end to end, through the app ``_run`` assembles.
+
+        Two sprints shipped a module system the daemon never constructed, so the
+        proof that persistence works has to run through the daemon's own
+        ControlApp and then through a *second* ``build_evaluator`` — standing in
+        for the restart — rather than through a registry the test kept alive.
+        """
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        self._write_module(
+            tmp_path / "modules", "csp", "name: csp\npporlock_api: '1'\nenabled: false\n"
+        )
+
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+        client = TestClient(control.asgi)
+        headers = {
+            "Authorization": f"Bearer {control.tokens.ensure()}",
+            "X-Pporlock-Client": "ui",
+        }
+        response = client.patch("/modules/csp", headers=headers, json={"enabled": True})
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
+
+        # Restart: nothing carried over but the state directory.
+        _e2, restarted, _p2, _b2, _path2, _err2 = build_evaluator(config)
+        module = restarted.get("csp")
+        assert module is not None
+        assert module.enabled is True
+        # And the enabled module's rules are in force on the fresh evaluator,
+        # not merely recorded as enabled.
+        assert "csp" in restarted.build_ruleset(None).modules
+
+    def test_a_priority_set_through_the_api_survives_a_restart(self, tmp_path: Any) -> None:
+        """Ordering is user state too (REQ MOD-023)."""
+        from starlette.testclient import TestClient
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        self._write_module(
+            tmp_path / "modules", "csp", "name: csp\npporlock_api: '1'\nenabled: true\n"
+        )
+        _evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset
+        )
+        client = TestClient(control.asgi)
+        client.patch(
+            "/modules/csp",
+            headers={
+                "Authorization": f"Bearer {control.tokens.ensure()}",
+                "X-Pporlock-Client": "ui",
+            },
+            json={"priority": 7},
+        )
+
+        _e2, restarted, _p2, _b2, _path2, _err2 = build_evaluator(config)
+        assert restarted.get("csp").priority == 7
+
+    def test_a_corrupt_sidecar_does_not_stop_the_daemon_starting(self, tmp_path: Any) -> None:
+        """As a malformed profile is skipped rather than fatal. The modules fall
+        back to their manifest defaults and the reason is reported."""
+        from pporlock.cli.runner import build_evaluator
+        from pporlock.engine.modules.state import STATE_FILENAME
+
+        config = self._config(tmp_path)
+        self._write_module(
+            tmp_path / "modules", "csp", "name: csp\npporlock_api: '1'\nenabled: true\n"
+        )
+        (tmp_path / STATE_FILENAME).write_text("{ this is not json")
+
+        _evaluator, registry, _profiles, _base, _path, error = build_evaluator(config)
+        assert error is None
+        assert registry.get("csp").enabled is True
+        assert registry.state.error is not None
+
+    def test_the_startup_banner_reports_an_unreadable_sidecar(self) -> None:
+        """Silently reverting every module to its default would look like the
+        modules had stopped working."""
+        import inspect
+
+        from pporlock.cli import runner
+
+        assert "registry.state.error" in inspect.getsource(runner._run)
+
+    # -- OI-9: profile exclusions are applied ----------------------------
+
+    def test_the_daemon_applies_the_active_profiles_exclusions(self, tmp_path: Any) -> None:
+        """REQ MOD-044, OI-9, and OI-11's lesson.
+
+        ``exclusions_add`` was parsed, stored and never applied. The fix lives
+        in ``ControlApp.apply_exclusions``, so what matters is that ``_run``
+        calls it *after* attaching the interceptor — a recompute performed while
+        ``self.interceptor`` is still None installs onto nothing.
+        """
+        import inspect
+
+        from pporlock.cli import runner
+
+        source = inspect.getsource(runner._run)
+        assert "control.apply_exclusions()" in source, (
+            "cli/runner._run never applies the active profile's exclusions_add; "
+            "REQ MOD-044 would be implemented and never executed"
+        )
+        assert source.index("control.interceptor = interceptor") < source.index(
+            "control.apply_exclusions()"
+        ), "apply_exclusions runs before there is an interceptor to install onto"
+
+    def test_the_daemon_hands_the_control_app_the_users_base_exclusion_list(
+        self, tmp_path: Any
+    ) -> None:
+        """Without a base to recompute from, switching profiles cannot take the
+        outgoing profile's entries back off."""
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset, evaluator.exclusions
+        )
+        assert len(control.base_exclusions) == len(evaluator.exclusions)
+        assert len(control.base_exclusions) > 0
+
+    def test_a_profiles_exclusions_reach_the_interceptor_the_daemon_builds(
+        self, tmp_path: Any
+    ) -> None:
+        """Through the same objects ``_run`` assembles, not a stand-in."""
+        import yaml
+
+        from pporlock.addon.interceptor import Interceptor
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import build_control_app, build_evaluator
+        from pporlock.control.events import EventHub
+
+        config = self._config(tmp_path)
+        profile_dir = tmp_path / "profiles"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "banking.yaml").write_text(
+            yaml.safe_dump(
+                {"name": "banking", "modules": [], "exclusions_add": ["*.stripe.example"]}
+            )
+        )
+
+        evaluator, registry, profiles, base_ruleset, _path, _error = build_evaluator(config)
+        control = build_control_app(
+            config, RingBuffer(), EventHub(), registry, profiles, base_ruleset, evaluator.exclusions
+        )
+        interceptor = Interceptor(config, exclusions=evaluator.exclusions, evaluator=evaluator)
+        control.interceptor = interceptor
+        profiles.activate("banking")
+        control.active_profile = "banking"
+        control.apply_exclusions()
+
+        assert interceptor.exclusions.should_exclude("pay.stripe.example") is True
+        assert interceptor.evaluator.exclusions is interceptor.exclusions
+
     def test_the_daemon_accumulates_per_module_cost(self, tmp_path: Any) -> None:
         """REQ PRF-007. The metrics route reads `interceptor.module_cost`; if
         nothing on the flow-completion path writes to it, every module reports
@@ -512,6 +705,55 @@ class TestStartupWiring:
         assert stats["flows_matched"] == 1
         assert stats["flows_modified"] == 1
         assert stats["avg_ms"] == 3.0
+
+
+class TestTheDaemonRemembersTheActiveProfile:
+    """OI-11's lesson applied to OI-9's dependency.
+
+    The active profile's exclusions are applied at startup. A daemon that
+    always came back on `default` applied none of them, so the feature worked
+    until the first restart and then silently stopped. These assert the path
+    the *daemon* uses, not one a test constructed.
+    """
+
+    def _config(self, tmp_path: Any) -> Config:
+        config = Config()
+        config.state_dir = str(tmp_path)
+        config.modules.root = str(tmp_path / "modules")
+        return config
+
+    def test_the_state_file_lives_in_the_state_directory(self, tmp_path: Any) -> None:
+        from pporlock.cli.runner import build_evaluator
+
+        _ev, _reg, profiles, _base, _path, _err = build_evaluator(self._config(tmp_path))
+        assert profiles.state_path == Path(tmp_path) / "active-profile"
+
+    def test_a_profile_activated_through_the_daemon_survives_a_restart(self, tmp_path: Any) -> None:
+        from pporlock.cli.runner import build_evaluator
+        from pporlock.engine.profiles import Profile
+
+        config = self._config(tmp_path)
+        _ev, _reg, profiles, _base, _path, _err = build_evaluator(config)
+        profiles.save(Profile(name="banking", exclusions_add=["*.stripe.example"]))
+        profiles.activate("banking")
+
+        # The restart: a completely fresh build from the same directory.
+        _ev2, _reg2, restored, _b2, _p2, _e2 = build_evaluator(config)
+        assert restored.active_name == "banking"
+        assert restored.active.exclusions_add == ["*.stripe.example"]
+
+    def test_the_module_filter_comes_back_with_it(self, tmp_path: Any) -> None:
+        """Which modules a profile admits is the other half of activation."""
+        from pporlock.cli.runner import build_evaluator
+        from pporlock.engine.profiles import Profile
+
+        config = self._config(tmp_path)
+        _ev, _reg, profiles, _base, _path, _err = build_evaluator(config)
+        profiles.save(Profile(name="minimal", modules=["adblock"]))
+        profiles.activate("minimal")
+
+        _ev2, _reg2, restored, _b2, _p2, _e2 = build_evaluator(config)
+        assert restored.module_filter() == ["adblock"]
 
 
 class TestApplyModulesKeepsFileRules:

@@ -45,29 +45,6 @@ from .test_ring import make_record
 
 OPENAPI_PATH = Path(__file__).resolve().parents[3] / "contracts" / "openapi.yaml"
 
-#: Routes the daemon serves that ``contracts/openapi.yaml`` does not declare.
-#:
-#: Every entry here is a real contract gap, not an exemption on principle. They
-#: are listed rather than asserted away so that this test still catches the
-#: *next* undeclared route — an empty allowlist would have to be a bare
-#: xfail, which catches nothing.
-#:
-#: ``/rules``      — GET and PUT are implemented, tested, and used by the web
-#:                   UI's rule editor. SPEC-0 §6 describes them. No OpenAPI
-#:                   entry exists.
-#: ``/pair/begin`` — implemented and driven by `pporlock pair`. ``/pair`` (the
-#:                   redemption half) is declared; the half that mints the code
-#:                   is not.
-#:
-#: Owned by whoever owns ``contracts/``; reported by Sprint 16.
-UNDECLARED_ROUTES: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("GET", "/rules"),
-        ("PUT", "/rules"),
-        ("POST", "/pair/begin"),
-    }
-)
-
 #: Paths served by the app that are not API surface at all.
 NON_API_PATHS: frozenset[str] = frozenset({"/"})
 
@@ -164,6 +141,48 @@ def assert_matches(spec: dict[str, Any], method: str, path: str, response: Any) 
         )
 
 
+#: Fields the daemon adds to a rule on compilation, which the *authoring*
+#: schema does not describe.
+#:
+#: ``contracts/schemas/rule.schema.json`` is the schema a human writes a rule
+#: against — ``rules.yaml`` and a module manifest's ``rules:`` list — and it is
+#: ``unevaluatedProperties: false``. ``GET``/``PUT /rules`` return *compiled*
+#: rules, which additionally carry the identity and ordering the engine assigned
+#: them. ``openapi.yaml`` points both at the authoring schema, so a compiled
+#: rule cannot validate against it as written.
+#:
+#: The three fields a compiled rule carries that its author never writes.
+#:
+#: Asserted separately from schema validation because their *presence* is the
+#: contract — `contracts/openapi.yaml` `CompiledRule` requires them, and the web
+#: UI's rule editor reads `rule_id` and `priority`. A schema check alone would
+#: pass on a payload that had quietly stopped emitting them if the schema ever
+#: loosened.
+SERVER_ASSIGNED_RULE_FIELDS: frozenset[str] = frozenset({"rule_id", "module", "priority"})
+
+
+def assert_rules_payload(spec: dict[str, Any], method: str, response: Any) -> None:
+    """Validate a ``/rules`` 200 body against its declared schema.
+
+    Straightforwardly, now that there is a schema describing what the route
+    actually returns. A compiled rule is the authoring shape plus three
+    server-assigned fields, and `rule.schema.json` — deliberately strict, so a
+    misspelled rule key is an error — could never have accepted it. Pointing
+    the response at the authoring schema made it unvalidatable against its own
+    contract; `CompiledRule` composes the two (OI-14).
+    """
+    assert response.status_code == 200
+    assert_matches(spec, method, "/rules", response)
+
+    body = response.json()
+    assert set(body) == {"rules", "count"}
+    assert body["count"] == len(body["rules"])
+    for rule in body["rules"]:
+        assert SERVER_ASSIGNED_RULE_FIELDS <= set(rule), (
+            f"a compiled rule is missing {sorted(SERVER_ASSIGNED_RULE_FIELDS - set(rule))}"
+        )
+
+
 # ------------------------------------------------------------------- harness --
 
 
@@ -239,7 +258,7 @@ class TestRouteCoverage:
         served = {
             (method, path) for method, path in served_routes(app) if path not in NON_API_PATHS
         }
-        missing = served - declared - UNDECLARED_ROUTES
+        missing = served - declared
         assert not missing, (
             f"these routes are served but not declared in contracts/openapi.yaml: {sorted(missing)}"
         )
@@ -255,26 +274,6 @@ class TestRouteCoverage:
         served = served_routes(app)
         missing = declared - served
         assert not missing, f"declared in openapi.yaml but not served: {sorted(missing)}"
-
-    def test_the_undeclared_list_is_still_accurate(
-        self, app: ControlApp, spec: dict[str, Any]
-    ) -> None:
-        """When the OpenAPI catches up, this fails and the allowlist comes out.
-
-        An allowlist nobody is forced to revisit becomes permanent. This is the
-        forcing function.
-        """
-        declared = {
-            (method.upper(), path)
-            for path, operations in spec["paths"].items()
-            for method in operations
-            if method in {"get", "post", "put", "patch", "delete"}
-        }
-        now_declared = UNDECLARED_ROUTES & declared
-        assert not now_declared, (
-            f"{sorted(now_declared)} are now declared in openapi.yaml — "
-            "remove them from UNDECLARED_ROUTES"
-        )
 
 
 # ------------------------------------------------------------ response bodies --
@@ -322,6 +321,11 @@ class TestReadRoutes:
     def test_exclusions(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
         assert_matches(spec, "GET", "/exclusions", client.get("/exclusions", headers=headers))
 
+    def test_rules(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
+        response = client.get("/rules", headers=headers)
+        assert_matches(spec, "GET", "/rules", response)
+        assert_rules_payload(spec, "GET", response)
+
     def test_metrics(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
         assert_matches(spec, "GET", "/metrics", client.get("/metrics", headers=headers))
 
@@ -358,22 +362,50 @@ class TestWriteRoutes:
     def test_suggest_rule_rejects_an_unknown_intent(
         self, client: TestClient, headers: dict[str, str], spec: Any
     ) -> None:
-        """A contract gap, recorded rather than asserted away.
+        """``intent`` is required and validated, so this route answers 400.
 
-        ``intent`` is required and validated, so this route can answer 400 —
-        but ``openapi.yaml`` declares only 200 for it, and a client generated
-        from the document has no error case to handle. The body is still the
-        SPEC-0 §6.2 envelope, which is what this checks; the missing
-        declaration belongs to whoever owns ``contracts/``.
+        The 400 is now declared (OI-14), so it is checked the same way every
+        other status is: status code present in the document, body validating
+        against the schema declared for it. Before that it could only be
+        asserted about by hand, which graded the route against nothing.
         """
         response = client.post("/flows/f0/suggest-rule", headers=headers, json={"intent": "nope"})
         assert response.status_code == 400
-        assert "400" not in spec["paths"]["/flows/{flow_id}/suggest-rule"]["post"]["responses"], (
-            "openapi.yaml now declares the 400 — fold this back into assert_matches"
+        assert_matches(spec, "POST", "/flows/{flow_id}/suggest-rule", response)
+
+    def test_put_rules(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
+        """A rule set that compiles comes back as the set now in force."""
+        response = client.put(
+            "/rules",
+            headers=headers,
+            json={
+                "rules": [
+                    {
+                        "name": "strip-csp",
+                        "action": "headers",
+                        "match": {"host": "a.example"},
+                        "response": {"remove": ["content-security-policy"]},
+                    }
+                ]
+            },
         )
-        error_schema = spec["components"]["schemas"]["Error"]
-        errors = list(_resolved_validator(spec, error_schema).iter_errors(response.json()))
-        assert not errors, errors[0].message if errors else ""
+        assert_rules_payload(spec, "PUT", response)
+
+    def test_put_rules_rejects_a_rule_that_does_not_compile(
+        self, client: TestClient, headers: dict[str, str], spec: Any
+    ) -> None:
+        """The declared 400: the running rules are unchanged and the client is told."""
+        before = client.get("/rules", headers=headers).json()
+        response = client.put(
+            "/rules", headers=headers, json={"rules": [{"name": "broken", "action": "no-such"}]}
+        )
+        assert response.status_code == 400
+        assert_matches(spec, "PUT", "/rules", response)
+        assert client.get("/rules", headers=headers).json() == before
+
+    def test_pair_begin(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
+        """The half of pairing that mints the code, and requires the token to do it."""
+        assert_matches(spec, "POST", "/pair/begin", client.post("/pair/begin", headers=headers))
 
     def test_validate(self, client: TestClient, headers: dict[str, str], spec: Any) -> None:
         response = client.post(

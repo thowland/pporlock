@@ -68,6 +68,9 @@ function api(): ApiClient {
     next_cursor: null,
     total_estimate: 1,
   });
+  vi.spyOn(client, 'getExclusions').mockResolvedValue({
+    entries: [{ pattern: '*.apple.com', comment: 'pinning', source: 'default' }],
+  });
   vi.spyOn(client, 'getConfig').mockResolvedValue({
     redaction: { enabled: true, header_patterns: ['cookie'], json_key_patterns: ['token'] },
   });

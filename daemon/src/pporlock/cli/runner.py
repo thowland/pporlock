@@ -26,8 +26,9 @@ from ..control.app import ControlApp
 from ..control.events import EventHub
 from ..control.serialize import serialize_flow
 from ..engine.evaluator import Evaluator
-from ..engine.exclusions import load_exclusions
+from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.modules.registry import ModuleRegistry
+from ..engine.modules.state import STATE_FILENAME
 from ..engine.profiles import ProfileManager
 from ..engine.rules_file import load_rules_file
 from ..engine.ruleset import RuleSet
@@ -183,9 +184,19 @@ def build_evaluator(
         except Exception as exc:
             error = str(exc)
 
-    profiles = ProfileManager(state_dir / "profiles")
+    # The active profile is remembered in the state directory, passed
+    # explicitly for the same reason the module sidecar is: it is user state,
+    # and it should not move because someone reconfigured where profile *files*
+    # live.
+    profiles = ProfileManager(state_dir / "profiles", state_path=state_dir / "active-profile")
     registry = ModuleRegistry(
         Path(config.modules.root).expanduser(),
+        # Explicit rather than derived from the module root, so the file the
+        # daemon persists enablement to (OI-8) is pinned to the configured
+        # state directory and a test can assert it is that one. ``modules.root``
+        # is independently configurable (OI-10); the sidecar is user state, not
+        # module content, and belongs with the rest of it.
+        state_path=state_dir / STATE_FILENAME,
         quarantine_after=config.modules.quarantine_after_failures,
     )
 
@@ -216,6 +227,7 @@ def build_control_app(
     registry: ModuleRegistry,
     profiles: ProfileManager,
     base_ruleset: RuleSet,
+    base_exclusions: ExclusionList | None = None,
 ) -> ControlApp:
     """Assemble the control app the daemon actually serves.
 
@@ -233,6 +245,11 @@ def build_control_app(
         registry=registry,
         profiles=profiles,
         base_ruleset=base_ruleset,
+        # The user's own list, before any profile additions. The app layers the
+        # active profile's ``exclusions_add`` on top of it and re-layers on
+        # every profile switch (OI-9); without the base it could not take the
+        # outgoing profile's entries back off.
+        base_exclusions=base_exclusions,
         static_dir=web_assets_dir(),
     )
 
@@ -274,7 +291,9 @@ async def _run(
         max_body_bytes=config.capture.max_body_bytes,
     )
     events = EventHub()
-    control = build_control_app(config, ring, events, registry, profiles, base_ruleset)
+    control = build_control_app(
+        config, ring, events, registry, profiles, base_ruleset, evaluator.exclusions
+    )
 
     def publish_flow(record: Any) -> None:
         """Fan a completed flow out to SSE subscribers.
@@ -309,6 +328,11 @@ async def _run(
     )
     control.interceptor = interceptor
     interceptor.control = control
+    # Now that there is an interceptor to install onto, fold the active
+    # profile's ``exclusions_add`` into the live list (REQ MOD-044, OI-9).
+    # Before this the daemon parsed and stored those additions and never
+    # applied them.
+    control.apply_exclusions()
     master.addons.add(interceptor)  # type: ignore[no-untyped-call]
 
     loop = asyncio.get_running_loop()
@@ -320,7 +344,11 @@ async def _run(
     rotator = asyncio.create_task(rotate_logs_forever(config))
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
-    emit(f"  exclusions: {len(interceptor.exclusions)} entries")
+    from_profile = sum(1 for e in interceptor.exclusions.entries if e.source == "profile")
+    emit(
+        f"  exclusions: {len(interceptor.exclusions)} entries"
+        + (f", {from_profile} from profile {profiles.active_name}" if from_profile else "")
+    )
     active = registry.active(profiles.module_filter())
     broken = [m for m in registry.modules if m.error is not None]
     emit(
@@ -332,6 +360,12 @@ async def _run(
         # failure the loader's never-raise contract exists to prevent.
         emit(f"    ! {module.name}: {module.error.message if module.error else 'unknown'}")
     emit(f"  profile:    {profiles.active_name}")
+    if registry.state.error is not None:
+        # A sidecar that could not be read means every module fell back to its
+        # manifest default — which for most is "off". Said out loud, because a
+        # daemon that silently turned the user's modules off would look like the
+        # modules had stopped working (OI-8).
+        emit(f"    ! module state: {registry.state.error}")
     if rules_error is not None:
         emit(f"  rules:      FAILED to load {rules_path}: {rules_error}")
     else:

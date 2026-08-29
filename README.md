@@ -149,12 +149,20 @@ pporlock doctor       # ten checks, all should pass
 | [Driving it with an LLM](docs/llm-with-mcp.md) | A pasteable system prompt, worked scenarios, and how to review what an agent wrote |
 | [Troubleshooting](docs/troubleshooting.md) | "The page is subtly wrong", from provenance to cause |
 | [Worked example](docs/worked-example.md) | One problem end to end, via the UI and via MCP |
+| [Control API reference](docs/api-reference.md) | Every route, generated from the OpenAPI spec |
+| [Rule and manifest schema](docs/rule-schema.md) | Every field, generated from the JSON Schemas |
 | [Open issues](docs/open-issues.md) | Known gaps, each with why it is still open |
 
 Design and specification documents live in `docs/`: the requirements
 (`pporlock_requirements-v1.md`), the contracts (`spec-0-contracts.md`), and one
-spec per component. The OpenAPI description and the rule JSON Schema are in
-`contracts/`, and are the source of truth for every cross-component shape.
+spec per component.
+
+`contracts/` holds the OpenAPI description and the JSON Schemas, and is the
+source of truth for every cross-component shape. The two references above are
+**generated** from it by `make docs`, and `make gate` fails if they have drifted
+— a hand-maintained copy of a machine-readable contract is a copy that will
+eventually disagree with it, and the disagreement gets found by whoever wrote a
+client against the wrong half.
 
 ---
 

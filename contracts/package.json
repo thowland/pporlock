@@ -6,6 +6,8 @@
   "description": "Schema validation and TypeScript type generation. Source of truth for cross-component shapes.",
   "scripts": {
     "generate": "node scripts/generate-types.mjs",
+    "docs": "node scripts/generate-docs.mjs",
+    "docs:check": "node scripts/generate-docs.mjs --check",
     "validate": "node scripts/validate-schemas.mjs && node scripts/validate-openapi.mjs"
   },
   "devDependencies": {

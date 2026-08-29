@@ -55,9 +55,16 @@ fi
 
 # --- generated files must not be hand-edited ---
 step "generated files"
+GENERATED_DOCS='^docs/(api-reference|rule-schema)\.md$'
 if echo "$STAGED" | grep -q '^contracts/generated/'; then
     bad
     echo "    contracts/generated/ is build output — regenerate with 'make contracts'"
+elif echo "$STAGED" | grep -Eq "$GENERATED_DOCS" && ! (cd "$ROOT/contracts" && npm run --silent docs:check >/dev/null 2>&1); then
+    # Staged but not matching what the contracts produce: either hand-edited,
+    # or generated from a contracts change that is not in this commit. Both
+    # leave the published API reference disagreeing with the API.
+    bad
+    echo "    docs/api-reference.md and docs/rule-schema.md are generated — run 'make docs'"
 else
     ok
 fi

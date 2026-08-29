@@ -19,6 +19,7 @@ import type {
   ValidationResult,
 } from './types';
 import type { DaemonConfig, DryRunRequest, DryRunResult, SessionMeta, UnmaskResult } from './types';
+import type { ExclusionEntry, Exclusions } from './types';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -147,8 +148,33 @@ export class ApiClient {
     return this.request<void>('/flows', { method: 'DELETE' });
   }
 
-  getExclusions(): Promise<{ entries: { pattern: string; comment: string; source: string }[] }> {
-    return this.request('/exclusions');
+  /* ---------------- Exclusions (SPEC-0 §6.9) ---------------- */
+
+  /**
+   * The ClientHello exclusion list, as an envelope.
+   *
+   * `{entries: [...]}`, not a bare array — the daemon returns
+   * `ExclusionList.to_dict()` and `contracts/openapi.yaml` says the same. Pinned
+   * in `wire-shapes.test.ts`, because every other test in this suite stubs this
+   * method and would agree with whatever shape the client invented.
+   */
+  getExclusions(): Promise<Exclusions> {
+    return this.request<Exclusions>('/exclusions');
+  }
+
+  /**
+   * Replace the whole list (REQ PXY-014).
+   *
+   * There is no append route: a caller adding one host must GET, append, and
+   * PUT, or it silently deletes the other 33. `lib/exclusions.ts` owns that
+   * read-modify-write so no caller has to remember it.
+   *
+   * `source` is sent back as it arrived, so a default entry stays labelled a
+   * default after a round-trip rather than being relabelled `user` by the
+   * daemon's fallback.
+   */
+  putExclusions(entries: ExclusionEntry[]): Promise<Exclusions> {
+    return this.request<Exclusions>('/exclusions', { method: 'PUT', body: { entries } });
   }
 
   /* ---------------- Modules (SPEC-0 §6.6) ---------------- */

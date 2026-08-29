@@ -23,6 +23,7 @@ from ..provenance import NoteCode, ProvenanceBuilder, Severity
 from ..ruleset import CompiledRule, RuleSet
 from .context import ModuleContext, ModuleStore
 from .loader import LoadedModule, load_all, unload_python
+from .state import STATE_FILENAME, ModuleStateStore
 
 DEFAULT_QUARANTINE_AFTER = 10
 
@@ -64,6 +65,7 @@ class ModuleRegistry:
         "_stores",
         "quarantine_after",
         "root",
+        "state",
         "store_path",
     )
 
@@ -72,10 +74,14 @@ class ModuleRegistry:
         root: Path,
         *,
         store_path: Path | None = None,
+        state_path: Path | None = None,
         quarantine_after: int = DEFAULT_QUARANTINE_AFTER,
     ) -> None:
         self.root = root
         self.store_path = store_path or (root.parent / "module-store.db")
+        #: User-set enablement and ordering, persisted (OI-8). Defaults beside
+        #: the module root; the daemon passes the state directory explicitly.
+        self.state = ModuleStateStore(state_path or (root.parent / STATE_FILENAME))
         self.quarantine_after = quarantine_after
         self._modules: dict[str, LoadedModule] = {}
         self._stores: dict[str, ModuleStore] = {}
@@ -97,8 +103,12 @@ class ModuleRegistry:
         and never again: reloading to pick up an edit to one module must not
         silently turn every other module off, and enablement is set through the
         API rather than by editing a file.
+
+        "The first time a module is seen" is now measured against the sidecar
+        state file rather than against this process's memory (OI-8), so a
+        restart is not a first sighting. That is the whole of the change: the
+        semantics were always these, they just did not outlive the process.
         """
-        live = {name: (m.enabled, m.priority) for name, m in self._modules.items()}
         # Cost statistics survive a reload for the same reason enablement does:
         # they describe the module, not the particular load of it that happens
         # to be resident, and zeroing them on every edit would make the column
@@ -115,12 +125,20 @@ class ModuleRegistry:
         for module in load_all(self.root):
             self._modules[module.name] = module
             module.stats = live_stats.get(module.name) or ModuleStat(module=module.name)
-            if module.name in live:
-                module.enabled = live[module.name][0]
-                self.set_priority(module.name, live[module.name][1])
+            persisted = self.state.get(module.name)
+            if persisted is not None:
+                module.enabled = persisted.enabled
+                self._recompile_priority(module, persisted.priority)
+            else:
+                # First sighting: the manifest seeds the sidecar, once.
+                self.state.set(module.name, enabled=module.enabled, priority=module.priority)
             if module.state == "loaded":
                 self._contexts[module.name] = self._make_context(module, registry, profile)
                 self._call_lifecycle(module, "on_load")
+
+        # A module deleted from disk must not leave its row behind forever, and
+        # must not come back enabled if it is ever reinstalled.
+        self.state.prune(self._modules)
 
         return ReloadResult(
             loaded=len(self._modules),
@@ -236,10 +254,16 @@ class ModuleRegistry:
     # -- state changes ---------------------------------------------------
 
     def set_enabled(self, name: str, enabled: bool) -> LoadedModule | None:
+        """Turn a module on or off, persisting the decision (OI-8).
+
+        Blocking: the sidecar is written through here, so control routes calling
+        this offload it like any other filesystem work (REQ API-002).
+        """
         module = self._modules.get(name)
         if module is None:
             return None
         module.enabled = enabled
+        self.state.set(name, enabled=module.enabled, priority=module.priority)
         if enabled and module.state == "quarantined":
             # Re-enabling is a deliberate act, and it clears the quarantine —
             # otherwise a user who fixed the module could not tell the daemon so.
@@ -250,9 +274,23 @@ class ModuleRegistry:
         return module
 
     def set_priority(self, name: str, priority: int) -> LoadedModule | None:
+        """Reorder a module against the others, persisting it (OI-8). Blocking."""
         module = self._modules.get(name)
         if module is None:
             return None
+        self._recompile_priority(module, priority)
+        self.state.set(name, enabled=module.enabled, priority=module.priority)
+        return module
+
+    @staticmethod
+    def _recompile_priority(module: LoadedModule, priority: int) -> None:
+        """Apply a priority in memory. Used by reload, which must not persist.
+
+        Split out because reload applies the priority it just *read* from the
+        sidecar; writing it straight back would be a no-op at best and, on a
+        read that fell back to manifest defaults, would overwrite the user's
+        real state with the fallback.
+        """
         module.priority = priority
         # Rules carry the priority they were compiled with, so they have to be
         # rebuilt for the change to affect ordering.
@@ -270,7 +308,6 @@ class ModuleRegistry:
             )
             for r in module.rules
         )
-        return module
 
     def quarantine(self, name: str, reason: str) -> None:
         module = self._modules.get(name)

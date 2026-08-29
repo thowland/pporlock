@@ -555,6 +555,19 @@ class TestRules:
 # -- modules and profiles (REQ API-023, API-024) ---------------------------
 
 MANIFEST = "name: tidy\npporlock_api: '1'\nversion: '1.0.0'\nenabled: true\n"
+SETTABLE_MANIFEST = (
+    "name: tidy\npporlock_api: '1'\nversion: '1.0.0'\n"
+    "config: {internal: 1}\n"
+    "settings:\n"
+    "  - key: identity\n"
+    "    label: Identify as\n"
+    "    type: enum\n"
+    "    default: googlebot\n"
+    "    options: [googlebot, claudebot]\n"
+    "  - key: hosts\n"
+    "    type: string_list\n"
+    "    default: ['*']\n"
+)
 BLOCK_MANIFEST = (
     "name: tidy\npporlock_api: '1'\nversion: '1.0.0'\n"
     "rules:\n"
@@ -934,6 +947,139 @@ class TestModulePatching:
         entries, _ = modular.audit.entries()
         assert entries[0].action == "patch_module"
         assert entries[0].origin == "mcp"
+        assert entries[0].detail["enabled"] is True
+
+
+class TestModuleSettings:
+    """`config` on PATCH: the one thing beyond enabled and priority a PATCH may
+    write, and only because the module's author declared exactly which fields
+    it covers."""
+
+    @pytest.fixture(autouse=True)
+    def _installed(self, mclient: TestClient, mtoken: str) -> None:
+        mclient.post(
+            "/modules",
+            json={"name": "tidy", "files": {"module.yaml": SETTABLE_MANIFEST}},
+            headers=auth(mtoken),
+        )
+
+    def test_the_listing_says_which_modules_have_settings(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """So the library can offer a settings control only where there is
+        something to set, rather than opening an empty form."""
+        (module,) = mclient.get("/modules", headers=auth(mtoken)).json()
+        assert module["has_settings"] is True
+
+    def test_the_detail_carries_the_declaration_and_the_current_values(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """Both, in one response: a client rendering a form needs the fields
+        and what is in them, and two round trips is two chances to disagree."""
+        detail = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        assert [s["key"] for s in detail["settings"]] == ["identity", "hosts"]
+        assert detail["settings"][0]["options"][1] == {
+            "value": "claudebot",
+            "label": "claudebot",
+            "description": "",
+        }
+        assert detail["config"]["identity"] == "googlebot"
+        # The author's free-form config block is still in force alongside the
+        # declared fields; `settings` adds a surface, it does not replace one.
+        assert detail["config"]["internal"] == 1
+
+    def test_a_manifest_config_value_is_served_as_the_fields_default(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """A client compares against `default` to decide what to send. If that
+        were the field's declared default while the manifest had already
+        overridden it, opening the dialog and saving would write the module's
+        own shipped value back as a user override — freezing it against any
+        later improvement to it."""
+        mclient.put(
+            "/modules/tidy",
+            json={
+                "files": {
+                    "module.yaml": SETTABLE_MANIFEST.replace(
+                        "config: {internal: 1}", "config: {identity: claudebot}"
+                    )
+                }
+            },
+            headers=auth(mtoken),
+        )
+        detail = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        (identity,) = [s for s in detail["settings"] if s["key"] == "identity"]
+        assert identity["default"] == "claudebot"
+
+    def test_setting_a_value_takes_effect_and_is_read_back(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        response = mclient.patch(
+            "/modules/tidy", json={"config": {"identity": "claudebot"}}, headers=auth(mtoken)
+        )
+        assert response.status_code == 200
+        detail = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        assert detail["config"]["identity"] == "claudebot"
+
+    def test_an_undeclared_key_is_refused_and_nothing_is_written(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """A settings form is a place where a typo is easy, and a value that
+        goes nowhere is indistinguishable from one that does nothing."""
+        response = mclient.patch(
+            "/modules/tidy",
+            json={"config": {"identity": "claudebot", "identtiy": "x"}},
+            headers=auth(mtoken),
+        )
+        assert response.status_code == 400
+        assert "identtiy" in response.json()["error"]["message"]
+        detail = mclient.get("/modules/tidy", headers=auth(mtoken)).json()
+        assert detail["config"]["identity"] == "googlebot", "a refused PATCH must not half apply"
+
+    def test_a_value_outside_an_enum_is_refused(self, mclient: TestClient, mtoken: str) -> None:
+        response = mclient.patch(
+            "/modules/tidy", json={"config": {"identity": "bingbot"}}, headers=auth(mtoken)
+        )
+        assert response.status_code == 400
+
+    def test_a_module_declaring_no_settings_accepts_no_config(
+        self, mclient: TestClient, mtoken: str
+    ) -> None:
+        """This is what keeps `config:` the author's file rather than giving
+        the API a second, hidden way to configure any module."""
+        mclient.post(
+            "/modules",
+            json={
+                "name": "plain",
+                "files": {"module.yaml": BLOCK_MANIFEST.replace("tidy", "plain")},
+            },
+            headers=auth(mtoken),
+        )
+        response = mclient.patch(
+            "/modules/plain", json={"config": {"anything": 1}}, headers=auth(mtoken)
+        )
+        assert response.status_code == 400
+
+    def test_a_settings_change_is_audited_by_key_and_not_by_value(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        """REQ MCP-031. Which settings someone changed is the auditable fact;
+        the values are arbitrary user text and the audit log is not the place
+        to accumulate it."""
+        mclient.patch(
+            "/modules/tidy", json={"config": {"identity": "claudebot"}}, headers=auth(mtoken, "mcp")
+        )
+        entries, _ = modular.audit.entries()
+        assert entries[0].action == "patch_module"
+        assert entries[0].detail["settings"] == ["identity"]
+        assert "claudebot" not in str(entries[0].detail)
+
+    def test_an_enable_is_not_recorded_as_a_settings_change(
+        self, mclient: TestClient, mtoken: str, modular: ControlApp
+    ) -> None:
+        mclient.patch("/modules/tidy", json={"enabled": True}, headers=auth(mtoken))
+        entries, _ = modular.audit.entries()
+        assert "settings" not in entries[0].detail
         assert entries[0].detail["enabled"] is True
 
     def test_enabling_tells_connected_clients(

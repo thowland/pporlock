@@ -70,6 +70,7 @@ INDEX = """<!doctype html>
   <li><a href="/encoded?enc=gzip">/encoded</a></li>
   <li><a href="/conditional">/conditional</a></li>
   <li><a href="/json">/json</a></li>
+  <li><a href="/echo/headers">/echo/headers</a></li>
 </ul>
 """
 
@@ -224,6 +225,23 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if path == "/json":
             payload = {"ads": [1, 2, 3], "content": "keep me", "nested": {"tracker": True}}
             return self._send(json.dumps(payload).encode(), "application/json")
+
+        if path == "/echo/headers":
+            # What the origin actually received, lowercased. The only way to
+            # answer "did the proxy really change that request header" without
+            # trusting the thing under test to report on itself — which is what
+            # every unit test on both sides of the wire necessarily does.
+            #
+            # Repeated headers are joined with ", ": this exists to check a
+            # rewrite, and losing a duplicate would hide the case where a `set`
+            # appended instead of replacing.
+            received: dict[str, str] = {}
+            for key, value in self.headers.items():
+                lowered = key.lower()
+                received[lowered] = (
+                    f"{received[lowered]}, {value}" if lowered in received else value
+                )
+            return self._send(json.dumps(received).encode(), "application/json")
 
         return self._send(b"not found", "text/plain", status=404)
 

@@ -31,7 +31,7 @@ Everything here is served on loopback only, and every route except `/state/healt
 | `POST` | `/modules` | Create a module |
 | `GET` | `/modules/{name}` | Manifest, parsed rules, Python source, asset listing |
 | `PUT` | `/modules/{name}` | Replace module files |
-| `PATCH` | `/modules/{name}` | Set enabled or priority only |
+| `PATCH` | `/modules/{name}` | Set enabled, priority, or the module's declared settings |
 | `DELETE` | `/modules/{name}` | Remove a module |
 | `GET` | `/modules/{name}/report` | A module's own report, rendered by the module |
 | `POST` | `/modules/reload` | Force reload of all modules |
@@ -268,7 +268,11 @@ Updating a module never enables it (REQ MCP-030).
 
 ### `PATCH /modules/{name}`
 
-Set enabled or priority only
+Set enabled, priority, or the module's declared settings
+
+Still narrow: everything else about a module lives in its files, and a PATCH that could rewrite behaviour would bypass the reload that makes a change visible in the module's load state.
+
+`config` carries values for the fields the module's author declared in `settings:`, and nothing else — an undeclared key, or a value of the wrong type, is a 400 and **nothing is written**, so a form with one bad field does not half apply. A module that declares no settings accepts no `config` at all. Values are persisted in the module-state sidecar rather than written back into the author's manifest, and take effect on the running module without reloading it.
 
 | Parameter | In | Type | Notes |
 |---|---|---|---|
@@ -279,6 +283,7 @@ Set enabled or priority only
 | Status | Meaning |
 |---|---|
 | `200` | Updated |
+| `400` |  |
 
 ### `DELETE /modules/{name}`
 

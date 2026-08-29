@@ -251,6 +251,12 @@ Load errors and quarantine reasons render **inline in the list**, expanded, with
 
 Actions: create, duplicate, delete, import, export (REQ MOD-006).
 
+**Settings.** A module that declares `settings:` in its manifest (SPEC-0 §5.2.1) gets a gear on its row, opening a form rendered *from the declaration* — the UI knows six field types and nothing about any particular module. A module that declares nothing has no gear: one on every row would open an empty dialog for most of them, and that teaches people the control does nothing.
+
+The form sends nothing until **Save**. A PATCH per keystroke would send whatever a half-typed field held to a module that is modifying live traffic. On save it sends only the fields that differ from their effective default — sending everything would freeze today's defaults into the user's state, so a later version of the module that improved one would never reach anyone who had opened the dialog once. **Reset to defaults** is the empty override map, which is the same mechanism.
+
+A refused save keeps the form open with the daemon's message: the daemon writes nothing when it refuses, so closing would discard edits the user has the only copy of. The form states that settings are read by unsandboxed module code (REQ MOD-031) — a surface that changes what module code does is an authoring surface.
+
 ### 7.2 Editor (REQ WUI-006)
 
 Monaco, two files in a tab pair:

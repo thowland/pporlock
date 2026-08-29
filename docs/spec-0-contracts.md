@@ -424,10 +424,44 @@ author: th
 enabled: true
 priority: 100                       # lower runs earlier; default 100
 rules: []                           # §5.3
-config: {}                          # free-form, passed to ctx.config
+config: {}                          # free-form defaults, passed to ctx.config
+settings: []                        # user-settable fields; §5.2.1
 ```
 
 Validation is strict: unknown top-level keys are an error, not a warning (REQ MOD-014). A manifest declaring an unsupported `pporlock_api` refuses to load with a clear message (REQ MOD-026).
+
+#### 5.2.1 Settings
+
+`config` is the author's. `settings` declares which parts of it a *user* may change from the module library, without editing the file:
+
+```yaml
+settings:
+  - key: identity                   # the ctx.config key this field sets
+    label: Identify as
+    type: enum                      # string | text | boolean | integer | enum | string_list
+    description: Which crawler to present.
+    default: googlebot
+    options:                        # enum only; a bare string is value and label
+      - { value: googlebot, label: Googlebot }
+      - { value: claudebot, label: ClaudeBot }
+  - key: hosts
+    type: string_list
+    default: ["*"]
+  - key: repeats
+    type: integer
+    min: 1                          # integer only
+    max: 9
+```
+
+Deliberately **not** JSON Schema. The expressive half of JSON Schema is unrenderable as a form, and a declaration that can say more than the UI can show is a declaration whose author will be surprised. Six types, no nesting, no conditionals.
+
+- A malformed declaration is a **load error** (`module_invalid_settings`), reported the same way a bad rule is, including by `POST /validate` before anything is installed. This includes a `default` that its own field would reject.
+- **Where values live.** A value the user sets is written to the module-state sidecar, never back into the manifest — the same rule that governs `enabled` (OI-8). The daemon does not rewrite a file it does not own.
+- **What `ctx.config` holds** is the merge: each field's declared default, overlaid by the manifest's own `config` block, overlaid by what the user has set. A key the manifest states wins over the field's `default`, because that is what the module ships with; `GET /modules/{name}` therefore serves each field's `default` as the *effective* one, so a client can send only what the user actually changed.
+- An override for a key the module no longer declares is ignored rather than passed through. The module has been rewritten since, and handing its code a value it never asked for is how a stale toggle survives a rename and quietly does nothing.
+- **There is no secret type.** Values are stored and served in clear; a module needing a credential takes it from the environment. The absence of the type is the documentation of that.
+
+Adding `settings` is a minor module-API change under §8.1: a module that declares none behaves exactly as it did before.
 
 ### 5.3 Rule
 
@@ -754,7 +788,12 @@ class ModuleContext:
     # identity
     name: str
     version: str
-    config: dict                        # manifest `config` block
+    config: dict                        # the effective config: field defaults,
+                                        # then the manifest `config` block,
+                                        # then what the user set (§5.2.1).
+                                        # Replaced in place when a setting
+                                        # changes, so read it per flow rather
+                                        # than caching it in on_load.
     profile: str                        # active profile name
 
     # matching helpers
@@ -806,6 +845,13 @@ A module transform registered through `register_transform` has **no parameter sc
 ```python
 def on_load(ctx: ModuleContext) -> None: ...
 def on_unload(ctx: ModuleContext) -> None: ...
+
+# Called after a declared setting changes (§5.2.1), for a module that derives
+# something from its config at load time. Optional: a module that reads
+# ctx.config per flow needs nothing here. The module is NOT reloaded on a
+# settings change — a reload would re-run on_load and discard whatever the
+# module has accumulated.
+def on_config(ctx: ModuleContext) -> None: ...
 
 def on_request(req: NormalizedRequest, ctx: ModuleContext) -> RequestMutation | None: ...
 def on_response(req: NormalizedRequest, resp: NormalizedResponse,

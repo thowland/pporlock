@@ -100,6 +100,7 @@ describe('App', () => {
       state: 'loaded',
       has_python: false,
       has_report: false,
+      has_settings: false,
       rule_count: 0,
       error: null,
       quarantine: null,

@@ -1,6 +1,6 @@
 # Example modules
 
-Nine modules covering every action and both authoring tiers. They are meant to
+Ten modules covering every action and both authoring tiers. They are meant to
 be read as much as run — each one carries the reasoning for its choices in
 comments, including the choices that are not obvious.
 
@@ -18,6 +18,7 @@ every page you load.
 | [`css-tamper`](modules/css-tamper/) | 60 | A user stylesheet served from `assets/` via `map_local` |
 | [`fault-lab`](modules/fault-lab/) | 70 | Python `on_request`, `short_circuit`, and durable state in `ctx.store` |
 | [`ws-inspect`](modules/ws-inspect/) | 80 | `on_websocket_message` — read-only frame inspection |
+| [`user-agent-switcher`](modules/user-agent-switcher/) | 85 | `settings:` — a form the module library renders, driving `on_request` from `ctx.config` |
 | [`gpc-audit`](modules/gpc-audit/) | 90 | `on_report` — sends a Global Privacy Control signal, then audits the cookies set anyway |
 
 Priorities do not collide, because the library is meant to be enabled together
@@ -59,7 +60,8 @@ jail. `module.py` runs in the proxy process with your full user privileges. Dry
 run executes it too, by design — so dry-running an unread module is not safer
 than enabling it.
 
-Four of these ship Python: `cookie-banners`, `fault-lab`, `ws-inspect`, `gpc-audit`. Read
+Five of these ship Python: `cookie-banners`, `fault-lab`, `ws-inspect`,
+`gpc-audit`, `user-agent-switcher`. Read
 them. They are short, and reading them is the habit worth forming before you
 read one an agent wrote.
 
@@ -78,6 +80,13 @@ Most are more useful edited than as-is. `adblock`'s host list is short by
 design — a real list is thousands of entries and belongs somewhere it can be
 updated. `json-tamper` and `header-lab` point at `example.com` hosts that do not
 exist, so they match nothing until you change them.
+
+`user-agent-switcher` is the one to edit from the UI rather than the file: click
+its gear in the module library. Narrow **Hosts** to the site you are auditing
+before enabling it — the shipped `*` announces you as a crawler to every site
+you visit. And note what it can and cannot do: it changes headers, so a site
+that checks the User-Agent will treat you as Googlebot, and a site that verifies
+by reverse DNS will not. Treat a difference you find as a lead, not a verdict.
 
 The two designed to be edited rather than copied:
 

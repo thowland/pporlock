@@ -16,6 +16,7 @@ function makeModule(overrides: Partial<ModuleStatus> = {}): ModuleStatus {
     state: 'loaded',
     has_python: true,
     has_report: false,
+    has_settings: false,
     rule_count: 12,
     error: null,
     quarantine: null,
@@ -301,5 +302,68 @@ describe('module reports', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'report' }));
 
     expect(await screen.findByText('module raised')).toBeTruthy();
+  });
+});
+
+/**
+ * Module settings (SPEC-2 §7.1).
+ *
+ * The library could always turn a module on and reorder it; everything else
+ * lived in a file. A gear here is the same argument `enabled` already won.
+ */
+describe('module settings', () => {
+  it('offers a settings control only where the module declares some', async () => {
+    // A gear on every row would open an empty dialog for most of them, which
+    // teaches people the control does nothing — the same reasoning as reports.
+    const client = api([
+      makeModule({ name: 'user-agent-switcher', has_settings: true }),
+      makeModule({ name: 'adblock', has_settings: false }),
+    ]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await screen.findByText('adblock');
+    expect(await screen.findAllByRole('button', { name: /^Settings for / })).toHaveLength(1);
+  });
+
+  it('opens the form for the module whose gear was clicked', async () => {
+    const client = api([
+      makeModule({ name: 'adblock', has_settings: true }),
+      makeModule({ name: 'user-agent-switcher', has_settings: true }),
+    ]);
+    const fetchDetail = vi.spyOn(client, 'getModule').mockResolvedValue({
+      ...makeModule({ name: 'user-agent-switcher', has_settings: true }),
+      files: {},
+      settings: [],
+      config: {},
+    });
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Settings for user-agent-switcher' }),
+    );
+
+    expect(fetchDetail).toHaveBeenCalledWith('user-agent-switcher');
+  });
+
+  it('re-reads the module list after settings are saved', async () => {
+    // A settings change alters what the module does on the next flow.
+    const client = api([makeModule({ name: 'user-agent-switcher', has_settings: true })]);
+    vi.spyOn(client, 'getModule').mockResolvedValue({
+      ...makeModule({ name: 'user-agent-switcher', has_settings: true }),
+      files: {},
+      settings: [{ key: 'identity', type: 'string', label: 'Identity', default: 'a' }],
+      config: { identity: 'a' },
+    });
+    const list = vi.spyOn(client, 'listModules');
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Settings for user-agent-switcher' }),
+    );
+    await userEvent.clear(await screen.findByLabelText('Identity'));
+    await userEvent.type(screen.getByLabelText('Identity'), 'b');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(list.mock.calls.length).toBeGreaterThan(1);
   });
 });

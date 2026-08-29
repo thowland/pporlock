@@ -327,6 +327,115 @@ vocabulary with a completeness test, so a module-invented code has nowhere to be
 described. Either modules are confined to the taxonomy (current behaviour) or
 the taxonomy gains an explicit extension mechanism with a rendering fallback.
 
+**A second half of the same gap, found while writing `user-agent-switcher`
+(0.8.0).** There is no code in SPEC-0 §4.4 for *a module did the ordinary thing
+it is enabled to do*. The nearest surface, `ctx.log`, is drained by the
+evaluator and consumed by nothing — `ModuleContext.logs` has no reader in
+`daemon/src/` at all — so a module wanting to say "I sent this request as
+Googlebot" has a choice between a note that arrives as `MODULE_ERROR` and a log
+line that goes nowhere. `user-agent-switcher` does neither: it keeps a tally and
+renders it through `on_report`, which works but is a workaround for a missing
+surface, not a use of one. Closing OI-15 should decide both — an `info`-severity
+module note, or a reader for `ctx.log`.
+
+---
+
+## OI-31 — module settings
+
+**Found:** while adding `user-agent-switcher` (0.8.0). **CLOSED** — implemented,
+because there was no way to configure a module short of editing YAML.
+
+A module's `config:` block always reached `ctx.config`, and nothing could ask a
+module *what* it could be configured with. So the web UI could offer nothing but
+the file editor, and "browse as GPTBot instead of Googlebot" meant opening
+Monaco and finding the right line — the exact interaction the module library
+already exists to avoid for `enabled`.
+
+`settings:` is the missing declaration (SPEC-0 §5.2.1): a flat list of typed
+fields with labels and defaults, which the daemon validates against and the web
+UI renders as a form. Six types, no nesting. **Deliberately not JSON Schema** —
+the expressive half of JSON Schema is unrenderable as a form, and a declaration
+that can say more than the UI can show is a declaration whose author will be
+surprised.
+
+Decisions worth not re-litigating:
+
+- **Values go in the sidecar, not the manifest.** The same rule as `enabled`
+  (OI-8): the daemon does not rewrite a file it does not own. It also means an
+  author improving a `default:` still moves every value nobody has changed.
+- **Only what the user changed is stored.** Storing the whole form would freeze
+  today's defaults into the user's state forever. `GET /modules/{name}` therefore
+  serves each field's *effective* default — the manifest's `config:` value where
+  it states one — so a client can tell "unchanged" from "set to the same thing".
+- **A refused PATCH writes nothing at all.** Not the good fields with the bad
+  one dropped: a module running on a mixture of what the user asked for and what
+  survived validation is worse than one that refused.
+- **A settings change does not reload the module.** A reload re-runs `on_load`,
+  which for a module accumulating an audit is "throw the audit away". The live
+  `ctx.config` is replaced in place and `on_config` is called if declared.
+- **There is no secret type.** Values are stored in the sidecar and served in
+  clear; the absence of the type is what keeps the sidecar's "nothing here is a
+  secret" docstring true. The file is written `0600` anyway.
+
+**Verified by using it**, not only by testing it: through a daemon started by
+`pporlock run` with real traffic crossing the proxy, and then through the built
+web UI in a real browser — where selecting an identity and pressing Save wrote
+only the changed keys and the next request through the proxy went out under the
+new user agent. What is *not* covered is a Playwright E2E, so that run guards
+nothing tomorrow; see the sprint-log entry.
+
+
+---
+
+## OI-32 — `make gate` is red on `master`: `test_start_brings_it_back`
+
+**Found:** while running `make gate` for 0.8.0. Confirmed against `master` with
+the branch stashed, so **it is not this work** — and the confirmation was worse
+than the symptom suggested:
+
+| How it is run | `master` | this branch |
+|---|---|---|
+| plain `pytest` | 2 failures in 6 | 1 in 3 |
+| **under coverage, as `make gate` runs it** | **3 failures in 3** | 3 in 3 |
+
+So this is not really flakiness. Coverage instrumentation slows the loop enough
+that the budget is missed essentially every time, and `make gate` — the merge
+gate — does not currently pass on `master`. The first gate run on this branch
+passed, which was the lucky one and is exactly how this went unnoticed.
+
+`tests/integration/test_proxy_control.py::TestProxyListenerControl::test_start_brings_it_back`
+fails intermittently with:
+
+```
+pporlock.errors.ProxyControlError: the proxy listener did not stop within 1.0s
+```
+
+`Interceptor` polls for the listener to observably stop and raises at
+`PROXY_STATE_POLLS * PROXY_STATE_POLL_INTERVAL_S` = 1.0s (OI-3 added the poll
+precisely so the route could not lie about having stopped, which is the right
+design). On a loaded machine a real socket sometimes takes longer than that.
+
+Two things are wrong and they are different:
+
+- **The test** binds a real listener and depends on a wall-clock budget, which is
+  a flaky shape regardless of the number chosen.
+- **The budget** may also be too tight for the daemon itself: a user's
+  `proxy_stop` on a busy machine gets a 409 saying it did not work, on a listener
+  that stops half a second later. That is the failure mode OI-3 was trying to
+  avoid, arriving from the other direction.
+
+A gate that fails at random is a gate people learn to re-run, which is how a real
+failure gets waved through — and a gate that fails *every* time under its own
+runner is one nobody can use at all. **To close:** decide whether the 1.0s budget
+is right for the daemon (it is a user-visible 409 on `proxy_stop`, not only a
+test constant), then make the test wait on the observable state rather than on a
+wall-clock number.
+
+**Not fixed here** because it is unrelated to module settings and the answer is a
+decision about daemon behaviour, not a test tweak. Every test this branch adds or
+touches passes; this is the only failure in the suite, on `master` and on the
+branch alike.
+
 ---
 
 ## A note on process

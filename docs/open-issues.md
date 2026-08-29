@@ -799,3 +799,33 @@ the no-short-circuit case.
 **Counters changed with it.** `counters.blocked` counted every short-circuit, so
 the status bar reported blocks that never happened; it now counts refusals, and
 `map_local`/`redirect` count as modified.
+
+---
+
+## OI-27 — a Python hook that replaces a response is invisible in the flags column
+
+**Found:** writing the Python module tutorial, by running it. **OPEN.**
+
+`short_circuit` (OI-26) is set from the declarative path: `_apply_short_circuit`
+records which rule ended evaluation. A Python hook returning
+`RequestMutation(short_circuit=ctx.synthesize(...))` never goes through that
+path, so the flow carries `short_circuit: null` and `blocked: false` and shows
+no badge — despite having replaced the network as completely as a `map_local`
+rule would.
+
+Provenance does record it, but as `action: headers, outcome: applied,
+rule_name: on_request` — traceable, and mislabelled. A hook that synthesised a
+whole response did not edit headers.
+
+**Why it matters more than it looks.** The flags column is how a hundred rows
+are scanned for the one that went wrong. A module author checking whether their
+hook fired looks there first, sees nothing, and concludes it did not run — the
+exact failure mode this system exists to prevent, and the reason the tutorial
+now tells the reader not to trust the flags column for hooks.
+
+**To close:** the hook path should record a short-circuit the same way the
+declarative path does, and the provenance entry should carry an action that
+describes what happened rather than `headers`. Both are small; the reason this
+is filed rather than fixed is that it wants a decision about what the action is
+*called* — a module-synthesised response is not `map_local`, and inventing a
+value has contract consequences for every client that renders the field.

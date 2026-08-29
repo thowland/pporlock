@@ -261,6 +261,10 @@ different claims, and only one of them the system can make for you.
 
 ## See also
 
+- **[Tutorial: your first declarative module](tutorial-declarative-module.md)** —
+  if you are starting from nothing, start there; this page is the reference.
+- **[Tutorial: a Python module with state](tutorial-python-module.md)**
+
 - [Troubleshooting](troubleshooting.md) — reading provenance when a rule does
   not do what you expected
 - `docs/spec-0-contracts.md` §5 and §8 — the normative rule schema and module API

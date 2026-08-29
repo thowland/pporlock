@@ -28,7 +28,19 @@ from .errors import ConfigurationError, PporlockMcpError
 from .tools import CONTROL, ToolRegistry, ToolSpec
 
 SERVER_NAME = "pporlock"
-SERVER_VERSION = "0.1.0"
+
+
+def _resolve_version() -> str:
+    """The installed distribution's version (OI-25). See daemon `cli/main.py`."""
+    try:
+        from importlib.metadata import version as _dist_version
+
+        return _dist_version("pporlock-mcp")
+    except Exception:
+        return "0.0.0+unknown"
+
+
+SERVER_VERSION = _resolve_version()
 
 INSTRUCTIONS = """\
 pporlock intercepts and modifies your HTTPS traffic locally. These tools read what

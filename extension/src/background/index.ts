@@ -220,7 +220,11 @@ async function status(): Promise<StatusReply> {
     profiles,
     counters,
     version,
-    extensionVersion: chrome.runtime.getManifest().version,
+    // version_name carries the full semver; `version` is the numeric core
+    // Chrome will store. Prefer the former so a prerelease is visible to the
+    // person trying to work out what they are running (OI-25).
+    extensionVersion:
+      chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version,
   };
 }
 

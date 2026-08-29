@@ -43,6 +43,8 @@ interface Manifest {
   manifest_version: 3;
   name: string;
   version: string;
+  /** Full semver, including a prerelease a numeric `version` cannot hold. */
+  version_name?: string;
   description: string;
   minimum_chrome_version?: string;
   permissions: string[];
@@ -58,7 +60,8 @@ interface Manifest {
 const manifest: Manifest = {
   manifest_version: 3,
   name: 'pporlock',
-  version: '0.1.0',
+  version: '0.2.0',
+  version_name: '0.2.0',
   description: 'Control and observe the pporlock local interception proxy.',
   minimum_chrome_version: '116',
   permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest', 'notifications'],

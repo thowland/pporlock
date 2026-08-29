@@ -55,6 +55,7 @@ from ..errors import (
     RuleValidationError,
     SessionError,
 )
+from ..version import VERSION
 from .audit import AuditLog
 from .auth import (
     CLIENT_HEADER,
@@ -331,7 +332,7 @@ class ControlApp:
         base_ruleset: RuleSet | None = None,
         base_exclusions: ExclusionList | None = None,
         sessions: SessionStore | None = None,
-        version: str = "0.1.0",
+        version: str = VERSION,
     ) -> None:
         self.config = config
         self.ring = ring

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..config import Config
 
-VERSION = "0.1.0"
+from ..version import VERSION
 
 
 def _config_path(args: argparse.Namespace) -> Path | None:

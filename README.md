@@ -116,7 +116,8 @@ reference they draw on.
 Full instructions: **[docs/install.md](docs/install.md)**. The short version:
 
 ```bash
-make setup && make web && make ext
+make setup && make web && make extension
+uv tool install ./daemon   # puts `pporlock` on your PATH
 
 pporlock run          # generates the CA, then ctrl-c
 pporlock install      # trusts it in your login keychain

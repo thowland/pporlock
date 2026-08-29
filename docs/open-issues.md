@@ -386,3 +386,42 @@ ignored because frames are inspection-only in v1 (REQ PXY-051).
 an agent authoring a module through MCP is pointed at. Every module written from
 it would have been broken in the same way, and the failure would have surfaced
 as a `module_error` note blaming the author's code.
+
+---
+
+## OI-17 — the install guide named a make target that never existed
+
+**Found:** by a user following `docs/install.md`. **CLOSED** (docs corrected,
+guard added).
+
+`docs/install.md` §2 and `README.md`'s quickstart both said `make ext`. The
+target is `make extension`, and has been for the whole life of the project.
+Anyone following the install guide literally — which is exactly what its own
+header instructs — hit `No rule to make target 'ext'` on the third command.
+
+Pulling that thread found the larger one immediately behind it. `make setup`
+builds the daemon into `daemon/.venv/` and does **not** put `pporlock` on the
+`PATH`, yet §3 opens with `pporlock run`. On a machine that has never installed
+the CLI globally, `which pporlock` fails — including the machine this was found
+on. The guide had no step between "build it" and "run it". §2 now has one, with
+both forms: `uv tool install ./daemon`, or `uv run` from the repo, matching the
+two-form pattern `docs/llm-with-mcp.md` already used for `pporlock-mcp`.
+
+**Why it survived everything.** The Makefile is not imported by any test, the
+docs are prose, and every developer who ever built the extension already knew
+the real target name and already had the CLI on their PATH. `make gate` was
+green throughout. It is the same shape as OI-11 and the wire-shape bugs: the
+suite verifies the system, and nothing verified the documented path *to* the
+system.
+
+**Guard:** `daemon/tests/unit/test_docs_commands.py` extracts every
+`make <target>` from the fenced and inline code spans of the six user-facing
+docs and asserts each target is declared in the Makefile. It matches only code
+spans, not prose — an earlier wordlist-based version flagged "make it
+impossible" and "make sure". It was watched failing against the real `make ext`
+string before being kept.
+
+**Still not closed by this.** A guard on `make` targets is the cheapest slice of
+the documented path, not the path itself. Sprint 16's exit demo on a genuinely
+fresh machine remains unrun and remains the highest-value outstanding item in
+the project — this issue is a direct sample of what it would turn up.

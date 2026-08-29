@@ -34,6 +34,14 @@ export const ERROR_PRESENTATION: Record<ExtErrorCode, ErrorPresentation> = {
     remedy: 'Start it with `pporlock run`, then turn the proxy back on.',
     actionable: true,
   },
+  daemon_unresponsive: {
+    title: 'The pporlock daemon stopped answering in time',
+    meaning:
+      'The daemon may still be running and simply overloaded — a busy proxy can miss ' +
+      'its health checks. The proxy was turned off so your browsing keeps working.',
+    remedy: 'Check it with `pporlock status`. If it is running, turn the proxy back on.',
+    actionable: true,
+  },
   unpaired: {
     title: 'Not paired with the daemon',
     meaning:

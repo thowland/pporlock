@@ -144,6 +144,13 @@ class TeeSink(NullSink):
         self.ring_sink.record_passthrough(host, ip, provenance, timing)
         self.console.record_passthrough(host, ip, provenance, timing)
 
+    def record_error(
+        self, request: Any, provenance: Any, message: str, *, from_client: bool = False
+    ) -> None:
+        super().record_error(request, provenance, message, from_client=from_client)
+        self.ring_sink.record_error(request, provenance, message, from_client=from_client)
+        self.console.record_error(request, provenance, message, from_client=from_client)
+
     def record_websocket_message(self, message: Any) -> None:
         super().record_websocket_message(message)
         self.ring_sink.record_websocket_message(message)
@@ -174,6 +181,20 @@ class ConsoleSink(NullSink):
             f"  {request.method:6} {status:>3}  {size:>9,}b  "
             f"{timing.get('pporlock_ms', 0.0):6.2f}ms  {request.url[:96]}"
         )
+
+    def record_error(
+        self, request: Any, provenance: Any, message: str, *, from_client: bool = False
+    ) -> None:
+        super().record_error(request, provenance, message, from_client=from_client)
+        if self.quiet:
+            return
+        # A failed request prints too. The console is the first place someone
+        # looks when a page will not load, and a proxy that logs only its
+        # successes is at its least useful exactly when it is needed most.
+        who = "client" if from_client else "upstream"
+        url = request.url[:96] if request is not None else "(unknown)"
+        method = request.method if request is not None else "---"
+        emit(f"  {method:6} ERR  {who:>9}  {message[:40]:40}  {url}")
 
     def record_passthrough(self, host: Any, ip: Any, provenance: Any, timing: Any) -> None:
         super().record_passthrough(host, ip, provenance, timing)

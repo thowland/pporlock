@@ -418,6 +418,40 @@ a working socket becomes an exception on every frame.
 
 ---
 
+### Pin a flaky endpoint
+
+When a backend is intermittently wrong and you are trying to reproduce
+something *else*, pinning it removes a variable. Remember the first response,
+replay it for every later request:
+
+```python
+def on_response(request, response, ctx):
+    if not ctx.matches(request, path="^/api/flags$"):
+        return None
+    if ctx.store_get("flags") is not None or response.body is None:
+        return None
+    ctx.store_set("flags", response.body)
+    return None
+
+
+def on_request(request, ctx):
+    if not ctx.matches(request, path="^/api/flags$"):
+        return None
+    pinned = ctx.store_get("flags")
+    if pinned is None:
+        return None
+    return RequestMutation(
+        short_circuit=ctx.synthesize(status=200, content_type="application/json", body=pinned)
+    )
+```
+
+`ctx.store_*` is in-memory and per-module, so a restart clears the pin. That is
+the right lifetime: a pin you could not clear by restarting would be a trap.
+Built step by step in
+[the Python tutorial](tutorial-python-module.md).
+
+---
+
 ## The Python tier
 
 Add `module.py` when a rule cannot express the condition. Hooks interleave with
@@ -573,7 +607,14 @@ contribute.
 | `error` | Your rule or hook raised; the detail carries the exception. |
 | `applied`, but the page is unchanged | The change reached the wire and the browser rejected it. Classic causes: an injected script without the page's nonce, or a served file failing SRI. |
 
-**5. Dry run it** against captured flows before enabling — remembering that dry
+**5. Do not use the flags column to check whether a *hook* fired.** A
+declarative `map_local` shows `LOC`; a Python hook that synthesises a response
+does the same job and shows **no flag at all**, because `short_circuit` is set
+from the declarative path only (OI-27). The hook's entry is in provenance —
+that is where to look. This has misled people into thinking a working hook
+never ran.
+
+**6. Dry run it** against captured flows before enabling — remembering that dry
 run executes your Python.
 
 ---
@@ -597,12 +638,25 @@ have established the nonce path cannot work.
 Swallowing them converts a legible `module_error` note into a module that
 silently does nothing — the failure this whole system exists to prevent.
 
+**Inventing a note code.** `ctx.note`'s first argument is a closed vocabulary.
+An unrecognised code does not raise — it degrades to a **`module_error`** note
+carrying the code you asked for, so `ctx.note("pinned", …)` publishes something
+that reads, to anyone else looking at that flow, as your module failing. Use
+`ctx.log` for "here is what I did"; reserve `ctx.note` for the taxonomy's codes,
+which describe things a *user* must be warned about. Whether modules should be
+able to extend the taxonomy is open — OI-15.
+
 **Trusting `applied`.** It means the engine did what the rule said. Whether that
 achieved what you meant is a separate question, and only the page can answer it.
 
 ---
 
 ## See also
+
+- **[Tutorial: your first declarative module](tutorial-declarative-module.md)** —
+  build one from an empty directory, checking after each step that it ran.
+- **[Tutorial: a Python module with state](tutorial-python-module.md)** — the
+  point at which declarative rules stop being enough.
 
 - [Module authoring](module-authoring.md) — the shorter introduction and the trust model
 - [Troubleshooting](troubleshooting.md) — when the page is subtly wrong

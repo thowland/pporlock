@@ -144,6 +144,8 @@ pporlock doctor       # ten checks, all should pass
 | | |
 |---|---|
 | [Install](docs/install.md) | Setup, verification, and complete uninstall |
+| [Tutorial: a declarative module](docs/tutorial-declarative-module.md) | Build one from an empty directory, runnable against the in-repo fixture |
+| [Tutorial: a Python module with state](docs/tutorial-python-module.md) | Hooks, cross-flow state, synthesised responses, failing well |
 | [Module authoring](docs/module-authoring.md) | Both tiers, the transform registry, the `ctx` API, the trust model |
 | [Module cookbook](docs/module-cookbook.md) | The deep reference — matching, recipes, ordering, performance, debugging |
 | [Example modules](examples/README.md) | Eight working modules: adblock, cookie banners, CSS tampering, local builds, fault injection |

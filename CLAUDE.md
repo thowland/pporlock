@@ -68,12 +68,21 @@ handled automatically.
 
 The pre-commit hook and `make gate` both reject stale or hand-edited copies.
 
+### Publishing
+
+Public at **https://github.com/thowland/pporlock** under **GPL-3.0-or-later**.
+`LICENSE` is the canonical FSF text; `SECURITY.md` states what is and is not a
+boundary — in particular that unsandboxed module code is the trust model rather
+than a vulnerability. Package metadata in both `pyproject.toml`s and all three
+`package.json`s carries the same SPDX identifier, and `make version-check`
+already keeps their versions honest.
+
 ### User-facing documentation
 
 `README.md`, `docs/install.md`, `docs/tutorial-declarative-module.md`,
-`docs/tutorial-python-module.md`, `docs/module-authoring.md`, `docs/module-cookbook.md`, `docs/troubleshooting.md`, `docs/worked-example.md`, `docs/llm-with-mcp.md`, `examples/README.md`.
+`docs/tutorial-python-module.md`, `docs/module-authoring.md`, `docs/module-cookbook.md`, `docs/troubleshooting.md`, `docs/worked-example.md`, `docs/llm-with-mcp.md`, `examples/README.md`, `SECURITY.md`.
 
-`examples/modules/` holds eight working modules. **They are tested** (`daemon/tests/unit/test_examples.py`) and are the closest thing to a public API conformance suite: a change that breaks a module written the documented way breaks there.
+`examples/modules/` holds nine working modules. **They are tested** (`daemon/tests/unit/test_examples.py`) and are the closest thing to a public API conformance suite: a change that breaks a module written the documented way breaks there.
 
 ---
 

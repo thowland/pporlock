@@ -283,8 +283,13 @@ reading an older screenshot, that is what you are seeing.
 ## Step 6 — read the provenance
 
 Click the flow in the web UI and open its provenance. Every rule that considered
-this flow is there, with an outcome — `applied`, `skipped_streamed`,
-`no_match` — and a duration.
+this flow is there, with an outcome — `applied`, `no_change`,
+`skipped_streamed`, `skipped_budget`, `error` — and a duration.
+
+There is no `no_match` outcome, and looking for one is a common way to get
+stuck: a rule that did not match is **absent from the list entirely**. An
+empty space is the answer, which is why the ladder above starts by asking
+whether the rule appears at all.
 
 This is the part most worth your attention. Provenance is a **structural return
 value of the engine**, not logging: every flow carries it, and it is generated

@@ -24,7 +24,7 @@ Four pieces, and it is worth knowing which is which before anything goes wrong:
 The CA is the part that deserves a moment's thought. Trusting it means any
 process running as you that can reach the proxy can read your HTTPS traffic to
 non-excluded hosts. That is the entire point of the tool, and it is also a real
-change to your machine's trust posture. §6 tells you exactly how to undo it.
+change to your machine's trust posture. §7 tells you exactly how to undo it.
 
 ---
 
@@ -47,7 +47,7 @@ and will say so if it is not.
 ## 2. Build and install
 
 ```bash
-git clone <your-clone-url> pporlock
+git clone https://github.com/thowland/pporlock.git pporlock
 cd pporlock
 
 make setup     # python venv + node dependencies for web/ and extension/
@@ -173,7 +173,12 @@ again.
 pporlock doctor
 ```
 
-Ten checks run. All must pass:
+Seventeen checks run. The table below covers the ones that most often fail on a
+fresh install; `pporlock doctor` prints all of them with their own explanations.
+
+Not every check must *pass*: `launchd_installed` and `extension_paired` report
+**warn** on a machine that has done neither, which is the ordinary state after
+following this guide. Treat a `fail` as blocking and a `warn` as a question.
 
 | Check | What a failure means |
 |---|---|

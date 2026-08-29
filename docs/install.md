@@ -52,10 +52,37 @@ cd pporlock
 
 make setup     # python venv + node dependencies for web/ and extension/
 make web       # builds the web UI the daemon serves
-make ext       # builds the unpacked extension into extension/dist/
+make extension # builds the unpacked extension into extension/dist/
 ```
 
 `make setup` is safe to re-run.
+
+### Putting `pporlock` on your PATH
+
+`make setup` builds the daemon into `daemon/.venv/` but does **not** put its
+CLI on your `PATH`. Every `pporlock ...` command from here on assumes you have
+done one of these two things:
+
+```bash
+uv tool install ./daemon    # installs `pporlock` into ~/.local/bin
+```
+
+Confirm `~/.local/bin` is on your `PATH` — `uv tool install` will say so if it
+is not — and check with:
+
+```bash
+pporlock version
+```
+
+Or, to run it from the repo without installing anything, prefix every command
+in this guide with `uv run`:
+
+```bash
+cd daemon && uv run pporlock version
+```
+
+The install form is assumed below, because §5 loads a Chrome extension that
+talks to a daemon you will want to start from any directory.
 
 ---
 

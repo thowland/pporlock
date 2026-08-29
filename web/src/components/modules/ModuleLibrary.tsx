@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client';
 import type { ModuleStatus } from '../../api/types';
+import { ModuleReport } from './ModuleReport';
 
 interface Props {
   api: ApiClient;
@@ -31,6 +32,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
   const [modules, setModules] = useState<ModuleStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [reportFor, setReportFor] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -140,6 +142,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
                 onOpen={onOpen}
                 onToggle={(enabled) => void patch(module.name, { enabled })}
                 onPriority={(priority) => void patch(module.name, { priority })}
+                onReport={setReportFor}
                 onMove={(delta) => move(index, delta)}
                 canMoveUp={index > 0}
                 canMoveDown={index < modules.length - 1}
@@ -147,6 +150,13 @@ export function ModuleLibrary({ api, onOpen }: Props) {
             ))}
           </tbody>
         </table>
+      )}
+
+      {/* Rendered here rather than opened in a tab: a tab needs a URL, a URL
+          cannot carry the bearer token, and a blob: URL would be same-origin
+          with this page (OI-30). The viewer sandboxes it instead. */}
+      {reportFor !== null && (
+        <ModuleReport api={api} name={reportFor} onClose={() => setReportFor(null)} />
       )}
     </div>
   );
@@ -157,6 +167,7 @@ function ModuleRow({
   busy,
   onOpen,
   onToggle,
+  onReport,
   onPriority,
   onMove,
   canMoveUp,
@@ -166,6 +177,7 @@ function ModuleRow({
   busy: boolean;
   onOpen: (name: string) => void;
   onToggle: (enabled: boolean) => void;
+  onReport: (name: string) => void;
   onPriority: (priority: number) => void;
   onMove: (delta: number) => void;
   canMoveUp: boolean;
@@ -208,14 +220,9 @@ function ModuleRow({
               make the column noise. The report is module-authored, so it opens
               in a tab of its own rather than being embedded here (OI-29). */}
           {module.has_report ? (
-            <a
-              className="linkish"
-              href={`/modules/${encodeURIComponent(module.name)}/report`}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <button type="button" className="linkish" onClick={() => onReport(module.name)}>
               report
-            </a>
+            </button>
           ) : (
             <span className="dim">—</span>
           )}

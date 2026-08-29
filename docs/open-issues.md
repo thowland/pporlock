@@ -910,3 +910,47 @@ rather than embedding, for the same reason.
 A report that raises is a 502 naming the module, not a quarantine — a broken
 report is no reason to stop a module modifying traffic correctly, and the two
 failures are unrelated.
+
+---
+
+## OI-30 — the report link could never have worked
+
+**Found:** by a user clicking the report link one commit after it shipped.
+**CLOSED** (fetched with the token, rendered in a sandboxed frame).
+
+OI-29 linked to the report with a plain anchor:
+
+```html
+<a href="/modules/gpc-audit/report" target="_blank">report</a>
+```
+
+A `<a href>` is a navigation, and a navigation carries no `Authorization`
+header. The route requires a bearer token, so every click returned
+`missing or invalid bearer token`. Not a race, not a config problem — the
+design could not have worked, and it shipped with three passing tests because
+all three asserted the anchor's attributes rather than that clicking it
+produced a report.
+
+**The obvious repair is forbidden.** Putting the token in the URL would make it
+work immediately and is ruled out outright: it would land in browser history,
+referrer headers, and the audit log. So the UI fetches with the header it
+already holds and renders the result itself.
+
+**Rendering it was the second trap.** A `blob:` URL opened in a tab is the
+natural way to show fetched HTML — and blob URLs *inherit the creating origin*,
+so module-authored HTML would have run same-origin with the page that holds the
+bearer token. That is strictly worse than the magic URL it replaced. The report
+is shown in an `<iframe sandbox="" srcdoc=...>` instead: no `allow-scripts`, no
+`allow-same-origin`, a unique opaque origin that can render a table and nothing
+else. Non-HTML types render as text, so CSV or JSON cannot smuggle markup past
+the daemon's content-type allowlist.
+
+**Tests replaced, not deleted (G4).** The two that asserted `href` and
+`target=_blank` described a design that could never have worked. Five replace
+them, including one that asserts the client method is *called* — the thing the
+originals could not see.
+
+Verified by driving the real web UI against a real daemon: the button appears,
+the frame renders the audit, and no error is shown. The previous version passed
+its unit tests and failed on the first click, which is the whole reason that
+check now exists.

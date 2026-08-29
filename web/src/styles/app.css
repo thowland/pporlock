@@ -1411,3 +1411,38 @@ fieldset.patternlist code {
   color: var(--text-faint);
   font-size: 12px;
 }
+
+/* Module report viewer (OI-30). The frame is generous because a report is a
+   document, not a widget, and scrolling a small box to read a table is worse
+   than the magic URL it replaced. */
+.report {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 12px;
+}
+.report-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.report-head h2 {
+  font-size: 14px;
+  margin: 0;
+}
+.report-frame {
+  width: 100%;
+  height: 60vh;
+  border: 0;
+  display: block;
+  background: #fff;
+}
+.report-text {
+  margin: 0;
+  padding: 12px;
+  max-height: 60vh;
+  overflow: auto;
+  font-size: 12px;
+}

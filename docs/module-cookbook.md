@@ -23,6 +23,8 @@ Every example here is either taken from a module in
   - [Serve a local build](#serve-a-local-build)
   - [Rewrite headers](#rewrite-headers)
   - [Edit a JSON API response](#edit-a-json-api-response)
+  - [Send a privacy signal a site will actually notice](#send-a-privacy-signal-a-site-will-actually-notice)
+  - [Classify captured data by what it is, not how it travels](#classify-captured-data-by-what-it-is-not-how-it-travels)
   - [Inject a script that survives CSP](#inject-a-script-that-survives-csp)
   - [Rewrite HTML with a regex, carefully](#rewrite-html-with-a-regex-carefully)
   - [Inject faults on purpose](#inject-faults-on-purpose)
@@ -333,6 +335,84 @@ patch globals), `body_end` runs after the DOM exists (use it to touch elements).
 If the page's CSP blocks you outright and no nonce exists, `strip_csp` is the
 lever — and it is a real reduction in that page's protection, which is why it
 raises a banner.
+
+### Send a privacy signal a site will actually notice
+
+A header alone is usually not enough, and the reason generalises well beyond
+this example.
+
+Global Privacy Control is specified as **two** signals: a `Sec-GPC: 1` request
+header, and a `navigator.globalPrivacyControl` DOM property. Sites overwhelmingly
+test the second — globalprivacycontrol.org's own checker is literally
+`!!navigator.globalPrivacyControl`. A proxy can set headers all day and the page
+will still report the signal as absent, because a proxy cannot set a DOM
+property. Do both:
+
+```yaml
+  - name: send-gpc
+    action: headers
+    match: { host: "*" }
+    request:
+      set:
+        Sec-GPC: "1"
+        DNT: "1"
+
+  - name: expose-gpc-to-javascript
+    action: body
+    match:
+      content_type: "text/html"
+    transform:
+      kind: inject_script
+      position: head_start          # before any page script can read it
+      reuse_nonce: true             # honour the page's CSP, do not strip it
+      inline: |
+        (function () {
+          try {
+            if (!('globalPrivacyControl' in navigator)) {
+              Object.defineProperty(navigator, 'globalPrivacyControl', {
+                value: true, configurable: true, enumerable: true
+              });
+            }
+          } catch (e) { /* never break a page over a privacy signal */ }
+        })();
+```
+
+`head_start` matters: the property has to exist before the page's own script
+reads it. `reuse_nonce` matters more — reaching for `strip_csp` to make an
+injection work turns off a real protection on a page you are about to keep
+using.
+
+**The general rule: check how the thing you are trying to influence is actually
+detected.** Anything with both a transport form and a JavaScript form —
+privacy signals, feature detection, client hints — needs the tier that matches
+the check, and a header-only module looks broken while working perfectly.
+
+### Classify captured data by what it is, not how it travels
+
+A companion trap, from the audit half of the same module. Tallying `Set-Cookie`
+and sorting names into "essential" and "advertising" invites this:
+
+```yaml
+essential_prefixes:
+  - "__Secure-"      # WRONG
+  - "__Host-"        # WRONG
+```
+
+`__Secure-` and `__Host-` are cookie **security prefixes**. They constrain how a
+cookie may be set — Secure-only, path-locked — and say nothing about its
+purpose. Treating them as evidence of "essential" classified Google's
+`__Secure-3PSIDCC` and `__Secure-3PSIDTS` as essential, when the `3P` in those
+names means *third-party*: they are precisely the cross-site cookies the audit
+existed to surface. The count went from 2 advertising to 9 once it was fixed.
+
+Two habits fall out of it:
+
+- **Default to `unclassified`, never to benign.** An audit that guesses
+  "essential" launders its own finding, and the guess is invisible in the
+  output.
+- **Classify at render, not at capture.** Recompute the category when the report
+  is built, so editing the lists and reloading corrects the whole history
+  instead of only the entries that happen to be seen again.
 
 ### Rewrite HTML with a regex, carefully
 

@@ -219,6 +219,45 @@ class ModuleRegistry:
     def context(self, name: str) -> ModuleContext | None:
         return self._contexts.get(name)
 
+    def report(self, name: str) -> tuple[str, bytes] | None:
+        """Render a module's report: `(content_type, body)`, or None.
+
+        Called from the control API rather than from a flow, so it is not
+        subject to the per-flow time budget — a report may legitimately walk
+        everything the module has accumulated. It still runs module code, so
+        the caller offloads it rather than doing this on the proxy's loop.
+
+        Returns None when the module is absent, failed to load, or declares no
+        `on_report`. A module that raises here is reported as an error rather
+        than quarantined: a broken report is not a reason to stop a module
+        modifying traffic correctly, and the two failures are unrelated.
+        """
+        module = self._modules.get(name)
+        if module is None or module.python is None or module.state != "loaded":
+            return None
+        hook = getattr(module.python, "on_report", None)
+        if not callable(hook):
+            return None
+
+        context = self._contexts.get(name)
+        result = hook(context)
+        if result is None:
+            return None
+
+        # A dict rather than a bare string, so a module can choose its content
+        # type without the daemon guessing from the bytes.
+        if isinstance(result, dict):
+            content_type = str(result.get("content_type") or "text/plain; charset=utf-8")
+            body = result.get("body", b"")
+        else:
+            content_type = "text/plain; charset=utf-8"
+            body = result
+        if isinstance(body, str):
+            body = body.encode()
+        if not isinstance(body, bytes):
+            body = str(body).encode()
+        return content_type, body
+
     @property
     def failures(self) -> tuple[HookFailure, ...]:
         return tuple(self._failures)

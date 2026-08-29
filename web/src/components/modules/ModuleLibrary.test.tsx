@@ -15,6 +15,7 @@ function makeModule(overrides: Partial<ModuleStatus> = {}): ModuleStatus {
     priority: 100,
     state: 'loaded',
     has_python: true,
+    has_report: false,
     rule_count: 12,
     error: null,
     quarantine: null,
@@ -218,5 +219,44 @@ describe('a module the daemon reports without stats', () => {
     render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
     const row = (await screen.findByText('no-stats')).closest('tr')!;
     expect(within(row).getAllByText('—').length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Reports are only useful if you can find them — OI-29.
+ *
+ * The first working version of a reporting module answered a magic URL through
+ * the proxy, which meant the report was unreachable from this page: the control
+ * origin is not proxied traffic. It was a feature that existed and could not be
+ * found. The library is where someone looks for it.
+ */
+describe('module reports', () => {
+  it('links to the report when the module has one', async () => {
+    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    const link = await screen.findByRole('link', { name: 'report' });
+    expect(link.getAttribute('href')).toBe('/modules/gpc-audit/report');
+  });
+
+  it('does not link when the module has no report', async () => {
+    // Linking every module to a 404 would make the column noise, and teach
+    // people to ignore it.
+    const client = api([makeModule({ name: 'adblock', has_report: false })]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await screen.findByText('adblock');
+    expect(screen.queryByRole('link', { name: 'report' })).toBeNull();
+  });
+
+  it('opens the report in its own tab', async () => {
+    // The body is module-authored and served under a sandbox CSP. Embedding it
+    // in the UI would put module HTML inside the page that holds the token.
+    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    const link = await screen.findByRole('link', { name: 'report' });
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toContain('noreferrer');
   });
 });

@@ -49,6 +49,7 @@ from ..engine.ruleset import RuleSet
 from ..errors import (
     AuthError,
     ConfigError,
+    ModuleRuntimeError,
     PairingError,
     PporlockError,
     ProxyControlError,
@@ -121,6 +122,7 @@ OFFLOAD_ROUTES: frozenset[str] = frozenset(
         "/modules",
         "/modules/reload",
         "/modules/{name}",
+        "/modules/{name}/report",
         "/profiles",
         "/profiles/{name}",
         "/profiles/{name}/activate",
@@ -1475,6 +1477,56 @@ class ControlApp:
         self.audit.record("extension", "paired", extension_id=self.policy.extension_id)
         return JSONResponse({"token": self.tokens.ensure()})
 
+    #: What a module may return from `on_report`. Anything else is refused
+    #: rather than passed through: the daemon serves this from the control
+    #: origin, and letting a module choose an arbitrary content type there is
+    #: how a report becomes an attack surface (OI-29).
+    REPORT_CONTENT_TYPES = ("text/html", "text/plain", "text/csv", "application/json")
+
+    async def get_module_report(self, request: Request) -> Response:
+        """A module's own report, rendered by the module (REQ MOD-023, OI-29).
+
+        Served here rather than through the proxy because a report about
+        browsing is most wanted when you are not browsing, and a URL that only
+        resolves inside intercepted traffic cannot be linked to from the UI.
+
+        **Sandboxed.** The body is module-authored and this origin also serves
+        the web UI and holds the bearer token, so it goes out under a
+        `sandbox` CSP — a unique opaque origin with no script, no same-origin
+        access, and no form submission. Module code is trusted and could read
+        the token by other means, so this is not a boundary; it is a refusal to
+        add a *convenient* one, and it costs nothing.
+        """
+        name = request.path_params["name"]
+        if self.registry is None or self.registry.get(name) is None:
+            return self._not_found(f"no such module: {name}")
+        registry = self._registry_or_raise()
+
+        try:
+            rendered = await self.offload(registry.report, name)
+        except Exception as exc:  # a module's report must not 500 the daemon
+            return error_response(
+                ModuleRuntimeError(f"{name} raised while rendering its report: {exc}"), 502
+            )
+
+        if rendered is None:
+            return self._not_found(f"{name} does not provide a report")
+
+        content_type, body = rendered
+        if content_type.split(";")[0].strip().lower() not in self.REPORT_CONTENT_TYPES:
+            return error_response(
+                ModuleRuntimeError(f"{name} returned an unsupported content type"), 502
+            )
+
+        return Response(
+            body,
+            media_type=content_type,
+            headers={
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     def _build(self) -> Starlette:
         routes: list[BaseRoute] = [
             Route("/state/health", self.health, methods=["GET"]),
@@ -1507,6 +1559,7 @@ class ControlApp:
             Route("/validate", self.post_validate, methods=["POST"]),
             # Registered before /modules/{name}, or a reload would be read as a
             # module called "reload".
+            Route("/modules/{name}/report", self.get_module_report, methods=["GET"]),
             Route("/modules/reload", self.post_modules_reload, methods=["POST"]),
             Route("/modules", self.get_modules, methods=["GET"]),
             Route("/modules", self.post_modules, methods=["POST"]),

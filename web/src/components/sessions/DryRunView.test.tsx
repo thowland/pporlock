@@ -16,6 +16,7 @@ const MODULE: ModuleStatus = {
   priority: 100,
   state: 'disabled',
   has_python: true,
+  has_report: false,
   rule_count: 2,
   error: null,
   quarantine: null,

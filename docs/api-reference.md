@@ -33,6 +33,7 @@ Everything here is served on loopback only, and every route except `/state/healt
 | `PUT` | `/modules/{name}` | Replace module files |
 | `PATCH` | `/modules/{name}` | Set enabled or priority only |
 | `DELETE` | `/modules/{name}` | Remove a module |
+| `GET` | `/modules/{name}/report` | A module's own report, rendered by the module |
 | `POST` | `/modules/reload` | Force reload of all modules |
 | `POST` | `/validate` | Validate a candidate module without installing it (REQ API-027) |
 | `GET` | `/profiles` | List profiles |
@@ -290,6 +291,26 @@ Remove a module
 | Status | Meaning |
 |---|---|
 | `204` | Deleted |
+
+### `GET /modules/{name}/report`
+
+A module's own report, rendered by the module
+
+Modules that accumulate something worth reading — an audit, a tally, a diff — render it themselves through an `on_report` hook, and the daemon serves the result here (OI-29). Served from the control origin rather than through the proxy, because a report about browsing is most wanted when you are not browsing, and a URL that only resolves inside intercepted traffic cannot be linked to from the UI.
+
+The body is module-authored, so it is returned under a `sandbox` Content-Security-Policy — a unique opaque origin with no script and no same-origin access to the control API. Module code is trusted and could reach the token by other means; this refuses to add a convenient path rather than claiming to be a boundary.
+
+404 when the module does not exist or declares no `on_report`. 502 when the module raises, or returns a content type outside text/html, text/plain, text/csv and application/json.
+
+| Parameter | In | Type | Notes |
+|---|---|---|---|
+| `name` | path | `string` |  **required** |
+
+| Status | Meaning |
+|---|---|
+| `200` | The report, as the module rendered it |
+| `404` | No such module |
+| `502` | The module raised |
 
 ### `POST /modules/reload`
 

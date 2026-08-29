@@ -123,6 +123,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
               <th>State</th>
               <th className="num">Rules</th>
               <th>Python</th>
+              <th>Report</th>
               <th className="num">Matched</th>
               <th className="num">Modified</th>
               <th className="num">Errors</th>
@@ -202,6 +203,23 @@ function ModuleRow({
         </td>
         <td className="num">{module.rule_count}</td>
         <td className="dim">{module.has_python ? 'yes' : '—'}</td>
+        <td>
+          {/* Only where a report exists — linking every module to a 404 would
+              make the column noise. The report is module-authored, so it opens
+              in a tab of its own rather than being embedded here (OI-29). */}
+          {module.has_report ? (
+            <a
+              className="linkish"
+              href={`/modules/${encodeURIComponent(module.name)}/report`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              report
+            </a>
+          ) : (
+            <span className="dim">—</span>
+          )}
+        </td>
         {/* An em dash rather than 0: "no statistics yet" and "matched nothing"
             are different facts, and showing 0 for the first is a lie. */}
         <td className="num dim">{module.stats?.flows_matched.toLocaleString() ?? '—'}</td>

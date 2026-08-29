@@ -866,3 +866,47 @@ against the original config before being kept.
 Verified by loading the built extension in Chrome and opening
 `chrome-extension://<id>/src/devtools/panel.html`: 200, React mounts, and it
 renders its "Not paired" state on an unpaired profile, with no page errors.
+
+---
+
+## OI-29 — a module could accumulate a report and had nowhere to put it
+
+**Found:** a user asking how a module's findings are meant to be discovered.
+**CLOSED** (`on_report` hook, `GET /modules/{name}/report`, link in the module
+library).
+
+`ctx.store_*` is persistent (REQ MOD-022) and **no API can read it**. A module
+that tallies something — an audit, a diff, a count — could accumulate for weeks
+into a store nothing outside the module could open.
+
+`gpc-audit` worked around it by answering a magic path through the proxy. That
+seemed fine until the same user opened the web UI and could not find it: the
+control origin is not proxied traffic, so `/__pporlock__/gpc-report` returns
+401 there. The report was readable **only while browsing some other site**, by
+someone who remembered the URL. A feature that exists and cannot be found.
+
+Modules now render their own report via `on_report(ctx)` and the daemon serves
+it at `GET /modules/{name}/report`, linked from the module library where
+someone would actually look. `has_report` on the module summary keeps the link
+off modules that have none, so the column is not a row of 404s. `gpc-audit` was
+migrated and dropped its short-circuit rule — it no longer inspects every
+request to check whether it is the report.
+
+**Why the module renders rather than the daemon.** The alternative was a
+generic store-reading endpoint. It was rejected for two reasons: raw key/value
+is not a report and the UI cannot present arbitrary shapes usefully, and
+module stores are **not redacted** — a module storing captured values would
+have had them served through the control API by a route that never considered
+it.
+
+**Sandboxed, and honest about why.** The body is module-authored and this
+origin also serves the web UI and holds the bearer token, so responses go out
+under a `sandbox` CSP with `nosniff`, and the content type is restricted to
+four text-ish types. Module code is trusted and unsandboxed and could reach the
+token by other means: this is not a security boundary, it is a refusal to add a
+*convenient* one, and it costs nothing. The library links with `target=_blank`
+rather than embedding, for the same reason.
+
+A report that raises is a 502 naming the module, not a quarantine — a broken
+report is no reason to stop a module modifying traffic correctly, and the two
+failures are unrelated.

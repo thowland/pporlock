@@ -127,6 +127,8 @@ export interface ModuleStatus {
   priority: number;
   state: ModuleState;
   has_python: boolean;
+  /** Whether the module declares `on_report`, so the library can link to it (OI-29). */
+  has_report: boolean;
   rule_count: number;
   error: ModuleLoadError | null;
   quarantine: ModuleQuarantine | null;

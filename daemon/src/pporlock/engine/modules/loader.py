@@ -50,7 +50,17 @@ KNOWN_MANIFEST_KEYS = frozenset(
 WRITABLE_FILES = frozenset({MANIFEST_NAME, PYTHON_NAME})
 
 #: Hooks a module may define (SPEC-0 §8.3).
-HOOK_NAMES = ("on_load", "on_unload", "on_request", "on_response", "on_websocket_message")
+#: Flow hooks plus `on_report`, which is not one — it is called on demand from
+#: the control API rather than in the path of a request (OI-29). It is listed
+#: here so a module declaring it is recognised and reported as having one.
+HOOK_NAMES = (
+    "on_load",
+    "on_unload",
+    "on_request",
+    "on_response",
+    "on_websocket_message",
+    "on_report",
+)
 
 MODULE_NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 
@@ -126,6 +136,9 @@ class LoadedModule:
             "priority": self.priority,
             "state": self.state,
             "has_python": self.has_python,
+            # So the UI can offer a report only where one exists, rather than
+            # linking every module to a 404 (OI-29).
+            "has_report": callable(getattr(self.python, "on_report", None)),
             "rule_count": len(self.rules),
             "description": self.description,
             "author": self.author,

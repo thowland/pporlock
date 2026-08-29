@@ -353,6 +353,15 @@ that deleting a module does **not** delete its store.
 | `on_request` | `(request, ctx)` | `RequestMutation` or `None` |
 | `on_response` | `(request, response, ctx)` | `ResponseMutation` or `None` |
 | `on_websocket_message` | `(message, request, ctx)` | ignored — frames are read-only in v1 |
+| `on_report` | `(ctx)` | `{"content_type": ..., "body": ...}`, a plain string, or `None` |
+
+`on_report` is not a flow hook. It is called on demand from the control API, so
+it is outside the per-flow time budget and may walk everything the module has
+accumulated. The daemon serves the result at `GET /modules/<name>/report` and
+the module library links to it — which is how a module that tallies something
+makes it findable. Content types are limited to `text/html`, `text/plain`,
+`text/csv` and `application/json`, and the response is served under a `sandbox`
+CSP because the body is yours and the control origin is not.
 
 `on_websocket_message`'s return value being ignored is deliberate, not an
 oversight: PXY-051 says frames are not modifiable in v1. It is worth knowing

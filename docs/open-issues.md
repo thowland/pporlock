@@ -425,3 +425,37 @@ string before being kept.
 the documented path, not the path itself. Sprint 16's exit demo on a genuinely
 fresh machine remains unrun and remains the highest-value outstanding item in
 the project — this issue is a direct sample of what it would turn up.
+
+---
+
+## OI-18 — a non-editable install can never find the web UI, and said so wrongly
+
+**Found:** by a user, immediately after OI-17's fix told them to install the CLI.
+**CLOSED** (docs corrected, diagnostic split, `web_assets_dir()` given tests).
+
+`uv tool install ./daemon` copies the daemon into its own venv. `web_assets_dir()`
+resolves the UI either from `<package>/web` inside a wheel or from
+`<repo>/web/dist` four parents up — and from a tool venv, neither exists. The
+wheel does not bundle the UI, and nothing above the installed package is the
+repo. So the UI is unreachable, and **rebuilding it changes nothing**.
+
+The install docs written for OI-17 recommended exactly that command, so the fix
+for one install bug created the next one. `uv tool install --editable ./daemon`
+keeps the CLI pointed at the checkout and resolves both.
+
+**The worse half was the message.** Both the startup line and the 404 body said
+`not built — run make web`, naming the one command that was already done and
+could not help. A wrong diagnostic is more expensive than a missing one, because
+it gets followed: the reporter ran `make web`, watched it succeed, and got the
+same error. `web_assets_hint()` now distinguishes the two causes — a checkout
+has `web/package.json` whether or not it has been built — and names the actual
+fix for each.
+
+**Why it survived.** `web_assets_dir()` had no test at all, despite deciding
+whether the UI is served. Every developer ran from the repo, where the fallback
+happens to work. `daemon/tests/unit/test_web_assets.py` now covers all three
+lookup outcomes and both hints; the hint test asserts the string `make web` is
+*absent* from the unreachable-install case, which is the exact regression.
+
+Verified against a real daemon started from outside the repo: `GET /` returns
+200 and the index, where before it returned 404.

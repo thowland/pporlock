@@ -34,6 +34,17 @@ from ..engine.rules_file import load_rules_file
 from ..engine.ruleset import RuleSet
 
 
+def _repo_web_dist() -> Path:
+    """Where the UI build lands in a source checkout.
+
+    `<repo>/web/dist`, reached from `<repo>/daemon/src/pporlock/cli/runner.py`.
+    An editable install keeps `__file__` inside the checkout, so this resolves
+    for both `uv run` and `uv tool install --editable`. A *non*-editable install
+    copies the package under the tool venv, where this points at nothing.
+    """
+    return Path(__file__).resolve().parents[4] / "web" / "dist"
+
+
 def web_assets_dir() -> Path | None:
     """The built web UI, if it has been built.
 
@@ -44,8 +55,28 @@ def web_assets_dir() -> Path | None:
     packaged = Path(__file__).resolve().parents[1] / "web"
     if packaged.is_dir():
         return packaged
-    repo = Path(__file__).resolve().parents[4] / "web" / "dist"
+    repo = _repo_web_dist()
     return repo if repo.is_dir() else None
+
+
+def web_assets_hint() -> str:
+    """Why the UI is missing — the two causes need different fixes (REQ DOC-001).
+
+    Telling someone to run `make web` when they have already run it is worse
+    than saying nothing: it sends them to re-run the one command that is not
+    the problem. A non-editable `uv tool install` copies the daemon into its own
+    venv, where nothing above it is the repo, so the built `web/dist` is
+    unreachable no matter how many times it is rebuilt.
+
+    The two are distinguishable: in a source checkout `<repo>/web/package.json`
+    exists whether or not the UI has been built.
+    """
+    if (_repo_web_dist().parent / "package.json").is_file():
+        return "not built — run `make web`"
+    return (
+        "unreachable — this looks like a non-editable install, which cannot see "
+        "the repo's web/dist. Reinstall with `uv tool install --editable ./daemon`"
+    )
 
 
 async def rotate_logs_forever(config: Config, *, interval: float | None = None) -> None:
@@ -381,7 +412,7 @@ async def _run(
     if assets is not None:
         emit(f"  web UI      on http://{config.control.listen_host}:{config.control.listen_port}/")
     else:
-        emit("  web UI      not built — run `make web`")
+        emit(f"  web UI      {web_assets_hint()}")
     emit("  ctrl-c to stop\n")
 
     await master.run()

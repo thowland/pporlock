@@ -1383,9 +1383,11 @@ class ControlApp:
         """
         from pathlib import Path as _Path
 
+        from ..cli.runner import web_assets_hint as _web_assets_hint
+
         if self.static_dir is None:
             return Response(
-                "pporlock web UI is not built. Run `make web`.",
+                f"pporlock web UI is {_web_assets_hint()}.",
                 media_type="text/plain",
                 status_code=404,
             )
@@ -1393,7 +1395,7 @@ class ControlApp:
         index = _Path(self.static_dir) / "index.html"
         if not index.is_file():
             return Response(
-                "pporlock web UI is not built. Run `make web`.",
+                f"pporlock web UI is {_web_assets_hint()}.",
                 media_type="text/plain",
                 status_code=404,
             )

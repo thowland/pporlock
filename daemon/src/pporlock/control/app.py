@@ -58,6 +58,7 @@ from ..errors import (
 from .audit import AuditLog
 from .auth import (
     CLIENT_HEADER,
+    PAIRED_FILENAME,
     OriginPolicy,
     PairingWindow,
     TokenStore,
@@ -346,7 +347,11 @@ class ControlApp:
         self.base_ruleset = base_ruleset if base_ruleset is not None else RuleSet()
         self.version = version
         self.tokens = tokens or TokenStore(Path(config.state_dir))
-        self.policy = policy or OriginPolicy(config.control.listen_host, config.control.listen_port)
+        self.policy = policy or OriginPolicy(
+            config.control.listen_host,
+            config.control.listen_port,
+            state_path=Path(config.state_dir) / PAIRED_FILENAME,
+        )
         self.pairing = pairing or PairingWindow()
         self.audit = audit or AuditLog()
         # Who has been talking to us lately, for the MCP activity indicator

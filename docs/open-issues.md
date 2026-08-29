@@ -459,3 +459,44 @@ lookup outcomes and both hints; the hint test asserts the string `make web` is
 
 Verified against a real daemon started from outside the repo: `GET /` returns
 200 and the index, where before it returned 404.
+
+---
+
+## OI-19 — the extension's pairing did not survive a daemon restart
+
+**Found:** by a user, whose recording failed with `403 origin not permitted`
+after the daemon had been restarted. **CLOSED** (pairing persisted to a
+`state_dir` sidecar, with validation).
+
+`OriginPolicy` held the paired extension id in memory only. Both construction
+sites — `control/server.py::build_state` and `ControlApp.__init__` — passed
+`extension_id=None`, and nothing ever wrote it down. So every daemon restart
+silently revoked the extension.
+
+The failure is worse than "unpaired" because the token *is* persisted. The
+extension came back holding a valid bearer token, from an origin the policy no
+longer recognised, and got a 403 whose message — "origin not permitted" —
+describes the mechanism and not the cause. Nothing in it suggests re-pairing,
+and the extension had not changed. The daemon is a launchd agent that restarts
+at login, so this was routine rather than an edge case.
+
+This is structural rule 8's other half. OI-8 and OI-9 moved module enablement
+and the active profile into `state_dir` sidecars; the pairing was missed. It
+had no test asserting it outlived the process, because every test that pairs
+also constructs the policy it pairs against.
+
+**The sidecar is validated, not trusted.** `paired-extension` holds one
+extension id and nothing else — not a secret, since the id rides in the Origin
+header of every request the extension makes — but it decides which origin may
+drive the control API. A value that is not a well-formed id is discarded and the
+daemon starts unpaired, which `pporlock pair` recovers from; refusing to boot
+over a corrupt file would not be recoverable.
+
+Verified against a real daemon: pair, restart, and the paired origin gets 200
+where it previously got 403, while a different extension origin is still
+refused.
+
+**Adjacent, not fixed:** `pporlock run` reports `Error logged during startup,
+exiting...` with no detail when its port is already held. Hit three times while
+verifying this. Same shape as OI-18 — a true message that names nothing
+actionable.

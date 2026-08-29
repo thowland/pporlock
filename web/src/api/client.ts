@@ -59,6 +59,45 @@ export class ApiClient {
     return `${this.origin}${path}${query}`;
   }
 
+  /**
+   * A module's own report, fetched with the bearer token (OI-30).
+   *
+   * Not a link. `request()` returns parsed JSON, and this returns text — but
+   * the reason it exists at all is authentication: a plain `<a href>` is a
+   * navigation, and a navigation cannot carry an Authorization header. The
+   * first version of the report link was exactly that anchor and every click
+   * produced `missing or invalid bearer token`.
+   *
+   * The obvious repair — putting the token in the URL — is forbidden outright
+   * (SPEC-0 §9, and it would land in history, referrers and the audit log). So
+   * the UI fetches with the header it already holds and renders the result
+   * itself.
+   */
+  async getModuleReport(name: string): Promise<{ contentType: string; body: string }> {
+    const headers: Record<string, string> = { 'X-Pporlock-Client': 'ui' };
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+
+    const response = await fetch(this.url(`/modules/${encodeURIComponent(name)}/report`), {
+      headers,
+    });
+    if (!response.ok) {
+      let code = `http_${response.status}`;
+      let message = response.statusText;
+      try {
+        const payload = (await response.json()) as ApiError;
+        code = payload.error?.code ?? code;
+        message = payload.error?.message ?? message;
+      } catch {
+        /* a non-JSON error body is still an error */
+      }
+      throw new ApiRequestError(response.status, code, message);
+    }
+    return {
+      contentType: response.headers.get('content-type') ?? 'text/plain',
+      body: await response.text(),
+    };
+  }
+
   private async request<T>(
     path: string,
     {

@@ -223,40 +223,83 @@ describe('a module the daemon reports without stats', () => {
 });
 
 /**
- * Reports are only useful if you can find them — OI-29.
+ * Reports are only useful if you can find them, and only work if they are
+ * fetched — OI-29, OI-30.
  *
- * The first working version of a reporting module answered a magic URL through
- * the proxy, which meant the report was unreachable from this page: the control
- * origin is not proxied traffic. It was a feature that existed and could not be
- * found. The library is where someone looks for it.
+ * The first version linked to `/modules/<name>/report` with a plain anchor.
+ * That cannot work: a navigation carries no Authorization header, so every
+ * click returned `missing or invalid bearer token`. Replaces the two tests
+ * that asserted the anchor and its `target=_blank`, which described a design
+ * that could never have worked.
  */
 describe('module reports', () => {
-  it('links to the report when the module has one', async () => {
-    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+  it('offers a report only where one exists', async () => {
+    const client = api([
+      makeModule({ name: 'gpc-audit', has_report: true }),
+      makeModule({ name: 'adblock', has_report: false }),
+    ]);
     render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
 
-    const link = await screen.findByRole('link', { name: 'report' });
-    expect(link.getAttribute('href')).toBe('/modules/gpc-audit/report');
-  });
-
-  it('does not link when the module has no report', async () => {
-    // Linking every module to a 404 would make the column noise, and teach
-    // people to ignore it.
-    const client = api([makeModule({ name: 'adblock', has_report: false })]);
-    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
-
+    // Linking every module to a 404 would make the column noise.
     await screen.findByText('adblock');
-    expect(screen.queryByRole('link', { name: 'report' })).toBeNull();
+    expect(await screen.findAllByRole('button', { name: 'report' })).toHaveLength(1);
   });
 
-  it('opens the report in its own tab', async () => {
-    // The body is module-authored and served under a sandbox CSP. Embedding it
-    // in the UI would put module HTML inside the page that holds the token.
+  it('fetches the report with the bearer token rather than navigating', async () => {
+    // The whole point of OI-30: the token rides in a header, and a header
+    // needs a fetch. Putting it in the URL is forbidden outright.
     const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    const fetchReport = vi
+      .spyOn(client, 'getModuleReport')
+      .mockResolvedValue({ contentType: 'text/html', body: '<p>audit</p>' });
     render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
 
-    const link = await screen.findByRole('link', { name: 'report' });
-    expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel')).toContain('noreferrer');
+    await userEvent.click(await screen.findByRole('button', { name: 'report' }));
+
+    expect(fetchReport).toHaveBeenCalledWith('gpc-audit');
+  });
+
+  it('renders module HTML in a sandboxed frame, never in this document', async () => {
+    // The body is module-authored and this page holds the bearer token. No
+    // allow-scripts and no allow-same-origin means an opaque origin that
+    // cannot reach the page or the control API.
+    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    vi.spyOn(client, 'getModuleReport').mockResolvedValue({
+      contentType: 'text/html; charset=utf-8',
+      body: '<p>audit</p>',
+    });
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'report' }));
+
+    const frame = await screen.findByTitle('gpc-audit report');
+    expect(frame.getAttribute('sandbox')).toBe('');
+    expect(frame.getAttribute('srcdoc')).toContain('<p>audit</p>');
+  });
+
+  it('shows non-HTML reports as text', async () => {
+    // Rendering CSV or JSON as markup would smuggle HTML past the daemon's
+    // content-type allowlist.
+    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    vi.spyOn(client, 'getModuleReport').mockResolvedValue({
+      contentType: 'text/csv',
+      body: 'host,cookie\nx,<b>y</b>',
+    });
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'report' }));
+
+    expect(await screen.findByText(/<b>y<\/b>/)).toBeTruthy();
+    expect(screen.queryByTitle('gpc-audit report')).toBeNull();
+  });
+
+  it('reports a failure instead of showing an empty frame', async () => {
+    const client = api([makeModule({ name: 'gpc-audit', has_report: true })]);
+    vi.spyOn(client, 'getModuleReport').mockRejectedValue(new Error('module raised'));
+    render(<ModuleLibrary api={client} onOpen={vi.fn()} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'report' }));
+
+    expect(await screen.findByText('module raised')).toBeTruthy();
   });
 });

@@ -43,6 +43,21 @@ class Timing:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class FlowError:
+    """Why a flow failed before completing.
+
+    A 502 with no record is the worst outcome a traffic inspector can produce:
+    the user sees the browser fail, opens the tool built to explain it, and
+    finds nothing. `from_client` separates a browser cancelling from an origin
+    refusing, which are indistinguishable in a count and are not the same
+    event.
+    """
+
+    message: str
+    from_client: bool = False
+
+
 @dataclass(slots=True)
 class FlowRecord:
     """One captured flow."""
@@ -58,6 +73,10 @@ class FlowRecord:
     timing: Timing = field(default_factory=Timing)
     modified: bool = False
     blocked: bool = False
+    # Set when the exchange never completed — refused, TLS failure, timeout.
+    # `response` is None in that case, so without this the record says only
+    # that something happened (OI-23).
+    error: FlowError | None = None
     # passthrough only
     passthrough_host: str | None = None
     passthrough_ip: str | None = None

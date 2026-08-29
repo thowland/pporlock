@@ -7,11 +7,12 @@ stub. This is where normalized objects become FlowRecords and land in the ring.
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from ..addon.normalize import now_iso
 from ..engine.models import NormalizedRequest, NormalizedResponse, WebSocketMessage
 from ..engine.provenance import Action, NoteCode, Outcome, Provenance
-from .records import FlowRecord, Timing, truncate
+from .records import FlowError, FlowRecord, Timing, truncate
 from .ring import RingBuffer
 
 
@@ -100,6 +101,43 @@ class RingSink:
             timing=Timing(pporlock_ms=timing.get("pporlock_ms")),
             modified=modified,
             blocked=blocked,
+        )
+        self._emit(record)
+
+    def record_error(
+        self,
+        request: NormalizedRequest | None,
+        provenance: Provenance,
+        message: str,
+        *,
+        from_client: bool = False,
+    ) -> None:
+        """A flow that failed before completing (REQ CAP-002, OI-23).
+
+        Recorded rather than merely counted. A request that 502s used to leave
+        no trace in the ring at all: the browser showed a gateway error, the
+        user opened the flow table built to explain it, and the request they
+        were looking for was simply not there. The one flow you most need to
+        see was the one flow the tool discarded.
+
+        The record carries no response, because there was none. That is the
+        honest shape — a row with a reason and no status, rather than a
+        fabricated one.
+        """
+        tab_id = request.tab_id if request is not None else None
+        if tab_id is None and request is not None and self.resolve_tab is not None:
+            tab_id = self.resolve_tab(request.method, request.url)
+
+        record = FlowRecord(
+            flow_id=_flow_id_of(request, None),
+            kind="http",
+            started_at=request.timestamp if request is not None else now_iso(),
+            completed_at=now_iso(),
+            tab_id=tab_id,
+            request=request,
+            response=None,
+            provenance=provenance,
+            error=FlowError(message=message, from_client=from_client),
         )
         self._emit(record)
 
@@ -193,7 +231,13 @@ def _flow_id_of(request: NormalizedRequest | None, response: NormalizedResponse 
         return request.flow_id
     if response is not None:
         return response.flow_id
-    return f"unknown-{now_iso()}"
+    # Unique, not merely descriptive. This used to be `unknown-<iso timestamp>`,
+    # which is second-resolution: two flows with neither a request nor a
+    # response in the same second collided on one id and the ring kept one of
+    # them. Latent while only complete flows were recorded; reachable as soon as
+    # failures were (OI-23), and a page failing to load produces many at once —
+    # exactly the case where losing all but one is worst.
+    return f"unknown-{uuid4().hex}"
 
 
 def replace_body(

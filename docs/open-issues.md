@@ -628,3 +628,51 @@ did not survive measurement. The refusals the user saw are better explained by
 the false trips above: the proxy is cleared mid-page-load and requests already
 in flight fail. If refusals persist after this fix, that theory is wrong and
 this is the place to start again.
+
+---
+
+## OI-23 — a flow that failed left no trace in the flow table
+
+**Found:** chasing a user's 502 on `vumerity.com`. **CLOSED** (failed flows are
+recorded with their reason).
+
+`Interceptor.error` incremented a counter and stopped. A request that never
+completed produced no row in the ring, so a user hitting a 502 saw the browser
+fail, opened the flow table whose entire job is explaining traffic, and found
+the request missing. `/metrics` showed `errors: 4` while `ring_flows` was 1 —
+the tool counted the failure somewhere nobody was looking.
+
+For a traffic inspector this is the worst possible omission: the flows that
+fail are the ones being investigated.
+
+Failed flows now carry a `FlowError` (`message`, `from_client`) through
+`contracts/schemas/flow.schema.json`, the ring, the API and the console. There
+is deliberately no synthesised response — a row with a reason and no status is
+the honest shape; inventing a status would make the table lie about what the
+browser received. `from_client` separates a browser cancelling from an origin
+refusing, which are opposite events and identical in a count.
+
+**Two bugs found on the way, both worth recording.**
+
+*The tee.* Every unit test constructed the sink it exercised, so all of them
+passed while the running daemon dropped every error record. `cli/runner.py`
+wraps `RingSink` in a `TeeSink`, and `TeeSink` inherits `NullSink` — so it
+inherited a `record_error` that counted and returned. Not a crash: a silent
+no-op that looked correct. This is OI-11 exactly, and it is why
+`test_flow_errors.py` now builds the tee the daemon actually builds.
+`NullSink`'s counting default is right for a stub and dangerous for a base
+class, and a test now pins every sink the daemon can construct.
+
+*Colliding ids.* `_flow_id_of` fell back to `unknown-<iso timestamp>` at second
+resolution, so flows with neither request nor response in the same second
+collided and the ring kept one. Latent while only completed flows were
+recorded; reachable the moment failures were — and a page failing to load
+produces many at once, which is precisely when losing all but one is worst.
+
+**The original 502 was not reproduced.** `vumerity.com` and `avonex.com` were
+tried through the proxy with curl, headless Chromium and real Chrome — apex,
+`www`, `http://`, and the explicit `https://host:443/` form their redirect
+uses. All returned 200. Their certificates cover both apex and `www`, and
+neither publishes an ECH config. The `https://vumerity.com:443/` redirect comes
+from the origin and is byte-identical with and without the proxy. If it recurs,
+the flow table will now say why — which is the actual deliverable here.

@@ -50,6 +50,10 @@ class FlowSink(Protocol):
         self, host: str | None, ip: str | None, provenance: Provenance, timing: dict[str, float]
     ) -> None: ...
 
+    def record_error(
+        self, request: Any, provenance: Provenance, message: str, *, from_client: bool = False
+    ) -> None: ...
+
     def record_websocket_message(self, message: Any) -> None: ...
 
     def record_websocket_close(self, flow_id: str, close_code: Any) -> None: ...
@@ -62,6 +66,7 @@ class NullSink:
         self.http = 0
         self.passthrough = 0
         self.websocket_messages = 0
+        self.errors = 0
 
     def record_http(
         self, request: Any, response: Any, provenance: Provenance, timing: dict[str, float]
@@ -72,6 +77,11 @@ class NullSink:
         self, host: str | None, ip: str | None, provenance: Provenance, timing: dict[str, float]
     ) -> None:
         self.passthrough += 1
+
+    def record_error(
+        self, request: Any, provenance: Provenance, message: str, *, from_client: bool = False
+    ) -> None:
+        self.errors += 1
 
     def record_websocket_message(self, message: Any) -> None:
         self.websocket_messages += 1
@@ -390,8 +400,46 @@ class Interceptor:
         self.sink.record_http(request, response, provenance, {"pporlock_ms": elapsed_ms})
 
     def error(self, flow: Any) -> None:
-        """An upstream or client error. Counted, not swallowed."""
+        """An upstream or client error — recorded, not merely counted (OI-23).
+
+        This used to increment a counter and stop, which meant a request that
+        failed left no row in the flow table. A user hitting a 502 saw the
+        browser fail, opened the tool whose entire job is explaining traffic,
+        and found the request missing. The counter went up somewhere they were
+        not looking.
+
+        Best-effort by construction: this hook runs for failures of every
+        shape, including ones where the request was never normalised, and it
+        must not be able to turn a connection error into a daemon error.
+        """
         self.counters.errors += 1
+
+        message = "connection failed"
+        from_client = False
+        error = getattr(flow, "error", None)
+        if error is not None:
+            message = str(getattr(error, "msg", None) or message)
+            # mitmproxy marks a client-side disconnect with this sentinel. A
+            # browser cancelling a request and an origin refusing one are the
+            # same row otherwise, and they mean opposite things.
+            from_client = getattr(error, "msg", None) == getattr(
+                type(error), "KILLED_MESSAGE", object()
+            )
+
+        # A flow that failed early may never have been normalised, and a flow
+        # too broken to describe is exactly the case this hook exists for. So
+        # the request is best-effort and its absence is not fatal: a row with a
+        # reason and no request still tells the user more than no row at all,
+        # which is what they got before.
+        request = _unstash(flow, "request")
+        if request is None:
+            try:
+                request = normalize.normalize_request(flow, flow_id=_flow_id(flow))
+            except Exception:
+                request = None
+
+        builder: ProvenanceBuilder = _unstash(flow, "builder") or ProvenanceBuilder(self.profile)
+        self.sink.record_error(request, builder.build(0.0), message, from_client=from_client)
 
     def websocket_message(self, flow: Any) -> None:
         """WebSocket frames are captured, never modified in v1 (REQ PXY-051)."""

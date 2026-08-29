@@ -142,6 +142,15 @@ def serialize_flow(
     if record.response is not None:
         payload["response"] = serialize_response(record.response, detail)
 
+    if record.error is not None:
+        # A failed flow has no response, so without this the row says only that
+        # a request happened and stops. The reason is the whole value of the
+        # record (OI-23).
+        payload["error"] = {
+            "message": record.error.message,
+            "from_client": record.error.from_client,
+        }
+
     if record.kind == "passthrough":
         # An excluded connection has no request or response, but must still be
         # visible with the entry that matched and why (REQ PXY-015).

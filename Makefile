@@ -241,6 +241,12 @@ fixtures:
 bench:
 	cd $(DAEMON) && $(UV) run python -m bench.run
 
+# Concurrency, not serial latency (OI-21). Reports pporlock against
+# mitmproxy's own single-core ceiling, which is what actually saturates.
+.PHONY: bench-saturation
+bench-saturation:
+	cd $(DAEMON) && $(UV) run python -m bench.saturation
+
 .PHONY: clean
 clean:
 	rm -rf $(WEB)/dist $(EXT)/dist $(CONTR)/generated

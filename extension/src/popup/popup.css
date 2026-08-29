@@ -62,6 +62,13 @@ h1 {
   color: var(--dim);
   font-size: 12px;
 }
+/* A version mismatch between the extension and the daemon. Uses the existing
+   warning token rather than a new colour — it is the same class of "this is
+   not wrong yet, but look at it" the pills already express. */
+.version-skew {
+  color: var(--warn);
+  font-weight: 700;
+}
 hr {
   border: 0;
   border-top: 1px solid var(--border);

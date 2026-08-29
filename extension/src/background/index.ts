@@ -220,6 +220,7 @@ async function status(): Promise<StatusReply> {
     profiles,
     counters,
     version,
+    extensionVersion: chrome.runtime.getManifest().version,
   };
 }
 

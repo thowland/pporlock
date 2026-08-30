@@ -1779,6 +1779,18 @@ ignore rule cannot decide what the project ships, and a guard that compares ever
 file under `src/pporlock` against `git ls-files` — watched failing, naming the
 file and nothing else.
 
+**And the tool whose job was to notice said `pass`.** Cloning `v0.8.1` from
+GitHub proves the severity rather than asserting it: 0 exclusions loaded, and
+`swscan.apple.com`, `ocsp.digicert.com` and `www.chase.com` all reported as not
+excluded. `pporlock doctor` reported `exclusions_load: pass` throughout — it
+loaded the list, got nothing, found no undocumented entries in that nothing, and
+said everything was fine. `check_exclusions` now fails on an empty list, with
+remediation naming what is being decrypted as a result.
+
+Whether `load_exclusions()` should *raise* rather than return empty is left to
+the maintainer: the tolerance is deliberate and tested, and making it fatal
+decides whether a broken install refuses to start. Noted on OI-33.
+
 ### The CI itself
 
 `.github/workflows/gate.yml` runs `make gate`, not a hand-copied list of steps. A

@@ -43,6 +43,28 @@ class TestChecks:
         assert result.level == "pass"
         assert "documented" in result.message
 
+    def test_no_exclusions_at_all_is_a_failure_not_a_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OI-33 — the state this tool existed to notice, and reported as fine.
+
+        The shipped default list was missing from every clone for the life of
+        the project. `check_exclusions` loaded it, got nothing, found no
+        undocumented entries in that nothing, and said `pass`. Meanwhile the
+        proxy was decrypting OS update endpoints, certificate revocation and
+        banking hosts.
+
+        An empty list is a broken installation, not a configuration choice:
+        there is no supported way to have no exclusions (REQ PXY-013).
+        """
+        from pporlock.engine.exclusions import ExclusionList
+
+        monkeypatch.setattr(doctor, "load_exclusions", lambda: ExclusionList([]))
+        result = doctor.check_exclusions(Config())
+        assert result.level == "fail"
+        assert "no exclusions" in result.message
+        assert result.remediation
+
     def test_ca_present_check_reflects_the_filesystem(self) -> None:
         result = doctor.check_ca_present(Config())
         assert result.level in ("pass", "fail")

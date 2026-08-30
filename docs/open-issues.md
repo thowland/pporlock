@@ -493,6 +493,31 @@ exists to catch. CI was the first thing that had ever looked at a fresh clone.
   filename and nothing else. This generalises — the next file a stray ignore
   rule swallows fails here rather than in someone's clone.
 
+**A second half, found while proving the first.** Cloning `v0.8.1` from GitHub
+and loading it confirms the severity is not theoretical: `load_exclusions()`
+returns **0 entries**, and `swscan.apple.com`, `ocsp.digicert.com` and
+`www.chase.com` are all reported as *not* excluded. It fails **silently** — and
+`pporlock doctor`, whose entire job is to notice this, reported
+`exclusions_load: pass`. It loaded the list, got nothing, found no undocumented
+entries in that nothing, and said everything was fine. The tool that should have
+caught this was actively reassuring.
+
+`check_exclusions` now fails on an empty list, with remediation naming what is
+being intercepted as a result. An empty list is a broken installation, not a
+configuration choice: there is no supported way to have no exclusions
+(REQ PXY-013). Watched failing.
+
+**Left open deliberately:** whether `load_exclusions()` should *raise* when the
+shipped default is missing, rather than returning an empty list. Its own
+docstring already argues the case for the user file — "silently falling back to
+defaults would leave the user believing an exclusion is in force when it is not,
+which for a financial or pinning entry is exactly the wrong way to fail" — and
+that reasoning applies at least as strongly to package data. But
+`test_missing_default_file_is_tolerated` says the tolerance is deliberate and
+tested, and making it fatal decides whether a broken install refuses to start.
+That is a maintainer's call, not a drive-by change. The `doctor` check makes the
+condition loud either way.
+
 **The lesson is about the guard, not the file.** A test that reads the working
 tree is asking the wrong machine. Anything that must be *shipped* has to be
 checked against what was *committed*.

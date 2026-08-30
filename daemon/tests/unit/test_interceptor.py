@@ -323,6 +323,124 @@ class TestProxyListenerControl:
         with pytest.raises(ProxyControlError, match="did not stop"):
             await interceptor.set_proxy_running(False)
 
+    async def test_it_waits_for_the_listener_addon_to_accept_changes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OI-32 — the bug that made this a permanent failure, not a slow one.
+
+        mitmproxy's `Master.run` binds the listener in `setup_servers()` and only
+        *then* triggers the `running` hook, which is what sets
+        `Proxyserver.is_running`. `Proxyserver.configure` drops an option change
+        outright while that flag is False — no queue, no retry. So a stop
+        commanded in that window vanished, and because the port was already
+        accepting there was nothing outside mitmproxy that could see the
+        difference: the listener stayed up for ever and we reported it as a
+        1.0s timeout, which sent everyone looking at the budget.
+
+        This fake reproduces exactly that contract.
+        """
+        from pporlock.addon import interceptor as module
+
+        class LateAddon:
+            """Bound and accepting, but not yet listening for option changes."""
+
+            def __init__(self) -> None:
+                self.addrs = ["127.0.0.1:8080"]
+                self.polls = 0
+
+            @property
+            def is_running(self) -> bool:
+                # The `running` hook fires a little after the bind; reading the
+                # flag is what advances the clock here.
+                self.polls += 1
+                return self.polls >= 3
+
+            def listen_addrs(self) -> list[str]:
+                return self.addrs
+
+        addon = LateAddon()
+
+        class Options:
+            def update(self, **kwargs: object) -> None:
+                # mitmproxy's own behaviour: ignored unless the addon is running.
+                if addon.is_running and kwargs.get("server") is False:
+                    addon.addrs = []
+
+        class Master:
+            options = Options()
+
+        interceptor = Interceptor(Config())
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: Master())
+        monkeypatch.setattr(module, "_proxyserver_addon", lambda master: addon)
+        monkeypatch.setattr(module, "PROXY_STATE_POLL_INTERVAL_S", 0.001)
+
+        assert await interceptor.set_proxy_running(False) is True
+        assert addon.addrs == [], "the command was issued into the window and lost"
+
+    async def test_it_refuses_rather_than_commanding_a_listener_that_never_readies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """And says which of the two failures it is.
+
+        "Not delivered" and "not honoured" want different things done about
+        them, so they do not share a message.
+        """
+        from pporlock.addon import interceptor as module
+        from pporlock.errors import ProxyControlError
+
+        class NeverReadyAddon:
+            is_running = False
+
+            def listen_addrs(self) -> list[str]:
+                return ["127.0.0.1:8080"]
+
+        class Options:
+            def update(self, **_: object) -> None:
+                raise AssertionError("must not command an addon that cannot hear it")
+
+        class Master:
+            options = Options()
+
+        interceptor = Interceptor(Config())
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: Master())
+        monkeypatch.setattr(module, "_proxyserver_addon", lambda master: NeverReadyAddon())
+        monkeypatch.setattr(module, "PROXY_READY_POLLS", 2)
+        monkeypatch.setattr(module, "PROXY_STATE_POLL_INTERVAL_S", 0.001)
+
+        with pytest.raises(ProxyControlError, match="not yet accepting"):
+            await interceptor.set_proxy_running(False)
+
+    async def test_a_version_without_the_flag_is_not_blocked_by_the_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SPEC-1 §2.1 — an attribute that disappears costs us the guard, not
+        the feature. This is the adapter; absorbing that churn is its job."""
+        from pporlock.addon import interceptor as module
+
+        class OlderAddon:
+            def __init__(self) -> None:
+                self.addrs: list[str] = ["127.0.0.1:8080"]
+
+            def listen_addrs(self) -> list[str]:
+                return self.addrs
+
+        addon = OlderAddon()
+
+        class Options:
+            def update(self, **kwargs: object) -> None:
+                if kwargs.get("server") is False:
+                    addon.addrs = []
+
+        class Master:
+            options = Options()
+
+        interceptor = Interceptor(Config())
+        monkeypatch.setattr(module.Interceptor, "_proxyserver", lambda self: Master())
+        monkeypatch.setattr(module, "_proxyserver_addon", lambda master: addon)
+        monkeypatch.setattr(module, "PROXY_STATE_POLL_INTERVAL_S", 0.001)
+
+        assert await interceptor.set_proxy_running(False) is True
+
     def test_a_listen_addrs_property_is_read_as_well_as_a_method(self) -> None:
         """mitmproxy 12 exposes it as a method; other releases as a property.
         Absorbing that here is what the adapter is for (SPEC-1 §2.1)."""

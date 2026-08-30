@@ -52,3 +52,18 @@ web/playwright-report/
 !*.lock
 !uv.lock
 !package-lock.json
+
+# Shipped package data, never ignored.
+#
+# `daemon/src/pporlock/data/exclusions-default.yaml` — the 33 default
+# ClientHello exclusions (REQ PXY-013) — was absent from this repository from
+# the first commit until 0.9.0, because a *global* gitignore on the author's
+# machine ignored any directory named `data`. `git status` was clean, the tests
+# passed, and every clone shipped a proxy that would decrypt OS update
+# endpoints, certificate revocation, and banking hosts.
+#
+# A repository .gitignore takes precedence over the global one, so this
+# negation is what stops a personal ignore rule deciding what this project
+# ships. Found by CI on its first run.
+!daemon/src/pporlock/data/
+!daemon/src/pporlock/data/**

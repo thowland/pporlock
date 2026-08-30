@@ -201,6 +201,24 @@ def check_exclusions(_: Config) -> CheckResult:
         return CheckResult(
             "exclusions_load", "Exclusion list loads", "fail", str(exc), "Fix the exclusion YAML."
         )
+    # An empty list is a broken installation, not a configuration choice: the
+    # shipped defaults are package data, and there is no supported way to have
+    # none of them (REQ PXY-013). Reporting `pass` here is what let OI-33 ship —
+    # the file was missing from every clone for the life of the project, and the
+    # tool whose job is to notice said everything was fine. The consequence is
+    # not abstract: with no list, pporlock decrypts OS update endpoints,
+    # certificate revocation, and banking hosts.
+    if not exclusions.entries:
+        return CheckResult(
+            "exclusions_load",
+            "Exclusion list loads",
+            "fail",
+            "no exclusions at all — the shipped default list is missing or empty",
+            "Reinstall pporlock. Without it, traffic that should be tunnelled "
+            "undecrypted — OS updates, certificate revocation, banking — is "
+            "being intercepted.",
+        )
+
     uncommented = [e.pattern for e in exclusions.entries if not e.comment]
     if uncommented:
         return CheckResult(

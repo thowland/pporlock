@@ -29,7 +29,7 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 30 issues — 22 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 31 issues — 23 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 
@@ -136,7 +136,7 @@ make version     # print it   /  version-sync, version-check, bump-minor, bump-p
 make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
-**Current baseline:** daemon 2037, web 518, extension 263, mcp 134, E2E 33. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
+**Current baseline:** daemon 2039, web 518, extension 263, mcp 134, E2E 33. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
 
 If a number drops, something was deleted. Find out what.
 
@@ -174,7 +174,7 @@ Then update `docs/open-issues.md` (close it, or record what changed) and `docs/s
 
 ## What this project learned the expensive way
 
-Four of its worst bugs survived a fully green test suite. Every one was found by *using* the system rather than testing it. These are not anecdotes — they are why the gates above are not sufficient on their own.
+Five of its worst bugs survived a fully green test suite. Every one was found by *using* the system, or by looking at what it actually shipped, rather than by testing it. These are not anecdotes — they are why the gates above are not sufficient on their own.
 
 1. **A unit test cannot tell you the daemon builds what you wrote.** Two sprints shipped a complete, fully-tested module system that `cli/runner.py` never constructed, so none of it ran. A unit test builds the objects it exercises and so cannot notice their absence.
    → Anything that must run in a real daemon gets a case in `daemon/tests/unit/test_runner.py::TestStartupWiring`, and you verify it against a daemon started by `pporlock run`.
@@ -187,7 +187,10 @@ Four of its worst bugs survived a fully green test suite. Every one was found by
 
 4. **Scanners find mechanical problems; the checklist finds real ones.** Query-string secrets were written to disk unredacted while the header path was masked — found by walking §2.5 by hand, not by bandit.
 
-**Corollaries that are now practice:** a guard you have not watched fail is not a guard (sabotage it once, then restore it). An exit demo is not a formality. An allowlist needs a test that fails when the allowlist becomes unnecessary.
+5. **A test that reads the working tree cannot tell you what you shipped.** The 33 default exclusions (REQ PXY-013) were never committed — a global gitignore matched `data/` — so every clone got a proxy that would decrypt OS updates, certificate revocation and banking hosts. Six tests assert that list is present and non-trivial; all six passed, on every machine that had the file sitting on its disk. Found by CI on its first run, which was the first thing that had ever looked at a fresh clone (OI-33).
+   → Anything that must be *shipped* is checked against what was *committed*: `test_toolchain.py::test_every_file_the_package_needs_is_actually_in_the_repository`.
+
+**Corollaries that are now practice:** a guard you have not watched fail is not a guard (sabotage it once, then restore it). An exit demo is not a formality. An allowlist needs a test that fails when the allowlist becomes unnecessary. CI runs `make gate` itself, so there is one definition of green rather than two that drift.
 
 ---
 

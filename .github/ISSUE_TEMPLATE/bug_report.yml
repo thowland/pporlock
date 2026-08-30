@@ -1,0 +1,68 @@
+name: Bug report
+description: Something behaves differently from what the documentation says.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: pporlock version
+      description: >-
+        Output of `pporlock version`. Asked first because it is the first
+        question of every diagnosis, and because this project shipped eighteen
+        sprints with the answer stuck at 0.1.0 (OI-25).
+      placeholder: "0.8.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      description: >-
+        If a page came out wrong, say which part. "A widget never appeared" is a
+        better report than "the page is broken".
+    validations:
+      required: true
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Provenance for the flow
+      description: >-
+        The single most useful thing you can attach. Open the flow in the web UI
+        and copy the provenance panel, or `GET /flows/{id}/provenance`. It
+        records every rule that was considered, what it did, and what it did not
+        do and why — so it usually answers "which rule did this" outright.
+      render: text
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >-
+        Please redact anything you would not publish: a flow record can carry
+        session cookies for the site you were on. pporlock redacts at write
+        time, but a screenshot of an unmasked value is still an unmasked value.
+      placeholder: |
+        1. Enable module X
+        2. Load https://example.com
+        3. ...
+
+  - type: textarea
+    id: modules
+    attributes:
+      label: Modules enabled
+      description: Output of `pporlock modules` — module order changes behaviour (REQ MOD-023).
+      render: text
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I have read SECURITY.md and this is not the unsandboxed module
+            model, TLS termination, or another documented design position.
+          required: true
+        - label: macOS. pporlock does not support other platforms.
+          required: true

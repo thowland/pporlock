@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security model — read before reporting a vulnerability
+    url: https://github.com/thowland/pporlock/blob/master/SECURITY.md
+    about: >-
+      Unsandboxed module code and TLS termination are the design, not findings.
+      SECURITY.md states what is and is not a boundary.

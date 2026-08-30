@@ -1,0 +1,105 @@
+# The merge gate, run in CI.
+#
+# This deliberately runs `make gate` rather than a hand-copied list of steps.
+# The gate is the vocabulary CLAUDE.md and docs/implementation-plan.md use, and
+# a CI job that checked something *similar* to it would drift from the thing
+# contributors are told to run — leaving two definitions of "green" and no
+# statement about which one counts.
+#
+# macOS only, and not as a preference: pporlock installs a launchd agent, trusts
+# its CA through the system keychain, and drives Chrome. Running the suite on
+# Linux would prove something about a platform the project does not support.
+#
+# Not run here, and why:
+#   * `make e2e` — the extension suite needs a headed browser, because MV3
+#     extensions cannot be loaded headless (SPEC-3 §11). The web half runs in
+#     the `e2e` job below.
+#   * the exit demo — a clean install on a fresh machine, which is a human
+#     check by definition and is still outstanding (docs/sprint-log.md).
+name: gate
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # `make gate` includes pip-audit and npm audit, which fail on *new*
+  # advisories against unchanged code. Without a schedule those only surface
+  # when someone happens to push, which for a finished project could be months.
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, not just the tip. A shallow clone would
+          # make G6 pass by having nothing to look at.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install gitleaks
+        # scripts/gitleaks.sh falls back to a built-in scan and says so loudly
+        # when the binary is missing. That fallback exists for a developer
+        # machine; CI should run the real thing.
+        run: brew install gitleaks
+
+      - name: Set up toolchains
+        run: make setup
+
+      - name: Gate
+        run: make gate
+
+  e2e:
+    # Separate from the gate because it fails for different reasons — a browser
+    # that would not start is not a broken change — and because a red gate and
+    # a red browser want different people looking at them.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up toolchains
+        run: make setup
+
+      - name: Install Playwright's browser
+        run: cd web && npx playwright install --with-deps chromium
+
+      - name: Web E2E
+        # The web half only. These specs start a real daemon and a real origin
+        # and assert against what the origin received, which is what makes them
+        # worth the minutes: every wire-shape bug this project has shipped was
+        # invisible to tests that stubbed its own client.
+        run: make e2e-web
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

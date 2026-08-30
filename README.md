@@ -1,5 +1,8 @@
 # pporlock
 
+[![gate](https://github.com/thowland/pporlock/actions/workflows/gate.yml/badge.svg)](https://github.com/thowland/pporlock/actions/workflows/gate.yml)
+[![licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg)](LICENSE)
+
 **Local HTTPS interception and modification for Chrome, on macOS.**
 
 Point Chrome at a proxy you control, watch every request, and change the ones
@@ -227,10 +230,15 @@ make gate        # coverage + tests + lint + security. Run before every merge.
 make e2e         # Playwright (the extension suite is headed; MV3 needs it)
 ```
 
+CI runs `make gate` itself rather than a hand-copied list of steps, so there is
+one definition of green rather than two that drift.
+
 `CLAUDE.md` documents the architecture's load-bearing rules — the ones that
 break the design rather than the style — and the sprint close gates. Sprint
 history, decisions and every bug found along the way are in
 [docs/sprint-log.md](docs/sprint-log.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) is the short version: what to run, and the
+four things the gate cannot check.
 
 ### Two things this project learned the expensive way
 

@@ -49,9 +49,18 @@ someone runs against their own browsing.
 
 ## Reporting
 
-Email **th@wdogsystems.com**. Please include what you did, what happened, and
-what you expected. If the issue is a working exploit, describe the class of
-problem rather than attaching a ready-made one.
+Use GitHub's [private vulnerability
+reporting](https://github.com/thowland/pporlock/security/advisories/new), which
+keeps the report private until there is something to say publicly, or email
+**th@wdogsystems.com**.
+
+Please include what you did, what happened, and what you expected. If the issue
+is a working exploit, describe the class of problem rather than attaching a
+ready-made one.
+
+Please read *what is deliberately not a boundary* above first. Unsandboxed
+module code and TLS termination are the design; a report that they are
+exploitable is a report that the tool works.
 
 There is no bounty and no guaranteed response time. This is a personal project.
 

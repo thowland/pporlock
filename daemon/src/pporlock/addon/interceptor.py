@@ -30,8 +30,25 @@ from . import normalize
 #: How long to wait for mitmproxy to actually bind or release the listener.
 #: Twenty polls of 50ms — long enough for a local bind, short enough that a
 #: caller is not left hanging on a listener that is never going to change.
+#: Measured locally, a stop or start completes in about 50ms.
 PROXY_STATE_POLLS = 20
 PROXY_STATE_POLL_INTERVAL_S = 0.05
+
+#: How long to wait for mitmproxy's listener addon to start *accepting option
+#: changes* before commanding one. This is a separate wait from the one above
+#: and it is not the same question (OI-32).
+#:
+#: ``Master.run`` brings the listener up in ``setup_servers()`` and only then
+#: triggers the ``running`` hook, which is what sets ``Proxyserver.is_running``.
+#: ``Proxyserver.configure`` drops an option change entirely while that flag is
+#: False — no queue, no retry — so a stop commanded in that window is silently
+#: ignored and the listener stays up *for ever*. The port is already accepting
+#: by then, so nothing outside mitmproxy can see the difference.
+#:
+#: Generous, because it is waiting on process startup rather than on a socket,
+#: and because waiting a moment longer is strictly better than the alternative:
+#: reporting a failure for a request that was never delivered.
+PROXY_READY_POLLS = 100
 
 
 class FlowSink(Protocol):
@@ -539,6 +556,13 @@ class Interceptor:
         for the listener to reach the requested state rather than assuming it.
         Returning before that would reproduce exactly the bug this closes: a
         200 for an effect that had not happened.
+
+        Two waits, for two different questions (OI-32). First, that mitmproxy's
+        listener addon is *accepting* option changes at all — it drops them
+        while its ``running`` hook has not fired, and the listener is already
+        bound and accepting by that point, so a caller who does not wait gets a
+        command that vanishes. Then, that the listener actually reached the
+        state asked for.
         """
         master = self._proxyserver()
         addon = _proxyserver_addon(master)
@@ -546,6 +570,15 @@ class Interceptor:
             raise ProxyControlError(
                 "the proxy listener is not managed by this process, so it "
                 "cannot be started or stopped through the control API",
+                requested=running,
+            )
+
+        if not await self._await_listener_ready(addon):
+            raise ProxyControlError(
+                "the proxy listener addon is not yet accepting configuration "
+                f"changes after "
+                f"{PROXY_READY_POLLS * PROXY_STATE_POLL_INTERVAL_S:.1f}s, so the "
+                "request was not delivered rather than not honoured",
                 requested=running,
             )
 
@@ -561,6 +594,22 @@ class Interceptor:
             f"{PROXY_STATE_POLLS * PROXY_STATE_POLL_INTERVAL_S:.1f}s",
             requested=running,
         )
+
+    @staticmethod
+    async def _await_listener_ready(addon: Any) -> bool:
+        """Wait until mitmproxy's listener addon will act on an option change.
+
+        A version whose addon has no ``is_running`` is treated as ready rather
+        than blocked: this is the adapter, and an attribute that disappears
+        should cost us the guard, not the feature (SPEC-1 §2.1).
+        """
+        if not hasattr(addon, "is_running"):
+            return True
+        for _ in range(PROXY_READY_POLLS):
+            if bool(addon.is_running):
+                return True
+            await asyncio.sleep(PROXY_STATE_POLL_INTERVAL_S)
+        return bool(getattr(addon, "is_running", False))
 
     # -- state -----------------------------------------------------------
 

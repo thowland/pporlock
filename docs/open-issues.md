@@ -387,54 +387,63 @@ nothing tomorrow; see the sprint-log entry.
 
 ---
 
-## OI-32 — `make gate` is red on `master`: `test_start_brings_it_back`
+## OI-32 — `proxy_stop` could be silently dropped, for ever
 
-**Found:** while running `make gate` for 0.8.0. Confirmed against `master` with
-the branch stashed, so **it is not this work** — and the confirmation was worse
-than the symptom suggested:
+**Found:** as an intermittent `make gate` failure while releasing 0.8.0.
+**CLOSED** — and it was not the flaky test it looked like.
 
-| How it is run | `master` | this branch |
-|---|---|---|
-| plain `pytest` | 2 failures in 6 | 1 in 3 |
-| **under coverage, as `make gate` runs it** | **3 failures in 3** | 3 in 3 |
-
-So this is not really flakiness. Coverage instrumentation slows the loop enough
-that the budget is missed essentially every time, and `make gate` — the merge
-gate — does not currently pass on `master`. The first gate run on this branch
-passed, which was the lucky one and is exactly how this went unnoticed.
-
-`tests/integration/test_proxy_control.py::TestProxyListenerControl::test_start_brings_it_back`
-fails intermittently with:
+`test_start_brings_it_back` failed intermittently with:
 
 ```
 pporlock.errors.ProxyControlError: the proxy listener did not stop within 1.0s
 ```
 
-`Interceptor` polls for the listener to observably stop and raises at
-`PROXY_STATE_POLLS * PROXY_STATE_POLL_INTERVAL_S` = 1.0s (OI-3 added the poll
-precisely so the route could not lie about having stopped, which is the right
-design). On a loaded machine a real socket sometimes takes longer than that.
+which reads as "the 1.0s budget is too tight". It is not. Measured, a stop or a
+start completes in about **50 ms**; raising the budget to 20 s changed nothing,
+because in the failing case the listener never stopped **at all**.
 
-Two things are wrong and they are different:
+**The actual cause is in mitmproxy's contract.** `Master.run()` binds the
+listener in `setup_servers()` and only *afterwards* triggers the `running` hook,
+which is what sets `Proxyserver.is_running`. And `Proxyserver.configure` drops an
+option change outright while that flag is False — no queue, no retry. So there is
+a window in which:
 
-- **The test** binds a real listener and depends on a wall-clock budget, which is
-  a flaky shape regardless of the number chosen.
-- **The budget** may also be too tight for the daemon itself: a user's
-  `proxy_stop` on a busy machine gets a 409 saying it did not work, on a listener
-  that stops half a second later. That is the failure mode OI-3 was trying to
-  avoid, arriving from the other direction.
+- the port is bound and accepting, so every external check says the proxy is up;
+- `master.options.update(server=False)` is accepted and silently does nothing;
+- the listener then stays up for ever, because nothing re-applies the change.
 
-A gate that fails at random is a gate people learn to re-run, which is how a real
-failure gets waved through — and a gate that fails *every* time under its own
-runner is one nobody can use at all. **To close:** decide whether the 1.0s budget
-is right for the daemon (it is a user-visible 409 on `proxy_stop`, not only a
-test constant), then make the test wait on the observable state rather than on a
-wall-clock number.
+We reported that as a timeout, which sent everyone looking at the budget.
 
-**Not fixed here** because it is unrelated to module settings and the answer is a
-decision about daemon behaviour, not a test tweak. Every test this branch adds or
-touches passes; this is the only failure in the suite, on `master` and on the
-branch alike.
+**This was a daemon bug, not a test bug.** `POST /state {"proxy_running": false}`
+arriving in that window returns 409 on a listener that is still serving traffic —
+the OI-3 failure mode arriving from the other direction, and worse, because here
+the proxy keeps intercepting after the user asked it to stop. The tests only made
+it visible: they create many masters in one process, so they hit the window far
+more often than a daemon that creates one.
+
+**Fixed in the adapter**, which is where mitmproxy's version churn belongs
+(SPEC-1 §2.1). `set_proxy_running` now waits for the listener addon to be
+*accepting* configuration changes before commanding one, and only then waits for
+the state to change — two waits, because "not delivered" and "not honoured" are
+different failures that want different things done about them, and they no longer
+share a message. An addon with no `is_running` is treated as ready: a disappearing
+attribute should cost the guard, not the feature.
+
+**Evidence, since "it stopped failing" is not evidence for an intermittent bug.**
+A standalone reproduction creates six proxies in one process and stops each:
+before the fix, five of six stops hung until timeout and the port kept accepting;
+after it, twelve of twelve start/stop operations succeed and the port really
+closes. Three consecutive full `make gate` runs are green. The two new unit tests
+in `test_interceptor.py` encode mitmproxy's contract in a fake and were watched
+failing against the unfixed code, with the same "did not stop" message the
+original bug produced.
+
+**One correction to the record.** The 0.8.0 release notes said this failed "3 in 3
+under coverage", which was wrong: that measurement ran a single test file with
+`--cov`, and the non-zero exit was the `fail-under` threshold, not a test failure.
+The real trigger is many masters in one process, which is why the whole suite
+reproduced it and one file rarely did. The number was wrong; the bug was real, and
+worse than the number suggested.
 
 ---
 

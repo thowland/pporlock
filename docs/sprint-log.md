@@ -1616,14 +1616,10 @@ nearest surface — `ctx.log` — is drained by the evaluator and read by nothin
 all. So the module keeps a tally and renders it through `on_report`, which works
 and is a workaround for a missing surface rather than a use of one.
 
-**One unrelated finding, and it is not small.** `make gate` failed on
-`test_start_brings_it_back`. Checked against `master` with the branch stashed:
-2 failures in 6 plain runs, and **3 in 3 under coverage — which is how `make
-gate` runs it.** The merge gate does not currently pass on `master`. Recorded as
-OI-32 and left unfixed: the answer is a decision about whether the daemon's 1.0s
-`proxy_stop` budget is right, which is a behaviour question and not a test tweak.
-The first gate run on this branch passed, which was the lucky one, and is exactly
-how it stayed unnoticed.
+**One unrelated finding, and it was not small.** `make gate` failed on
+`test_start_brings_it_back` — on `master` too, with the branch stashed. Recorded
+as OI-32 and fixed in 0.8.1, where it turned out not to be a flaky test at all:
+the proxy listener could be told to stop and silently never do so. See below.
 
 ### The §2.5 walk
 
@@ -1691,3 +1687,54 @@ updating the live `ctx.config`; the "saving a setting changes the next request"
 spec went red and the other four stayed green, which is the right shape — then
 it was restored and all five passed again. A guard nobody has watched fail is
 not a guard.
+
+---
+
+## 0.8.1 — OI-32: a stop the proxy could silently ignore
+
+**Issues:** OI-32 (closed) · **2037 daemon tests**
+
+0.8.0 shipped with a note that `make gate` failed intermittently on
+`test_start_brings_it_back`, blaming a 1.0s timeout on a loaded machine. That
+was the wrong diagnosis, and the right one is worse.
+
+The budget is not tight. A stop or start completes in about **50 ms** — measured,
+not assumed — and raising the budget to 20 s changed nothing, because in the
+failing case the listener never stopped at all. Once "slow" was ruled out, the
+question became "why does an option change do nothing", and the answer is in
+mitmproxy: `Master.run()` binds the listener *before* triggering the `running`
+hook that sets `Proxyserver.is_running`, and `Proxyserver.configure` discards an
+option change entirely while that flag is False. No queue, no retry. In that
+window the port is bound and accepting, so nothing outside mitmproxy can tell the
+difference, and the change is gone for good.
+
+**So this was a daemon bug wearing a test's clothes.** `POST /state
+{"proxy_running": false}` in that window answers 409 on a proxy that is still
+intercepting — OI-3's failure mode from the other side, and worse, because the
+user asked it to stop and it kept going. The tests only made it visible: they
+build many masters in one process and hit the window far more often than a daemon
+that builds one.
+
+Fixed in `addon/interceptor.py`, which is where mitmproxy's version churn is
+supposed to be absorbed (SPEC-1 §2.1): wait for the listener addon to be
+*accepting* configuration changes, then command it, then wait for the state to
+change. "Not delivered" and "not honoured" are different failures that want
+different things done about them, so they no longer share a message. An addon
+with no `is_running` is treated as ready — a disappearing attribute should cost
+the guard, not the feature.
+
+**The evidence, because "it stopped failing" is not evidence for an intermittent
+bug.** A standalone reproduction that builds six proxies in one process and stops
+each: before, five of six stops hung to timeout with the port still accepting;
+after, twelve of twelve start/stop operations succeed and the port really closes.
+Three consecutive `make gate` runs green. Two new unit tests encode mitmproxy's
+contract in a fake, and were watched failing against the unfixed code with the
+same "did not stop" message the original bug produced.
+
+**And a correction.** The 0.8.0 notes claimed this failed "3 in 3 under
+coverage". That was a measurement artefact — running one test file with `--cov`
+exits non-zero on the `fail-under` threshold, not on a failing test. The real
+trigger is many masters in one process. The number was wrong; the bug was real
+and larger than the number implied. Recorded rather than quietly deleted, because
+a wrong diagnosis that reached a release note is exactly the kind of thing this
+log exists to keep honest.

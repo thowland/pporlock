@@ -1,6 +1,6 @@
 [project]
 name = "pporlock"
-version = "0.8.0"
+version = "0.8.1"
 description = "Local HTTPS interception and modification proxy daemon"
 requires-python = "==3.12.*"
 license = { text = "GPL-3.0-or-later" }

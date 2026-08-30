@@ -1,0 +1,108 @@
+# Default ClientHello exclusion list (REQ PXY-013).
+#
+# Connections matching these are tunneled undecrypted: pporlock never sees the
+# bytes, never mints a certificate, and never challenges the application's own
+# pinning. They are still recorded as passthrough flows — host, timing, byte
+# counts, no content (REQ PXY-015) — so excluded traffic is visible without
+# being readable.
+#
+# Every entry carries a comment. An exclusion nobody can explain is
+# indistinguishable from a bug, and this list is the first thing to suspect when
+# a site misbehaves.
+#
+# Four reasons appear here:
+#   pinning   the client pins certificates at the application layer and will
+#             fail closed against any MITM, ours included
+#   update    software update and revocation traffic; breaking it can leave the
+#             machine unable to patch itself
+#   sensitive financial and health traffic we decline to decrypt by default,
+#             independent of whether it would technically work
+#   telemetry high-volume traffic with no inspection value that would otherwise
+#             flood the capture buffer
+
+entries:
+  # --- Apple: OS updates, revocation, and pinned services -----------------
+  - pattern: "*.apple.com"
+    comment: "update: macOS software update, OCSP, and notarization. Breaking this can leave the machine unable to patch."
+  - pattern: "*.icloud.com"
+    comment: "pinning: iCloud clients pin and fail closed."
+  - pattern: "*.mzstatic.com"
+    comment: "update: App Store asset delivery."
+  - pattern: "*.push.apple.com"
+    comment: "pinning: APNs uses its own certificate validation."
+
+  # --- Browser and OS update channels -------------------------------------
+  - pattern: "*.gvt1.com"
+    comment: "update: Chrome component and extension updates."
+  - pattern: "*.gvt2.com"
+    comment: "update: Chrome crash and update endpoints."
+  - pattern: "update.googleapis.com"
+    comment: "update: Chrome update service (Omaha)."
+  - pattern: "clients2.google.com"
+    comment: "update: Chrome extension update checks."
+  - pattern: "clientservices.googleapis.com"
+    comment: "update: Chrome variations and component updater."
+  - pattern: "*.mozilla.org"
+    comment: "update: Firefox updates and add-on services."
+  - pattern: "*.mozilla.net"
+    comment: "update: Firefox CDN."
+  - pattern: "*.windowsupdate.com"
+    comment: "update: Windows Update."
+  - pattern: "*.update.microsoft.com"
+    comment: "update: Windows Update."
+  - pattern: "*.delivery.mp.microsoft.com"
+    comment: "update: Windows delivery optimization."
+
+  # --- Certificate revocation and transparency ----------------------------
+  # Breaking these degrades the browser's own security checks, which is a poor
+  # trade for inspection value that is close to zero.
+  - pattern: "ocsp.*"
+    comment: "pinning: OCSP responders. Breaking revocation checks weakens TLS for every site."
+  - pattern: "crl.*"
+    comment: "pinning: CRL distribution points."
+  - pattern: "*.letsencrypt.org"
+    comment: "pinning: ACME and OCSP."
+  - pattern: "*.digicert.com"
+    comment: "pinning: OCSP and CRL."
+
+  # --- Telemetry and crash reporting --------------------------------------
+  # Excluded for capture-buffer hygiene, not for privacy: these are high volume
+  # and inspecting them tells us nothing about the page under test.
+  - pattern: "*.crashlytics.com"
+    comment: "telemetry: crash reporting, high volume, no inspection value."
+  - pattern: "*.sentry.io"
+    comment: "telemetry: error reporting."
+  - pattern: "incoming.telemetry.mozilla.org"
+    comment: "telemetry: Firefox telemetry."
+
+  # --- Application-layer pinning ------------------------------------------
+  - pattern: "*.dropbox.com"
+    comment: "pinning: desktop client pins."
+  - pattern: "*.slack.com"
+    comment: "pinning: desktop client pins and will fail to connect."
+  - pattern: "*.zoom.us"
+    comment: "pinning: desktop client pins."
+  - pattern: "*.spotify.com"
+    comment: "pinning: desktop client pins."
+  - pattern: "*.whatsapp.net"
+    comment: "pinning: end-to-end encrypted, pins its transport."
+  - pattern: "*.signal.org"
+    comment: "pinning: end-to-end encrypted, pins its transport."
+
+  # --- Financial ------------------------------------------------------------
+  # A starter set, deliberately short. This cannot be exhaustive and is not
+  # meant to be: it establishes the category and the shape of the entry. Add
+  # your own institutions before any serious use — the approach document is
+  # explicit that this list should be seeded before, not after.
+  - pattern: "*.chase.com"
+    comment: "sensitive: financial. Decrypting banking traffic is declined by default."
+  - pattern: "*.bankofamerica.com"
+    comment: "sensitive: financial."
+  - pattern: "*.wellsfargo.com"
+    comment: "sensitive: financial."
+  - pattern: "*.paypal.com"
+    comment: "sensitive: financial, and pins."
+  - pattern: "*.stripe.com"
+    comment: "sensitive: payment processing."
+  - pattern: "*.plaid.com"
+    comment: "sensitive: financial account linking."

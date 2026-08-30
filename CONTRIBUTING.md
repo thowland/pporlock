@@ -39,7 +39,7 @@ Four things the gate cannot check, which are still expected:
 
 | | |
 |---|---|
-| **Demonstrate it** | A requirement is done when it has been *seen working*, not when a test passes. Four of this project's worst bugs survived a fully green suite; `docs/sprint-log.md` names them. |
+| **Demonstrate it** | A requirement is done when it has been *seen working*, not when a test passes. Five of this project's worst bugs survived a fully green suite — the most recent was a data file six tests asserted was present and that was never in the repository at all. `docs/sprint-log.md` names them. |
 | **Do not delete a test to move a number** | Removing a test that no longer describes real behaviour is correct. Say which, and what replaced it. |
 | **Never squash** | One branch per piece of work, merged `--no-ff`. Granular history is a deliberate requirement, not a preference. |
 | **Walk §2.5** | `docs/implementation-plan.md` §2.5 is the hand-reviewed security checklist, and it is the real gate. The scanners find mechanical problems; the checklist found query-string secrets being written to disk unredacted. |

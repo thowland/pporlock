@@ -23,11 +23,12 @@ of the diff, which the reviewer can read.
 - [ ] I have **seen it working**, not only seen the tests pass
 
 <!--
-That last one is not a formality. Four of this project's worst bugs survived a
-fully green suite and were found by using the system: a module system the daemon
-never constructed, a wire shape every test agreed with and the daemon did not, a
-published module API that could not be implemented as written, and query-string
-secrets written to disk unredacted. docs/sprint-log.md has the details.
+That last one is not a formality. Five of this project's worst bugs survived a
+fully green suite: a module system the daemon never constructed, a wire shape
+every test agreed with and the daemon did not, a published module API that could
+not be implemented as written, query-string secrets written to disk unredacted,
+and the default exclusion list — which six tests asserted was present, and which
+was never actually in the repository. docs/sprint-log.md has the details.
 
 Please do not squash. One branch per piece of work, merged --no-ff; granular
 history is a deliberate requirement here.

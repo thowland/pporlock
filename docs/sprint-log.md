@@ -1738,3 +1738,70 @@ trigger is many masters in one process. The number was wrong; the bug was real
 and larger than the number implied. Recorded rather than quietly deleted, because
 a wrong diagnosis that reached a release note is exactly the kind of thing this
 log exists to keep honest.
+
+---
+
+## 0.9.0 — CI, and what it found in the first ten minutes
+
+**Issues:** OI-33 (new, closed) · **2038 daemon tests**
+
+The repository had no CI. Adding it was meant to be routine housekeeping for a
+public project. The first run failed, and what it found had been shipping since
+the first commit.
+
+### OI-33 — the default exclusion list was never in the repository
+
+`daemon/src/pporlock/data/exclusions-default.yaml`, the 33 default ClientHello
+exclusions required by REQ PXY-013, was **not tracked**. A global gitignore on
+the author's machine contained a bare `data`, which matched the directory, so
+`git add -A` never saw it and `git status` was clean every single time.
+
+Every clone — and every public release up to v0.8.1 — got a proxy with an empty
+exclusion list. That means terminating TLS for the exact hosts the list exists to
+leave alone: OS update endpoints, browser updates, certificate revocation,
+banking, payments.
+
+**Six tests assert that list is present and non-trivial, and all six passed.**
+One of them is the E2E's "the daemon ships a non-trivial default exclusion list",
+whose own comment calls it *"the precondition for the test that matters"*. It was
+right, and it still could not see this, because the file was on the disk of every
+machine that ran it. A test that reads the working tree is asking the wrong
+machine: "present here" and "shipped" are different claims, and nothing in this
+project had ever checked the second one.
+
+That makes five for the family in `CLAUDE.md`, and this is the purest: the tests
+were correct, comprehensive and unanimous, and the artefact was still wrong. It
+is also exactly what the never-run exit demo is for. CI was simply the first
+thing that had ever looked at a fresh clone.
+
+Closed with the file tracked, an explicit `.gitignore` negation so a personal
+ignore rule cannot decide what the project ships, and a guard that compares every
+file under `src/pporlock` against `git ls-files` — watched failing, naming the
+file and nothing else.
+
+### The CI itself
+
+`.github/workflows/gate.yml` runs `make gate`, not a hand-copied list of steps. A
+job that checked something *similar* to the gate would drift from the thing
+contributors are told to run, leaving two definitions of green and no statement
+about which counts. macOS only, because pporlock installs a launchd agent, trusts
+its CA through the system keychain and drives Chrome; a Linux run would prove
+something about a platform this project does not support.
+
+Details worth keeping: `fetch-depth: 0`, or gitleaks passes by having no history
+to scan. gitleaks installed rather than left to the fallback in
+`scripts/gitleaks.sh`, which exists for a developer machine. A weekly schedule,
+because `make gate` includes pip-audit and npm audit and those fail on *new*
+advisories against unchanged code — without it, an advisory surfaces only when
+someone happens to push. The web E2E is a separate job, because a browser that
+would not start is not a broken change; the extension suite stays out because MV3
+cannot be loaded headless (SPEC-3 §11).
+
+### Repository furniture
+
+`CONTRIBUTING.md`; a bug template that asks for `pporlock version` first — the
+first question of every diagnosis, and one this project could not answer for
+eighteen sprints (OI-25) — and for the flow's provenance, which usually answers
+"which rule did this" outright; a PR template built round the gate; topics;
+GitHub releases for the existing tags; and private vulnerability reporting
+enabled, with `SECURITY.md` pointing at it.

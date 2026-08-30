@@ -445,6 +445,59 @@ The real trigger is many masters in one process, which is why the whole suite
 reproduced it and one file rarely did. The number was wrong; the bug was real, and
 worse than the number suggested.
 
+
+---
+
+## OI-33 — the shipped exclusion list was never in the repository
+
+**Found:** by CI, on its first run. **CLOSED** in 0.9.0.
+
+`daemon/src/pporlock/data/exclusions-default.yaml` — the 33 default ClientHello
+exclusions required by REQ PXY-013 — was absent from this repository **from the
+first commit until 0.9.0**. A *global* gitignore on the author's machine
+(`~/.gitignore_global`, containing a bare `data`) matched the directory, so
+`git add -A` never picked it up and `git status` was always clean.
+
+**What a clone actually got.** A proxy with an empty exclusion list, which would
+terminate TLS for every one of the hosts that list exists to leave alone: OS
+update endpoints (`swscan.apple.com`), browser updates
+(`update.googleapis.com`), certificate revocation (`ocsp.digicert.com`),
+banking (`www.chase.com`) and payments (`api.stripe.com`). Every one of those
+entries is there because interception breaks that host or because decrypting it
+is a thing this tool should not do by default. This shipped in every public
+release up to and including v0.8.1.
+
+**Why nothing caught it.** Six tests assert the list is present, correct and
+non-trivial — `TestShippedDefaults` in `test_exclusions.py`, and the E2E's
+"the daemon ships a non-trivial default exclusion list", which is described in
+its own comment as *"the precondition for the test that matters"*. All of them
+passed on every machine that had ever run the daemon, because the file was
+sitting right there. A test cannot distinguish "shipped" from "present on this
+disk" without asking something outside the working tree. Nothing did.
+
+This is the fifth entry in the same family as the four in `CLAUDE.md`, and the
+purest one yet: **the tests were correct, comprehensive, and unanimous, and the
+artefact was still wrong.** It is also precisely the failure the never-run exit
+demo — a clean install on a fresh machine, following only `docs/install.md` —
+exists to catch. CI was the first thing that had ever looked at a fresh clone.
+
+**Closed with three things, not one.**
+
+- The file is tracked (`git add -f`).
+- `.gitignore` carries an explicit negation for `daemon/src/pporlock/data/`. A
+  repository's own ignore file takes precedence over the global one, so this is
+  what stops a personal ignore rule deciding what the project ships.
+- `test_toolchain.py::test_every_file_the_package_needs_is_actually_in_the_repository`
+  compares every file under `src/pporlock` against `git ls-files` and names any
+  that are missing. Watched failing: untracking the file makes it fail with that
+  filename and nothing else. This generalises — the next file a stray ignore
+  rule swallows fails here rather than in someone's clone.
+
+**The lesson is about the guard, not the file.** A test that reads the working
+tree is asking the wrong machine. Anything that must be *shipped* has to be
+checked against what was *committed*.
+
+
 ---
 
 ## A note on process

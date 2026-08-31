@@ -1817,3 +1817,43 @@ eighteen sprints (OI-25) — and for the flow's provenance, which usually answer
 "which rule did this" outright; a PR template built round the gate; topics;
 GitHub releases for the existing tags; and private vulnerability reporting
 enabled, with `SECURITY.md` pointing at it.
+
+## OI-34 — the extension could not tell an unpaired daemon from a dead one
+
+Found by using the extension against a daemon whose pairing had not survived
+OI-19's introduction. `pporlock pair` fixes the pairing; the interesting part is
+that the extension had four independent ways of describing a 403 as something
+else, and three of them named a remedy that was wrong.
+
+The shape worth remembering: **the extension's sense of its own health was
+self-referential.** `paired` was a boolean written once at pairing time and
+never checked against the daemon again, so the popup asked itself whether it was
+working and answered yes. Every failing call then had to be individually
+disguised for that story to hold — and each one obliged, because each `catch`
+had been written for the failure its author had in mind. The health monitor
+scored an HTTP 403 as "nothing is listening", `enableProxy` reported it as
+"cannot reach the daemon", and the handlers that did tell the truth told it in
+the daemon's words rather than the user's.
+
+Two of the four bugs lived in `background/index.ts`, which has no test file and
+is excluded from coverage — a service worker that registers listeners at module
+load. A component that opts out of testing will accumulate exactly the class of
+bug that lesson 1 describes.
+
+The first pass extracted only the two pure helpers and left `enableProxy` in
+place. When the fix was reported as not working, the suite could not settle it
+either way — and "the code looks right" is not an answer, it is the absence of
+one. The whole action layer then moved to `background/actions.ts` behind an
+injected `ActionDeps`, and the behaviour the user actually asked about — the
+pairing error arriving at the toggle rather than three actions later — is now a
+test that fails when the blind catch is restored.
+
+Worth stating plainly: extension coverage went *down*, 93.6% to 92.5%, and that
+is the improvement. Two hundred lines that were never in the denominator are now
+in it. A gate read without that context would have called it a regression and
+been wrong.
+
+The new `rejected` failure kind is narrow on purpose: 401 and 403 only. A 5xx
+still trips the fail-safe as it always did, with a test that fails if that is
+ever widened, because a fail-safe that has been quietly taught to forgive is
+worse than none.

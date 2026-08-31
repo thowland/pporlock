@@ -8,6 +8,7 @@
 import { ControlApi } from '../shared/api';
 import type { ActionReply, Message, StatusReply } from '../shared/messages';
 import { StateStore, chromeArea, DEFAULT_CONTROL_ORIGIN } from '../shared/state';
+import { type ActionDeps, disableProxy, enableProxy, failureMessage, status } from './actions';
 import { Attributor } from './attribution';
 import { applyBadge, badgeView, chromeBadgeApi, resolveBadgeState } from './badge';
 import { HealthMonitor, POLL_INTERVAL_MS } from './health';
@@ -70,6 +71,8 @@ const health = new HealthMonitor({
     }
   },
   onRecover: refreshBadge,
+  // A refusal changes what the popup must offer, so the badge follows it too.
+  onRejected: () => refreshBadge(),
 });
 
 async function refreshBadge(tabId?: number): Promise<void> {
@@ -85,7 +88,7 @@ async function refreshBadge(tabId?: number): Promise<void> {
     resolveBadgeState({
       proxyEnabled: state.proxyEnabled,
       failSafeTripped: state.failSafeTrippedAt !== null,
-      daemonReachable: health.healthy !== false,
+      daemonReachable: health.reachable,
       devToggleActive: state.devToggles.anticache || state.devToggles.anticomp,
       counts: counters,
     }),
@@ -94,147 +97,33 @@ async function refreshBadge(tabId?: number): Promise<void> {
   await applyBadge(badge, view, tabId);
 }
 
-function proxyTargetFrom(listen: string | undefined): { host: string; port: number } {
-  // The daemon reports where it listens; trusting that avoids a second place
-  // for the port to be configured and get out of step.
-  const fallback = { host: '127.0.0.1', port: 8080 };
-  if (!listen) return fallback;
-  const [host, port] = listen.split(':');
-  if (!host || !port) return fallback;
-  const parsed = Number.parseInt(port, 10);
-  return Number.isFinite(parsed) ? { host, port: parsed } : fallback;
-}
-
-async function enableProxy(): Promise<ActionReply> {
-  const client = await apiForState();
-  const state = await store.load();
-
-  if (!(await proxy.isControllable())) {
-    const { level } = await proxy.status();
-    return {
-      ok: false,
-      error:
-        level === 'controlled_by_policy'
-          ? 'Chrome’s proxy is controlled by an enterprise policy.'
-          : 'Another extension is controlling Chrome’s proxy.',
-    };
-  }
-
-  let listen: string | undefined;
-  try {
-    listen = (await client.getState()).proxy.listen;
-  } catch {
-    return { ok: false, error: 'Cannot reach the daemon. Start it with `pporlock run`.' };
-  }
-
-  try {
-    // Scoped mode is a PAC script rather than a bypass list: bypassList only
-    // subtracts from "everything", and scoping needs the opposite default.
-    if (state.proxyScope === 'scoped') {
-      await proxy.enablePac(state.scopedHosts, proxyTargetFrom(listen));
-    } else {
-      await proxy.enable(proxyTargetFrom(listen), state.controlOrigin);
-    }
-  } catch (error) {
-    return { ok: false, error: `Could not set the proxy: ${String(error)}` };
-  }
-
-  health.reset();
-  const next = await store.save({
-    proxyEnabled: true,
-    proxyApplied: true,
-    failSafeTrippedAt: null,
-    lastError: null,
-  });
-  health.start(POLL_INTERVAL_MS);
-  await refreshBadge();
-  return { ok: true, state: next };
-}
-
-async function disableProxy(): Promise<ActionReply> {
-  try {
-    await proxy.disable();
-  } catch (error) {
-    return { ok: false, error: `Could not clear the proxy: ${String(error)}` };
-  }
-  health.stop();
-  health.reset();
-  const next = await store.save({ proxyEnabled: false, proxyApplied: false });
-  await refreshBadge();
-  return { ok: true, state: next };
-}
-
-async function status(): Promise<StatusReply> {
-  const state = await store.load();
-  const client = await apiForState();
-  const { level } = await proxy.status();
-
-  let daemonReachable = false;
-  let version: string | null = null;
-  let profiles: string[] = [];
-  let counters: StatusReply['counters'] = null;
-
-  try {
-    const daemon = await client.getState();
-    daemonReachable = true;
-    version = daemon.version;
-    counters = {
-      flows: daemon.counters.flows_total,
-      blocked: daemon.counters.blocked,
-      modified: daemon.counters.modified,
-      passthrough: daemon.counters.passthrough,
-    };
-    // Keep the mirrored state honest so the popup never shows a stale toggle.
-    await store.save({
-      activeProfile: daemon.active_profile,
-      devToggles: daemon.dev_toggles,
-      moduleHealth: {
-        errors: daemon.modules.errors.length,
-        quarantined: daemon.modules.quarantined,
-      },
-      recordingSession: daemon.capture.recording_session,
-    });
-  } catch {
-    try {
-      daemonReachable = (await client.health()).ok;
-    } catch {
-      daemonReachable = false;
-    }
-  }
-
-  if (daemonReachable && state.paired) {
-    try {
-      profiles = (await client.listProfiles()).map((p) => p.name);
-    } catch {
-      profiles = [];
-    }
-  }
-
-  return {
-    state: await store.load(),
-    attributionGranted: await hasAttributionPermission(),
-    daemonReachable,
-    proxyControllable:
-      level === 'controllable_by_this_extension' || level === 'controlled_by_this_extension',
-    controlLevel: level,
-    profiles,
-    counters,
-    version,
-    // version_name carries the full semver; `version` is the numeric core
-    // Chrome will store. Prefer the former so a prerelease is visible to the
-    // person trying to work out what they are running (OI-25).
-    extensionVersion:
-      chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version,
-  };
-}
+/**
+ * What the action functions are allowed to reach for. Assembled here because
+ * this is the only place that may touch `chrome.*` at module scope; everything
+ * in actions.ts takes it as an argument and is therefore testable.
+ */
+const deps: ActionDeps = {
+  client: apiForState,
+  store,
+  proxy,
+  health,
+  refreshBadge: () => refreshBadge(),
+  attributionGranted: hasAttributionPermission,
+  // version_name carries the full semver; `version` is the numeric core Chrome
+  // will store. Prefer the former so a prerelease is visible to the person
+  // trying to work out what they are running (OI-25).
+  extensionVersion: () =>
+    chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version,
+  pollIntervalMs: POLL_INTERVAL_MS,
+};
 
 async function handle(message: Message): Promise<ActionReply | StatusReply> {
   switch (message.type) {
     case 'get_status':
-      return status();
+      return status(deps);
 
     case 'set_proxy':
-      return message.enabled ? enableProxy() : disableProxy();
+      return message.enabled ? enableProxy(deps) : disableProxy(deps);
 
     case 'pair': {
       const client = await apiForState();
@@ -253,7 +142,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         const daemon = await client.activateProfile(message.name);
         return { ok: true, state: await store.save({ activeProfile: daemon.active_profile }) };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -265,7 +154,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -279,7 +168,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         ]);
         return { ok: true };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -308,7 +197,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
       // Re-apply immediately if the proxy is already on, otherwise the setting
       // silently does nothing until the next toggle.
       if (next.proxyApplied) {
-        const reply = await enableProxy();
+        const reply = await enableProxy(deps);
         if (!reply.ok) return reply;
       }
       return { ok: true, state: await store.load() };
@@ -322,7 +211,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -338,7 +227,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         // something that is not recording is the worse failure.
         await store.save({ recordingSession: null });
         await refreshBadge();
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
       const next = await store.save({ recordingSession: null });
       await refreshBadge();

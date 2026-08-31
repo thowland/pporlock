@@ -29,7 +29,7 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 31 issues — 23 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 32 issues — 24 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 
@@ -121,10 +121,18 @@ Not style preferences. Breaking one breaks the architecture, and each has a test
 
 ```bash
 make setup       # toolchains, contracts, git hooks
+make install     # put the `pporlock` CLI on your PATH (uv tool, editable)
 make contracts   # validate schemas, regenerate types AND the generated docs
 make docs        # regenerate docs/api-reference.md and docs/rule-schema.md
 make all         # contracts -> daemon, web, extension
+make rebuild     # CLI + web UI + extension + examples. What a `git pull` needs.
 make examples    # install the example modules (disabled, never overwriting)
+
+make start / stop / restart    # the daemon. Delegates to launchd when the
+                               # agent is installed, otherwise supervises the
+                               # `pporlock run` this repo started.
+make run         # foreground, ctrl-c to stop
+make daemon-status / daemon-logs
 
 make gate        # coverage + test + lint + security. Run before every merge.
 make test / coverage / lint / security

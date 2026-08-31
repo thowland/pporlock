@@ -64,8 +64,13 @@ CLI on your `PATH`. Every `pporlock ...` command from here on assumes you have
 done one of these two things:
 
 ```bash
-uv tool install --editable ./daemon    # installs `pporlock` into ~/.local/bin
+make install                           # installs `pporlock` into ~/.local/bin
 ```
+
+which is `uv tool install --editable ./daemon`, plus a check that the result is
+actually on your `PATH`. After a dependency or entry-point change, `make
+reinstall` forces it — a plain re-install no-ops when the tool is already there,
+which is how you end up running yesterday's requirements without being told.
 
 **`--editable` is not optional here.** A plain `uv tool install` copies the
 daemon into its own venv, and from there it cannot see this checkout — so it

@@ -119,12 +119,16 @@ reference they draw on.
 Full instructions: **[docs/install.md](docs/install.md)**. The short version:
 
 ```bash
-make setup && make web && make extension
-uv tool install --editable ./daemon   # puts `pporlock` on your PATH
+make setup
+make install          # puts `pporlock` on your PATH (editable — see install.md)
+make rebuild          # CLI, web UI, extension, examples
 
 pporlock run          # generates the CA, then ctrl-c
 pporlock install      # trusts it in your login keychain
 ```
+
+Afterwards, `make rebuild` is what a `git pull` needs, and `make restart`
+restarts the daemon so it serves the web UI you just built.
 
 Then **disable QUIC** — `chrome://flags/#enable-quic` → Disabled → relaunch.
 This step is not optional. Chrome speaks HTTP/3 over UDP to most large sites and

@@ -86,3 +86,107 @@ def test_the_guard_can_see_a_missing_target() -> None:
         "a target named `ext` now exists, so this guard no longer proves anything. "
         "Either the docs were fixed the wrong way, or this test needs a new sentinel."
     )
+
+
+# ---------------------------------------------------------------------------
+# `make help` and the job-control recipes.
+#
+# The help text is the only listing of targets most people will read, and it is
+# hand-maintained echo lines — exactly the shape that goes stale silently, which
+# is what `make ext` above already proved about prose.
+
+
+def _help_targets() -> frozenset[str]:
+    """Target names named in the `help` recipe's echo lines.
+
+    Only the leading word of each indented description line: those are the
+    names, and the prose after them mentions things like `git pull` that are
+    not targets.
+    """
+    text = MAKEFILE.read_text()
+    body = text.split("help:", 1)[1].split("\n# ", 1)[0]
+    names: set[str] = set()
+    for line in body.splitlines():
+        match = re.match(r'\s*@echo\s+"  (\S.*?)"$', line)
+        if not match:
+            # Section headings, blank lines, and the indented continuation of a
+            # description all fail this deliberately: only a line whose quote
+            # opens with exactly two spaces is a target entry.
+            continue
+        # Names first, then two-or-more spaces, then prose. A line that is only
+        # names ("daemon web extension mcp") has no prose to split off.
+        # A "/" separator between alternatives is punctuation, not a target.
+        # Anything else target-shaped is one, including a misspelling — which
+        # is the point.
+        names.update(
+            word
+            for word in re.split(r"\s{2,}", match.group(1))[0].split()
+            if re.fullmatch(r"[a-z][a-z0-9-]*", word)
+        )
+    return frozenset(names)
+
+
+def test_every_target_named_in_make_help_exists() -> None:
+    """REQ DOC-001, for the listing people actually read.
+
+    `make help` is the front door. A target renamed without touching its echo
+    line sends the reader to a command that does not exist, and make's own error
+    for that names the target but not the fact that the docs lied.
+    """
+    missing = sorted(_help_targets() - _declared_targets())
+    assert not missing, f"`make help` advertises target(s) that do not exist: {', '.join(missing)}"
+
+
+def test_the_help_guard_can_see_the_targets_at_all() -> None:
+    """The parse above returns something, so the test cannot pass vacuously."""
+    found = _help_targets()
+    assert {"setup", "gate", "install", "restart"} <= found, (
+        f"the help parser found only {sorted(found)} — it has stopped reading the recipe, "
+        "so test_every_target_named_in_make_help_exists proves nothing"
+    )
+
+
+def _recipe_lines(target: str) -> list[str]:
+    """The recipe lines of one target, with continuations joined."""
+    text = MAKEFILE.read_text()
+    body = text.split(f"\n{target}:", 1)[1].split("\n", 1)[1]
+    lines: list[str] = []
+    current = ""
+    for line in body.splitlines():
+        if not line.startswith("\t"):
+            break
+        current += line
+        if line.endswith("\\"):
+            continue
+        lines.append(current)
+        current = ""
+    if current:
+        lines.append(current)
+    return lines
+
+
+@pytest.mark.parametrize("target", ["start", "stop", "restart"])
+def test_a_delegating_recipe_does_not_fall_through(target: str) -> None:
+    """A recipe that `exec`s into launchd must not have lines after it.
+
+    Make runs every recipe line in its own shell, so an `exec` on line one
+    replaces *that* shell and make cheerfully runs line two. `restart` shipped
+    that way for about ten minutes: on a machine with the launchd agent loaded
+    it would delegate the restart and then restart the daemon again itself,
+    the second time against launchd's own supervision.
+
+    It is invisible without the agent installed, which is the state of every
+    machine this was written on and tested against — the same blind spot as
+    lesson 1 in CLAUDE.md, one layer down.
+    """
+    lines = _recipe_lines(target)
+    assert lines, f"no recipe found for `{target}`"
+    for index, line in enumerate(lines):
+        if "exec pporlock" in line:
+            assert index == len(lines) - 1, (
+                f"`{target}` execs into launchd on recipe line {index + 1} of {len(lines)}. "
+                "Make runs each line in its own shell, so the lines after it still run. "
+                "Join them into one recipe line with backslash continuations."
+            )
+            return
+    pytest.fail(f"`{target}` no longer delegates to launchd; this guard needs rewriting")

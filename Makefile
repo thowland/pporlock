@@ -26,10 +26,20 @@ help:
 	@echo "Setup"
 	@echo "  setup        install all toolchains, generate contracts, install hooks"
 	@echo ""
+	@echo "  install      put the pporlock CLI on your PATH (uv tool, editable)"
+	@echo "  reinstall    same, forced — after a dependency or entry-point change"
+	@echo ""
 	@echo "Build"
 	@echo "  contracts    validate schemas, regenerate contracts/generated/types.ts"
 	@echo "  daemon web extension mcp"
 	@echo "  all          contracts -> daemon, web, extension"
+	@echo "  rebuild      everything a running install serves: CLI, web UI,"
+	@echo "               extension, examples. What you want after a git pull."
+	@echo ""
+	@echo "Running it"
+	@echo "  start stop restart   the daemon; launchd if installed, else this repo"
+	@echo "  run          foreground, logs to the terminal (ctrl-c to stop)"
+	@echo "  daemon-status / daemon-logs"
 	@echo ""
 	@echo "Gates (docs/implementation-plan.md §2.3)"
 	@echo "  test         G3  ALL tests, all components"
@@ -270,6 +280,135 @@ gate: lint test coverage security
 	@echo "   G6  security checklist §2.5 walked for touched areas"
 	@echo "   G7  git merge --no-ff  (never squash)"
 	@echo "======================================================================"
+
+# ------------------------------------------------------------ install/run ---
+# `make install` is the CLI onto your PATH. It is NOT `pporlock install`, which
+# trusts the CA and loads the launchd agent — a different step, documented in
+# docs/install.md §3.
+#
+# --editable is not optional. A plain `uv tool install` copies the daemon into
+# its own venv, from which it cannot see this checkout, so it cannot find the
+# web UI that `make web` builds into web/dist. The symptom is a daemon that
+# starts fine and reports the web UI missing however many times you rebuild it
+# (OI-16, OI-17).
+.PHONY: install
+install:
+	@echo "==> uv tool install --editable $(DAEMON)"
+	$(UV) tool install --editable ./$(DAEMON)
+	@$(MAKE) --no-print-directory check-path
+
+# Forced. `install` no-ops when the tool is already present, which is the right
+# default and the wrong one after a dependency or entry-point change — that is
+# how you get a CLI that runs yesterday's requirements and says nothing.
+.PHONY: reinstall
+reinstall:
+	@echo "==> uv tool install --editable $(DAEMON) (forced)"
+	$(UV) tool install --editable ./$(DAEMON) --force
+	@$(MAKE) --no-print-directory check-path
+
+.PHONY: check-path
+check-path:
+	@if command -v pporlock >/dev/null 2>&1; then \
+		echo "    pporlock -> $$(command -v pporlock)  ($$(pporlock version 2>/dev/null | head -1))"; \
+	else \
+		echo "    WARNING: 'pporlock' is not on your PATH."; \
+		echo "    Add uv's tool directory: $$($(UV) tool dir 2>/dev/null)/../bin, or run '$(UV) tool update-shell'."; \
+	fi
+
+# Everything a running install serves, in dependency order. The daemon is
+# reinstalled rather than merely built: it is the piece whose staleness is
+# invisible, because an editable install keeps working while serving a web UI
+# and a set of contracts from before your pull.
+.PHONY: rebuild
+rebuild: contracts reinstall web extension examples
+	@echo ""
+	@echo "rebuilt: CLI, web UI, extension, examples"
+	@echo "  the extension is unpacked in $(EXT)/dist — reload it at chrome://extensions"
+	@echo "  restart the daemon to pick up the new web UI:  make restart"
+
+# ------------------------------------------------------------ job control ---
+# Two supervisors, deliberately. `pporlock install` loads a launchd agent and
+# that is the supported way to run this daemon; when it is loaded, everything
+# below delegates to it, because two things restarting one daemon is a race.
+#
+# Without the agent — the normal state of a checkout you are working in — the
+# daemon is whatever `pporlock run` you started in some terminal. These targets
+# manage that: a pidfile for one we started, and a named, printed kill for one
+# you started yourself. Nothing here guesses at a process it cannot identify.
+PLIST      := $(HOME)/Library/LaunchAgents/com.pporlock.daemon.plist
+PIDFILE    := $(HOME)/.pporlock/dev-daemon.pid
+DAEMON_LOG := $(HOME)/Library/Logs/pporlock/pporlock.out.log
+START_WAIT := 30
+
+.PHONY: run
+run:
+	pporlock run
+
+.PHONY: start
+start:
+	@set -e; \
+	if [ -f "$(PLIST)" ]; then echo "==> launchd agent installed; delegating"; exec pporlock start; fi; \
+	if pporlock status >/dev/null 2>&1; then echo "already running"; pporlock status; exit 0; fi; \
+	mkdir -p "$$(dirname "$(DAEMON_LOG)")" "$$(dirname "$(PIDFILE)")"; \
+	echo "==> starting pporlock run in the background"; \
+	nohup pporlock run >>"$(DAEMON_LOG)" 2>&1 & \
+	echo $$! >"$(PIDFILE)"; \
+	pid=$$(cat "$(PIDFILE)"); \
+	for i in $$(seq 1 $(START_WAIT)); do \
+		if pporlock status >/dev/null 2>&1; then echo "started, pid $$pid"; pporlock status; exit 0; fi; \
+		if ! kill -0 "$$pid" 2>/dev/null; then \
+			echo "the daemon exited during startup. Last of $(DAEMON_LOG):"; \
+			tail -20 "$(DAEMON_LOG)"; rm -f "$(PIDFILE)"; exit 1; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "started, pid $$pid, but the control API did not answer in $(START_WAIT)s."; \
+	echo "Last of $(DAEMON_LOG):"; tail -20 "$(DAEMON_LOG)"; exit 1
+
+# Waiting for the port to be free is the whole point: `restart` that returns
+# before the old listener has let go produces a new daemon that dies on a bound
+# port, and the error it prints names nothing (noted under OI-19).
+.PHONY: stop
+stop:
+	@set -e; \
+	if [ -f "$(PLIST)" ]; then echo "==> launchd agent installed; delegating"; exec pporlock stop; fi; \
+	pid=""; \
+	if [ -f "$(PIDFILE)" ] && kill -0 "$$(cat "$(PIDFILE)")" 2>/dev/null; then \
+		pid=$$(cat "$(PIDFILE)"); \
+	else \
+		rm -f "$(PIDFILE)"; \
+		pid=$$(pgrep -u "$$(id -u)" -f 'pporlock run' | head -1 || true); \
+	fi; \
+	if [ -z "$$pid" ]; then echo "not running"; exit 0; fi; \
+	echo "==> stopping pid $$pid: $$(ps -o command= -p $$pid | cut -c1-70)"; \
+	kill -TERM "$$pid" 2>/dev/null || true; \
+	for i in $$(seq 1 15); do \
+		if ! kill -0 "$$pid" 2>/dev/null; then break; fi; sleep 1; \
+	done; \
+	if kill -0 "$$pid" 2>/dev/null; then echo "    did not exit on TERM; sending KILL"; kill -KILL "$$pid" 2>/dev/null || true; sleep 1; fi; \
+	rm -f "$(PIDFILE)"; \
+	echo "stopped"; \
+	echo "the extension will clear Chrome's proxy settings on its next health check"
+
+# One recipe line, not three. Make runs each line in its own shell, so an early
+# `exec` in the launchd branch would delegate and then fall through into the
+# stop/start below — restarting the daemon twice, the second time against
+# launchd's own restart. Nothing about that is visible in a machine with no
+# agent installed, which is every machine this was written on.
+.PHONY: restart
+restart:
+	@set -e; \
+	if [ -f "$(PLIST)" ]; then echo "==> launchd agent installed; delegating"; exec pporlock restart; fi; \
+	$(MAKE) --no-print-directory stop; \
+	$(MAKE) --no-print-directory start
+
+.PHONY: daemon-status
+daemon-status:
+	@pporlock status || true
+
+.PHONY: daemon-logs
+daemon-logs:
+	@pporlock logs $(if $(FOLLOW),--follow,)
 
 # -------------------------------------------------------------- the rest ---
 .PHONY: e2e

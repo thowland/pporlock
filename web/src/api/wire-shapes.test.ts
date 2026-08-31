@@ -208,3 +208,78 @@ describe('module settings arrive as a declaration plus values  # SPEC-0 §8.2', 
     expect(JSON.parse(init.body)).toEqual({ config: { identity: 'claudebot' } });
   });
 });
+
+describe('session export carries the token  # REQ CAP-024, OI-35', () => {
+  /**
+   * The bug this pins: the export was an `<a href download>`, and a navigation
+   * carries no Authorization header. The daemon answered 401 and Chrome showed
+   * "file was not available on the site". Verified against a live daemon —
+   * `GET /sessions/<id>/export?format=har` with no header is 401, with one is
+   * the HAR.
+   *
+   * It belongs in this file rather than beside the component, because the thing
+   * that was wrong was a *request*, and only a test that stubs `fetch` can see
+   * a request. A test that stubs the client agrees with whatever the client
+   * believed, which here was "a link is enough".
+   */
+  function exportResponse(status = 200) {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: status < 400,
+      status,
+      statusText: status === 401 ? 'Unauthorized' : 'OK',
+      headers: new Headers({
+        'content-type': 'application/json',
+        'content-disposition': 'attachment; filename="s1a05a293a4d.har.json"',
+      }),
+      blob: async () => new Blob(['{"log":{}}'], { type: 'application/json' }),
+      json: async () => ({
+        error: { code: 'unauthorized', message: 'missing or invalid bearer token' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('sends the Authorization header, which a plain link never could', async () => {
+    const fetchMock = exportResponse();
+    const client = new ApiClient(ORIGIN);
+    client.setToken('tok-abc');
+
+    await client.fetchSessionExport('s1a05a293a4d', 'har');
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer tok-abc');
+  });
+
+  it('keeps the token out of the URL  # SPEC-0 §9', async () => {
+    // The obvious "fix" for the 401, and forbidden: the URL reaches browser
+    // history, referrers and the audit log.
+    const fetchMock = exportResponse();
+    const client = new ApiClient(ORIGIN);
+    client.setToken('tok-abc');
+
+    await client.fetchSessionExport('s1a05a293a4d', 'har');
+
+    expect(String(fetchMock.mock.calls[0]![0])).not.toContain('tok-abc');
+  });
+
+  it('uses the filename the daemon asked for', async () => {
+    exportResponse();
+    const client = new ApiClient(ORIGIN);
+
+    const { filename } = await client.fetchSessionExport('s1a05a293a4d', 'har');
+
+    expect(filename).toBe('s1a05a293a4d.har.json');
+  });
+
+  it('raises the daemon’s own message on a 401 rather than saving an error page', async () => {
+    // Chrome turned this into "file was not available on the site". The UI can
+    // do better, but only if the failure reaches it as a failure.
+    exportResponse(401);
+    const client = new ApiClient(ORIGIN);
+
+    await expect(client.fetchSessionExport('s1a05a293a4d', 'har')).rejects.toThrow(
+      /missing or invalid bearer token/,
+    );
+  });
+});

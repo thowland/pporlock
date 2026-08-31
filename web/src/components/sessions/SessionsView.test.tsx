@@ -7,6 +7,12 @@ import { ApiClient } from '../../api/client';
 import { makeSession } from '../../test/factories';
 import type { SessionMeta } from '../../api/types';
 
+// The real saveBlob clicks an anchor with a blob: href, which jsdom answers
+// with "Not implemented: navigation" on stderr — four lines of noise in every
+// gate run, for a DOM behaviour these tests are not about. The saving itself is
+// covered by lib/download.test.ts, and end to end by e2e/web/session-export.
+vi.mock('../../lib/download', () => ({ saveBlob: vi.fn() }));
+
 afterEach(() => vi.restoreAllMocks());
 
 function api(sessions: SessionMeta[] = [makeSession()]): ApiClient {
@@ -15,6 +21,10 @@ function api(sessions: SessionMeta[] = [makeSession()]): ApiClient {
   vi.spyOn(client, 'startRecording').mockResolvedValue(makeSession({ state: 'recording' }));
   vi.spyOn(client, 'stopRecording').mockResolvedValue(makeSession());
   vi.spyOn(client, 'deleteSession').mockResolvedValue(undefined);
+  vi.spyOn(client, 'fetchSessionExport').mockResolvedValue({
+    blob: new Blob(['{}'], { type: 'application/json' }),
+    filename: 's1.pporlock.json',
+  });
   return client;
 }
 
@@ -65,11 +75,52 @@ describe('SessionsView  # REQ CAP-021, WUI-010', () => {
 
   it('warns that a HAR export cannot carry provenance  # REQ CAP-024', async () => {
     render(view(api()));
-    const har = await screen.findByRole('link', { name: 'Export HAR' });
+    const har = await screen.findByRole('button', { name: 'Export HAR' });
     expect(har.getAttribute('title')).toContain('HAR cannot represent provenance');
-    expect(har.getAttribute('href')).toContain('format=har');
-    const native = screen.getByRole('link', { name: 'Export' });
-    expect(native.getAttribute('href')).toContain('format=pporlock');
+  });
+
+  /**
+   * These replace a test that asserted both exports were `<a>` elements whose
+   * href carried `format=`. It passed for the life of the project while the
+   * feature was completely broken, because it pinned the *mechanism* — an
+   * anchor — and the mechanism was the bug: a navigation cannot carry the
+   * Authorization header, so every click produced 401 (OI-35).
+   *
+   * A test that asserts how a thing is built cannot notice that it does not
+   * work. These assert what the user gets instead.
+   */
+  it('exports through the API client, not a bare link  # REQ CAP-024, OI-35', async () => {
+    const client = api();
+    render(view(client));
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(client.fetchSessionExport).toHaveBeenCalledWith('s1', 'pporlock'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Export HAR' }));
+    await waitFor(() => expect(client.fetchSessionExport).toHaveBeenCalledWith('s1', 'har'));
+  });
+
+  it('offers no link an unauthenticated navigation could follow  # OI-35', async () => {
+    // The regression guard proper. If either control becomes an anchor with an
+    // href again, it is broken again, and nothing else in the suite would say
+    // so — the previous version of this file asserted the anchor was there.
+    render(view(api()));
+    await screen.findByRole('button', { name: 'Export' });
+    expect(screen.queryByRole('link', { name: 'Export' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Export HAR' })).toBeNull();
+  });
+
+  it('reports an export failure instead of failing silently  # OI-35', async () => {
+    const client = api();
+    vi.spyOn(client, 'fetchSessionExport').mockRejectedValue(
+      new Error('missing or invalid bearer token'),
+    );
+    render(view(client));
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('missing or invalid bearer token'),
+    );
   });
 
   it('confirms a delete and says how much space it reclaims', async () => {

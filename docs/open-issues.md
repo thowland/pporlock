@@ -1240,3 +1240,87 @@ itself leaves no persistent record on this side" and infers pairing from
 attribution counts. Since OI-19 the `paired-extension` sidecar exists and doctor
 could read it directly — it would have reported this install as unpaired
 outright.
+
+---
+
+## OI-35 — session export could never have worked
+
+**Found:** by a user, whose export produced Chrome's "file was not available on
+the site". **CLOSED** for the export link; a second bug it uncovered is
+recorded as OI-36 and is *not* fixed.
+
+Both export controls were `<a href download>`. A navigation carries no
+Authorization header, so the daemon answered 401 and Chrome rendered that as a
+download failure naming neither cause nor remedy. Verified against the running
+daemon: `GET /sessions/<id>/export?format=har` with no header is 401, with the
+bearer token it is a 1.27 MB HAR.
+
+**This is OI-30 exactly, one component over.** The module report link was the
+same anchor making the same mistake, and its fix — fetch with the header the UI
+already holds, render the result yourself — is the fix here too, with a blob and
+a synthetic click instead. Putting the token in the URL "fixes" it and is
+forbidden (SPEC-0 §9): the URL reaches history, referrers and the audit log.
+
+**A test asserted the bug.** `SessionsView.test.tsx` contained:
+
+    const har = await screen.findByRole('link', { name: 'Export HAR' });
+    expect(har.getAttribute('href')).toContain('format=har');
+
+It passed for the life of the project. It asserted the *mechanism* — that the
+control is an anchor with an href — and the mechanism was the defect. A test
+written against how a thing is built cannot notice that it does not work. It is
+replaced (G4) by tests that assert what the user gets: that clicking calls the
+client, that no anchor is offered, and that a failure is reported rather than
+swallowed. One of them fails if either control becomes a link again.
+
+**No e2e touched export**, which is where a browser would have caught it in
+minutes — only a browser can say whether a download happened.
+`e2e/web/session-export.spec.ts` now clicks both buttons against a real daemon
+and asserts a file arrives with bytes in it. Watched failing: restoring the
+anchor fails it, with the 401 in the alert region rather than a bare timeout.
+
+The lesson is the one already at the top of CLAUDE.md, and this is its fifth
+instance: **the tests agreed with the client, and the client was wrong.** Every
+unit test here stubbed `ApiClient`, so they all agreed a link was enough. The
+guard that would have caught it is the one from OI-16 — stub `fetch`, not your
+own client — and the export request is now pinned in `wire-shapes.test.ts`
+alongside the others.
+
+---
+
+## OI-36 — the daemon exhausts its file descriptors during ordinary browsing
+
+**Found:** while confirming OI-35, when an *authenticated* export also failed.
+**OPEN.**
+
+`GET /sessions/<id>/export` returned 500 with `sqlite3.OperationalError: unable
+to open database file`, from `_connect` in `capture/session.py`. The file was
+present and readable; SQLite reports EMFILE with that message.
+
+Measured on the running daemon:
+
+| open file descriptors | export |
+|---|---|
+| 247 | 500, ten times out of ten |
+| 34, after a restart | 200, 1.27 MB |
+
+221 of those were sockets — an HTTPS interception proxy holds a client and a
+server connection per flow, and a browsing session reaches a few hundred without
+trying. `launchctl limit maxfiles` on macOS is **256 soft**, and nothing in the
+daemon raises it: there is no `setrlimit` anywhere in `daemon/src`, and
+`cli/launchd.py::plist_dict` writes no `SoftResourceLimits`/`NumberOfFiles`. So
+a daemon started by the supported path — `pporlock install`, then launchd —
+inherits 256 and will hit this.
+
+**Export is only the most visible casualty.** Anything that opens a file at the
+ceiling fails the same way: session writes, module reload, the CA. The failures
+will be intermittent, will clear on restart, and will produce error messages
+that describe SQLite rather than the cause — which is the shape of a bug that
+gets diagnosed as something else entirely.
+
+Closing it needs three things, and none is large: raise `RLIMIT_NOFILE` at
+startup to `min(hard, a few thousand)`; add `SoftResourceLimits` to the plist so
+a launchd-started daemon does not depend on that; and report the headroom in
+`pporlock doctor`, because "how close am I" should be answerable before the
+failure rather than after. A test can drive it deterministically by starting a
+daemon under `ulimit -n 256` and opening connections until it breaks.

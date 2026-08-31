@@ -11,6 +11,7 @@
  * explicit act here, mirrored by the status bar's live indicator.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { saveBlob } from '../../lib/download';
 import type { ApiClient } from '../../api/client';
 import type { SessionMeta } from '../../api/types';
 import { formatBytes, formatTime } from '../../lib/format';
@@ -28,6 +29,8 @@ export function SessionsView({ api, onOpen, onDryRun, onChanged }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [confirming, setConfirming] = useState<string | null>(null);
+  /** The session currently downloading, so both buttons disable together. */
+  const [exporting, setExporting] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -51,6 +54,27 @@ export function SessionsView({ api, onOpen, onDryRun, onChanged }: Props) {
       onChanged?.();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : fallback);
+    }
+  };
+
+  /**
+   * Fetch the export with the bearer token, then hand the blob to the browser.
+   *
+   * Not a link: a navigation carries no Authorization header, which is why
+   * every export used to fail with Chrome's "file was not available on the
+   * site" (OI-35). `guard` is not used here — it refreshes the session list,
+   * and an export changes nothing to refresh.
+   */
+  const exportSession = async (sessionId: string, format: 'har' | 'pporlock') => {
+    setExporting(sessionId);
+    try {
+      const { blob, filename } = await api.fetchSessionExport(sessionId, format);
+      saveBlob(blob, filename);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not export the session.');
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -175,23 +199,25 @@ export function SessionsView({ api, onOpen, onDryRun, onChanged }: Props) {
                     </button>
                   ) : (
                     <>
-                      <a
+                      <button
+                        type="button"
                         className="action"
-                        href={api.sessionExportUrl(session.session_id, 'pporlock')}
-                        download
+                        disabled={exporting !== null}
+                        onClick={() => void exportSession(session.session_id, 'pporlock')}
                       >
                         Export
-                      </a>
-                      <a
+                      </button>
+                      <button
+                        type="button"
                         className="action"
-                        href={api.sessionExportUrl(session.session_id, 'har')}
-                        download
+                        disabled={exporting !== null}
+                        onClick={() => void exportSession(session.session_id, 'har')}
                         // HAR has no place to put provenance, so an exported
                         // HAR silently loses the reason anything changed.
                         title="HAR cannot represent provenance — the record of what changed and why is lost"
                       >
                         Export HAR
-                      </a>
+                      </button>
                     </>
                   )}
                   <button

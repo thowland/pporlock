@@ -12,6 +12,7 @@
  * failure this table exists to prevent, so `errors.test.ts` iterates the union
  * and fails if one is ever added without a description.
  */
+import { ApiError } from './api';
 import type { ExtErrorCode } from './state';
 
 export interface ErrorPresentation {
@@ -96,4 +97,53 @@ export function describeError(code: string): ErrorPresentation {
     remedy: 'Check the daemon log with `pporlock doctor`.',
     actionable: false,
   };
+}
+
+/**
+ * Which `ExtErrorCode` an HTTP failure means, or null when the failure was not
+ * an HTTP response at all.
+ *
+ * The distinction this draws is the one the extension was missing entirely: a
+ * daemon that answers 403 is *alive and refusing us*, which is a completely
+ * different fact from a daemon that is not there. Both used to arrive at the
+ * popup as "the daemon is not responding", and the remedy printed for that —
+ * `pporlock run` — sends the user to restart the one thing that is working.
+ *
+ * 401 means the bearer token was missing or rejected. 403 in practice means the
+ * origin allowlist: the daemon checks the origin before anything else, so an
+ * unpaired extension gets 403 on every route including the unauthenticated
+ * ones. A 403 can also mean a bad `x-pporlock-client` header, but our own
+ * client always sends a valid one, so treating 403 as unpaired is right for
+ * every case this extension can actually produce.
+ */
+export function classifyApiError(error: unknown): ExtErrorCode | null {
+  if (!(error instanceof ApiError)) return null;
+  if (error.status === 401) return 'token_rejected';
+  if (error.status === 403) return 'unpaired';
+  return null;
+}
+
+/** The one-line remedy for an error, for the surfaces that show a bare string. */
+export function remedyFor(code: ExtErrorCode): string {
+  const presentation = describeError(code);
+  return `${presentation.title}. ${presentation.remedy}`;
+}
+
+/** What to say when the daemon could not be reached at all. */
+export const DAEMON_UNREACHABLE_MESSAGE = 'Cannot reach the daemon. Start it with `pporlock run`.';
+
+/**
+ * The message for a failed daemon call, as a single decision that can be
+ * tested without a service worker.
+ *
+ * It lives here rather than inline in the worker because inline is where it was
+ * wrong: `enableProxy` caught every failure and reported the unreachable text,
+ * so the one moment the user was most likely to be looking — turning the proxy
+ * on — was the moment the extension was most confidently misdiagnosing. There
+ * is no test file for the worker, so the decision could not be pinned until it
+ * was a function.
+ */
+export function daemonFailureMessage(error: unknown): string {
+  const code = classifyApiError(error);
+  return code === null ? DAEMON_UNREACHABLE_MESSAGE : remedyFor(code);
 }

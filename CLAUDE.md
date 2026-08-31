@@ -29,7 +29,7 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 31 issues — 23 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 32 issues — 24 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 

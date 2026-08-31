@@ -75,6 +75,24 @@ function dead(): void {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
 }
 
+/**
+ * A daemon that is up and refusing us. This is what an unpaired extension sees
+ * on *every* route: the daemon checks the origin allowlist before the token and
+ * before the public-route exemption, so even unauthenticated /state/health
+ * comes back 403.
+ */
+function refusing(status = 403): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+      statusText: 'Forbidden',
+      json: async () => ({ error: { code: 'unauthorized', message: 'origin not permitted' } }),
+    }),
+  );
+}
+
 beforeEach(() => {
   vi.unstubAllGlobals();
 });
@@ -457,5 +475,98 @@ describe('HealthMonitor — slow is not dead (OI-22)', () => {
     }
 
     expect(h.trips.length).toBe(1);
+  });
+});
+
+describe('a daemon that answers but refuses us', () => {
+  // The bug: `classifyFailure` returned 'refused' for anything that was not
+  // an AbortError, so a 403 from a perfectly healthy daemon was scored as
+  // "nothing is listening". Two polls later the fail-safe tore down a working
+  // proxy and told the user to start a daemon that had never stopped.
+  it('does not trip the fail-safe, however long it goes on', async () => {
+    refusing();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+
+    for (let i = 0; i < UNRESPONSIVE_THRESHOLD + REFUSED_THRESHOLD + 1; i += 1) {
+      expect(await h.monitor.check()).toBe(false);
+    }
+
+    expect(h.trips).toEqual([]);
+    expect(h.proxyApi.clearCalls).toBe(0);
+    expect((await h.store.load()).proxyEnabled).toBe(true);
+  });
+
+  it('still counts the daemon as reachable, because it answered', async () => {
+    // The popup only offers its pairing prompt when the daemon is reachable,
+    // so calling this "down" hides the one control that fixes it.
+    refusing();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+    await h.monitor.check();
+
+    expect(h.monitor.reachable).toBe(true);
+    expect(h.monitor.rejection).toBe('unpaired');
+  });
+
+  it('drops the local pairing claim so the popup stops believing it is paired', async () => {
+    // `paired` was written once at pairing time and never revisited, which is
+    // what let an extension the daemon had forgotten go on presenting itself
+    // as working indefinitely.
+    refusing();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true, paired: true });
+    await h.monitor.check();
+
+    const state = await h.store.load();
+    expect(state.paired).toBe(false);
+    expect(state.lastError?.code).toBe('unpaired');
+  });
+
+  it('records a rejected token distinctly from a rejected origin', async () => {
+    refusing(401);
+    const h = harness();
+    await h.store.save({ proxyEnabled: true, paired: true });
+    await h.monitor.check();
+
+    expect((await h.store.load()).lastError?.code).toBe('token_rejected');
+  });
+
+  it('writes state once, not on every poll', async () => {
+    // A ten-second poll against an unpaired daemon runs forever; rewriting
+    // chrome.storage each time would be a write loop for the life of the tab.
+    refusing();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true, paired: true });
+    await h.monitor.check();
+    const first = (await h.store.load()).lastError?.at;
+    await h.monitor.check();
+    await h.monitor.check();
+
+    expect((await h.store.load()).lastError?.at).toBe(first);
+  });
+
+  it('recovers when the pairing is restored', async () => {
+    refusing();
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+    await h.monitor.check();
+    healthy();
+    expect(await h.monitor.check()).toBe(true);
+
+    expect(h.monitor.rejection).toBeNull();
+    expect(h.recoveries).toBe(1);
+  });
+
+  it('does not soften the fail-safe for a daemon that is actually in trouble', async () => {
+    // The narrowness is the point: only the auth wall is exempt. A 5xx is an
+    // answer too, but from a daemon in trouble, and it trips exactly as it
+    // always did.
+    refusing(500);
+    const h = harness();
+    await h.store.save({ proxyEnabled: true });
+    for (let i = 0; i < REFUSED_THRESHOLD; i += 1) await h.monitor.check();
+
+    expect(h.trips).toEqual(['daemon_unreachable']);
   });
 });

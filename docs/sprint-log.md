@@ -1817,3 +1817,32 @@ eighteen sprints (OI-25) — and for the flow's provenance, which usually answer
 "which rule did this" outright; a PR template built round the gate; topics;
 GitHub releases for the existing tags; and private vulnerability reporting
 enabled, with `SECURITY.md` pointing at it.
+
+## OI-34 — the extension could not tell an unpaired daemon from a dead one
+
+Found by using the extension against a daemon whose pairing had not survived
+OI-19's introduction. `pporlock pair` fixes the pairing; the interesting part is
+that the extension had four independent ways of describing a 403 as something
+else, and three of them named a remedy that was wrong.
+
+The shape worth remembering: **the extension's sense of its own health was
+self-referential.** `paired` was a boolean written once at pairing time and
+never checked against the daemon again, so the popup asked itself whether it was
+working and answered yes. Every failing call then had to be individually
+disguised for that story to hold — and each one obliged, because each `catch`
+had been written for the failure its author had in mind. The health monitor
+scored an HTTP 403 as "nothing is listening", `enableProxy` reported it as
+"cannot reach the daemon", and the handlers that did tell the truth told it in
+the daemon's words rather than the user's.
+
+Two of the four bugs lived in `background/index.ts`, which has no test file and
+is excluded from coverage — a service worker that registers listeners at module
+load. Both were decisions, not plumbing, and both are now pure functions in
+`shared/errors.ts` where they can be pinned. A component that opts out of
+testing will accumulate exactly the class of bug that lesson 1 describes, and
+the fix is to move the decisions out rather than to test the worker.
+
+The new `rejected` failure kind is narrow on purpose: 401 and 403 only. A 5xx
+still trips the fail-safe as it always did, with a test that fails if that is
+ever widened, because a fail-safe that has been quietly taught to forgive is
+worse than none.

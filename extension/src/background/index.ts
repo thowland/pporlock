@@ -6,8 +6,10 @@
  * notice that the daemon has died — which is the entire point of the fail-safe.
  */
 import { ControlApi } from '../shared/api';
+import { classifyApiError, daemonFailureMessage, remedyFor } from '../shared/errors';
 import type { ActionReply, Message, StatusReply } from '../shared/messages';
 import { StateStore, chromeArea, DEFAULT_CONTROL_ORIGIN } from '../shared/state';
+import type { ExtErrorCode } from '../shared/state';
 import { Attributor } from './attribution';
 import { applyBadge, badgeView, chromeBadgeApi, resolveBadgeState } from './badge';
 import { HealthMonitor, POLL_INTERVAL_MS } from './health';
@@ -70,6 +72,8 @@ const health = new HealthMonitor({
     }
   },
   onRecover: refreshBadge,
+  // A refusal changes what the popup must offer, so the badge follows it too.
+  onRejected: () => refreshBadge(),
 });
 
 async function refreshBadge(tabId?: number): Promise<void> {
@@ -85,7 +89,7 @@ async function refreshBadge(tabId?: number): Promise<void> {
     resolveBadgeState({
       proxyEnabled: state.proxyEnabled,
       failSafeTripped: state.failSafeTrippedAt !== null,
-      daemonReachable: health.healthy !== false,
+      daemonReachable: health.reachable,
       devToggleActive: state.devToggles.anticache || state.devToggles.anticomp,
       counts: counters,
     }),
@@ -103,6 +107,41 @@ function proxyTargetFrom(listen: string | undefined): { host: string; port: numb
   if (!host || !port) return fallback;
   const parsed = Number.parseInt(port, 10);
   return Number.isFinite(parsed) ? { host, port: parsed } : fallback;
+}
+
+/**
+ * Record a daemon refusal, and stop claiming to be paired.
+ *
+ * Returns the code when the daemon answered with one, and null when the call
+ * failed for any other reason — the caller needs that distinction, because
+ * "the daemon refused me" and "the daemon is not there" have opposite remedies
+ * and used to be reported as the same thing.
+ *
+ * `paired` is dropped here rather than only in the health monitor because the
+ * popup can provoke a refusal on any action, and a stale `paired: true` is what
+ * hides the pairing prompt that would fix it.
+ */
+async function noteAuthFailure(error: unknown): Promise<ExtErrorCode | null> {
+  const code = classifyApiError(error);
+  if (code === null) return null;
+  await store.save({
+    paired: false,
+    lastError: { code, message: remedyFor(code), at: Date.now() },
+  });
+  await refreshBadge();
+  return code;
+}
+
+/**
+ * The message for a failed daemon call: the remedy for a refusal, and the
+ * error's own text for anything else. Never the bare wire message for a 401 or
+ * 403 — "origin not permitted" is true and tells the user nothing they can act
+ * on (REQ EXT-024).
+ */
+async function failureMessage(error: unknown): Promise<string> {
+  const code = await noteAuthFailure(error);
+  if (code !== null) return remedyFor(code);
+  return String((error as Error)?.message ?? error);
 }
 
 async function enableProxy(): Promise<ActionReply> {
@@ -123,8 +162,12 @@ async function enableProxy(): Promise<ActionReply> {
   let listen: string | undefined;
   try {
     listen = (await client.getState()).proxy.listen;
-  } catch {
-    return { ok: false, error: 'Cannot reach the daemon. Start it with `pporlock run`.' };
+  } catch (error) {
+    // This catch used to swallow everything into "cannot reach the daemon",
+    // which is how an unpaired extension sent people to restart a daemon that
+    // was running fine — at the exact moment they were looking for the reason.
+    await noteAuthFailure(error);
+    return { ok: false, error: daemonFailureMessage(error) };
   }
 
   try {
@@ -194,11 +237,19 @@ async function status(): Promise<StatusReply> {
       },
       recordingSession: daemon.capture.recording_session,
     });
-  } catch {
-    try {
-      daemonReachable = (await client.health()).ok;
-    } catch {
-      daemonReachable = false;
+  } catch (error) {
+    // A refusal is proof the daemon is up: it answered. Falling through to the
+    // health probe would only collect the same 403 and score it as "down",
+    // which suppresses the popup's pairing prompt — the one control that fixes
+    // it. Reachability and usability are different questions.
+    if ((await noteAuthFailure(error)) !== null) {
+      daemonReachable = true;
+    } else {
+      try {
+        daemonReachable = (await client.health()).ok;
+      } catch {
+        daemonReachable = false;
+      }
     }
   }
 
@@ -253,7 +304,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         const daemon = await client.activateProfile(message.name);
         return { ok: true, state: await store.save({ activeProfile: daemon.active_profile }) };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(error) };
       }
     }
 
@@ -265,7 +316,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(error) };
       }
     }
 
@@ -279,7 +330,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         ]);
         return { ok: true };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(error) };
       }
     }
 
@@ -322,7 +373,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(error) };
       }
     }
 
@@ -338,7 +389,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         // something that is not recording is the worse failure.
         await store.save({ recordingSession: null });
         await refreshBadge();
-        return { ok: false, error: String((error as Error).message ?? error) };
+        return { ok: false, error: await failureMessage(error) };
       }
       const next = await store.save({ recordingSession: null });
       await refreshBadge();

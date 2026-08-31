@@ -31,9 +31,10 @@
  *  5. The check must never route through the proxy — see bypassList().
  *  6. chrome.runtime.onSuspend is best-effort and is not relied upon.
  */
-import type { ControlApi } from '../shared/api';
+import { ApiError, type ControlApi } from '../shared/api';
+import { classifyApiError, remedyFor } from '../shared/errors';
 import type { ProxyController } from './proxy';
-import type { StateStore } from '../shared/state';
+import type { ExtErrorCode, StateStore } from '../shared/state';
 
 export const POLL_INTERVAL_MS = 10_000;
 
@@ -68,8 +69,20 @@ export const HEALTH_TIMEOUT_MS = 3_000;
  */
 export const HEALTH_TIMEOUT_MAX_MS = 12_000;
 
-/** Why a check failed. The distinction is the entire point of this module. */
-export type FailureKind = 'refused' | 'timeout';
+/**
+ * Why a check failed. The distinction is the entire point of this module.
+ *
+ * `rejected` is the third case, and its absence was a bug: a 401 or 403 was
+ * scored as `refused`, so a daemon that was alive and merely refusing an
+ * unpaired extension tripped the fail-safe after two polls — tearing down a
+ * working proxy and telling the user to start a daemon that had never stopped.
+ *
+ * It is deliberately narrow. Only the auth wall qualifies, because only there
+ * is the daemon's own health not in question: a 5xx is an answer too, but it
+ * is the answer of a daemon in trouble, and that still counts toward tripping
+ * exactly as it did before.
+ */
+export type FailureKind = 'refused' | 'timeout' | 'rejected';
 
 /**
  * Classify a failed health check.
@@ -86,6 +99,10 @@ export type FailureKind = 'refused' | 'timeout';
 export function classifyFailure(error: unknown): FailureKind {
   if (error instanceof DOMException && error.name === 'AbortError') return 'timeout';
   if (error instanceof Error && error.name === 'AbortError') return 'timeout';
+  // An auth refusal says the daemon is up and simply will not talk to us, so
+  // nothing about it may trip the fail-safe. Every other HTTP status keeps the
+  // old behaviour, including a 5xx, which is a daemon in trouble.
+  if (error instanceof ApiError && classifyApiError(error) !== null) return 'rejected';
   return 'refused';
 }
 
@@ -96,6 +113,8 @@ export interface HealthDeps {
   /** Called when the fail-safe trips, so the badge and notification can react. */
   onTrip?: (reason: string) => void | Promise<void>;
   onRecover?: () => void | Promise<void>;
+  /** Called when the daemon answered but refused us — see FailureKind. */
+  onRejected?: (code: ExtErrorCode) => void | Promise<void>;
 }
 
 export class HealthMonitor {
@@ -104,6 +123,7 @@ export class HealthMonitor {
   private timeouts = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastOk: boolean | null = null;
+  private lastRejection: ExtErrorCode | null = null;
 
   constructor(private readonly deps: HealthDeps) {}
 
@@ -126,6 +146,26 @@ export class HealthMonitor {
     return Math.min(HEALTH_TIMEOUT_MS * 2 ** this.timeouts, HEALTH_TIMEOUT_MAX_MS);
   }
 
+  /**
+   * The refusal the daemon last answered with, or null.
+   *
+   * Kept separate from `healthy` because the two questions have different
+   * answers: the check did not succeed, and the daemon is nevertheless up.
+   */
+  get rejection(): ExtErrorCode | null {
+    return this.lastRejection;
+  }
+
+  /**
+   * Whether the daemon is *there*, which is not the same as whether we can use
+   * it. A refusal is proof of life, and the popup needs it to be: its pairing
+   * prompt only renders when the daemon is reachable, so scoring a 403 as
+   * unreachable hid the one control that fixes a 403.
+   */
+  get reachable(): boolean {
+    return this.lastOk !== false || this.lastRejection !== null;
+  }
+
   get healthy(): boolean | null {
     return this.lastOk;
   }
@@ -146,6 +186,7 @@ export class HealthMonitor {
     this.refusals = 0;
     this.timeouts = 0;
     this.lastOk = null;
+    this.lastRejection = null;
   }
 
   /**
@@ -162,6 +203,7 @@ export class HealthMonitor {
       this.failures = 0;
       this.refusals = 0;
       this.timeouts = 0;
+      this.lastRejection = null;
       return true;
     }
 
@@ -172,12 +214,15 @@ export class HealthMonitor {
     // Only meaningful when ok is false. Defaulting to 'refused' means an
     // unexpected shape gets the stricter, pre-existing behaviour.
     let kind: FailureKind = 'refused';
+    // Only read when kind is 'rejected', and only to name which refusal it was.
+    let refusal: ExtErrorCode = 'unpaired';
     try {
       const health = await this.deps.api.health(controller.signal);
       ok = health.ok === true;
     } catch (error) {
       ok = false;
       kind = classifyFailure(error);
+      refusal = classifyApiError(error) ?? 'unpaired';
     } finally {
       clearTimeout(timeout);
     }
@@ -185,14 +230,29 @@ export class HealthMonitor {
     this.lastOk = ok;
 
     if (ok) {
-      const recovered = this.failures > 0;
+      const recovered = this.failures > 0 || this.lastRejection !== null;
       this.failures = 0;
       this.refusals = 0;
       this.timeouts = 0;
+      this.lastRejection = null;
       if (recovered) await this.deps.onRecover?.();
       return true;
     }
 
+    if (kind === 'rejected') {
+      // The daemon is up and refusing us. Tripping would disable a working
+      // interception setup over what is almost always an expired pairing, so
+      // this records the real reason and leaves the proxy alone. The counters
+      // are held at zero: a refusal is not evidence of a dying daemon, and
+      // letting it accumulate would trip on the unresponsive ceiling instead.
+      this.failures = 0;
+      this.refusals = 0;
+      this.timeouts = 0;
+      await this.noteRejection(refusal);
+      return false;
+    }
+
+    this.lastRejection = null;
     this.failures += 1;
     if (kind === 'refused') {
       this.refusals += 1;
@@ -208,6 +268,26 @@ export class HealthMonitor {
       await this.trip(this.refusals >= REFUSED_THRESHOLD ? 'refused' : 'timeout');
     }
     return false;
+  }
+
+  /**
+   * Record that the daemon refused us, and drop the local pairing claim.
+   *
+   * `paired` is what the popup keys its pairing prompt off, and it was written
+   * once at pairing time and never revisited — so an extension whose pairing
+   * the daemon had forgotten went on believing it was paired indefinitely,
+   * which is what made this failure so hard to see.
+   */
+  private async noteRejection(code: ExtErrorCode): Promise<void> {
+    // Only write on a change of code, so a ten-second poll against an unpaired
+    // daemon does not rewrite storage forever.
+    if (this.lastRejection === code) return;
+    this.lastRejection = code;
+    await this.deps.store.save({
+      paired: false,
+      lastError: { code, message: remedyFor(code), at: Date.now() },
+    });
+    await this.deps.onRejected?.(code);
   }
 
   /**

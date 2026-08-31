@@ -1150,3 +1150,73 @@ Verified by driving the real web UI against a real daemon: the button appears,
 the frame renders the audit, and no error is shown. The previous version passed
 its unit tests and failed on the first click, which is the whole reason that
 check now exists.
+
+---
+
+## OI-34 — the extension could not tell an unpaired daemon from a dead one
+
+**Found:** by a user, whose extension reported `origin not permitted` while the
+web UI worked normally. **CLOSED** (four fixes, extension-side).
+
+The proximate cause was an unpaired daemon — OI-19's sidecar had not existed
+when this install last paired, so there was nothing on disk to restore. That
+part is expected and `pporlock pair` fixes it. What was not expected is that a
+403 was almost invisible, and where it was visible it was described as
+something else.
+
+`SecurityMiddleware.dispatch` checks the origin allowlist *before* the token
+check and before the public-route exemption, so an unpaired extension gets 403
+on every route, `/state/health` included. Verified against the running daemon:
+`/state/health`, `/state` and `/profiles` all 403. The extension therefore had
+no working call except `/pair`, and four separate places turned that into a
+different, wrong story:
+
+1. **`classifyFailure` scored an HTTP answer as a transport failure.** Anything
+   that was not an `AbortError` returned `refused`, so a 403 from a healthy
+   daemon counted toward the fail-safe. Two polls later it cleared Chrome's
+   proxy and told the user to run `pporlock run` — restarting the one component
+   that had never stopped. This is the same shape as OI-18 and OI-22: a
+   confident, wrong instruction costs more than no instruction, because it gets
+   followed.
+2. **`enableProxy`'s catch was blind.** `getState()`'s 403 was reported as
+   "Cannot reach the daemon", at the exact moment the user was most likely to
+   be looking for the reason — turning the proxy on.
+3. **`paired` was never invalidated.** It was written once at pairing time and
+   never revisited, so an extension whose pairing the daemon had forgotten went
+   on presenting itself as paired indefinitely. This is what made the whole
+   failure survivable-looking: the popup was asking itself, not the daemon.
+4. **Handlers passed the wire message through raw.** `errors.ts` already had a
+   `token_rejected` entry naming the remedy; nothing ever mapped a status onto
+   it, so the user got "origin not permitted" — true, precise, and naming no
+   action (REQ EXT-024).
+
+The fix adds a third `FailureKind`, `rejected`, and it is deliberately narrow:
+**only 401 and 403 qualify.** A 5xx is an answer too, but from a daemon in
+trouble, and it still trips exactly as before — there is a test asserting that,
+because widening this would quietly disable the fail-safe. A rejection does not
+trip, does not count toward either threshold, drops `paired`, and records the
+real code. `reachable` is now separate from `healthy`: the daemon answered, so
+it is up, and the popup's pairing prompt — which only renders when the daemon is
+reachable — becomes visible instead of being suppressed by the very error it
+fixes.
+
+**Why the tests did not have it.** There is no test file for
+`background/index.ts`; it is a service worker that registers listeners at module
+load, and it is excluded from coverage. Both decisions it was getting wrong were
+inline in that file and so could not be pinned. They are now
+`classifyApiError` and `daemonFailureMessage` in `shared/errors.ts`, which is
+tested. Lesson 1 again, in a component that had quietly opted out of it.
+
+The stub the new tests use was checked against the running daemon rather than
+written from the client's beliefs (lesson 2): status, `error.code` and
+`error.message` are the real response.
+
+**Adjacent, not fixed:** `HealthMonitor` captures the module-level `api` at
+construction, so a control-origin change leaves it polling the old origin.
+Harmless today because health is unauthenticated and the origin rarely changes.
+
+**Also noted:** `cli/doctor.py::check_extension_paired` still says "pairing
+itself leaves no persistent record on this side" and infers pairing from
+attribution counts. Since OI-19 the `paired-extension` sidecar exists and doctor
+could read it directly — it would have reported this install as unpaired
+outright.

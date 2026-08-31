@@ -1837,10 +1837,21 @@ the daemon's words rather than the user's.
 
 Two of the four bugs lived in `background/index.ts`, which has no test file and
 is excluded from coverage — a service worker that registers listeners at module
-load. Both were decisions, not plumbing, and both are now pure functions in
-`shared/errors.ts` where they can be pinned. A component that opts out of
-testing will accumulate exactly the class of bug that lesson 1 describes, and
-the fix is to move the decisions out rather than to test the worker.
+load. A component that opts out of testing will accumulate exactly the class of
+bug that lesson 1 describes.
+
+The first pass extracted only the two pure helpers and left `enableProxy` in
+place. When the fix was reported as not working, the suite could not settle it
+either way — and "the code looks right" is not an answer, it is the absence of
+one. The whole action layer then moved to `background/actions.ts` behind an
+injected `ActionDeps`, and the behaviour the user actually asked about — the
+pairing error arriving at the toggle rather than three actions later — is now a
+test that fails when the blind catch is restored.
+
+Worth stating plainly: extension coverage went *down*, 93.6% to 92.5%, and that
+is the improvement. Two hundred lines that were never in the denominator are now
+in it. A gate read without that context would have called it a regression and
+been wrong.
 
 The new `rejected` failure kind is narrow on purpose: 401 and 403 only. A 5xx
 still trips the fail-safe as it always did, with a test that fails if that is

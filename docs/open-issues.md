@@ -1203,9 +1203,29 @@ fixes.
 **Why the tests did not have it.** There is no test file for
 `background/index.ts`; it is a service worker that registers listeners at module
 load, and it is excluded from coverage. Both decisions it was getting wrong were
-inline in that file and so could not be pinned. They are now
-`classifyApiError` and `daemonFailureMessage` in `shared/errors.ts`, which is
-tested. Lesson 1 again, in a component that had quietly opted out of it.
+inline in that file and so could not be pinned.
+
+The first attempt at this extracted only the two pure helpers — `classifyApiError`
+and `daemonFailureMessage` — and left `enableProxy` where it was. That was not
+enough, and the way it was found out is the point: the fix was reported as not
+working, and **nothing in a green suite could say whether it did.** The answer
+available was "I read the code and it looks right", which is precisely what a
+test exists to replace. The likely cause was a service worker Chrome had not
+reloaded, but *likely* was as far as the evidence went.
+
+So the daemon-facing actions moved wholesale into `background/actions.ts`,
+taking their collaborators as an injected `ActionDeps` the way `HealthMonitor`
+already did. `index.ts` is now chrome wiring and nothing else, and
+`actions.test.ts` drives the real `enableProxy` against a stubbed `fetch`
+returning the daemon's actual 403. Turning the proxy on while unpaired is now
+asserted to fail, to name pairing as the remedy, and to leave Chrome's proxy
+untouched — watched failing against the restored blind catch first.
+
+Coverage for the extension reads *lower* afterwards (93.6% -> 92.5%). Nothing
+was deleted: ~200 lines that had been invisible to the denominator are now
+counted at 82%. A number that drops because previously-unmeasured code entered
+the measurement is the number getting more honest, and it is worth saying so
+explicitly, because G2 read on its own would call it a regression.
 
 The stub the new tests use was checked against the running daemon rather than
 written from the client's beliefs (lesson 2): status, `error.code` and

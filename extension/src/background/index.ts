@@ -6,10 +6,9 @@
  * notice that the daemon has died — which is the entire point of the fail-safe.
  */
 import { ControlApi } from '../shared/api';
-import { classifyApiError, daemonFailureMessage, remedyFor } from '../shared/errors';
 import type { ActionReply, Message, StatusReply } from '../shared/messages';
 import { StateStore, chromeArea, DEFAULT_CONTROL_ORIGIN } from '../shared/state';
-import type { ExtErrorCode } from '../shared/state';
+import { type ActionDeps, disableProxy, enableProxy, failureMessage, status } from './actions';
 import { Attributor } from './attribution';
 import { applyBadge, badgeView, chromeBadgeApi, resolveBadgeState } from './badge';
 import { HealthMonitor, POLL_INTERVAL_MS } from './health';
@@ -98,194 +97,33 @@ async function refreshBadge(tabId?: number): Promise<void> {
   await applyBadge(badge, view, tabId);
 }
 
-function proxyTargetFrom(listen: string | undefined): { host: string; port: number } {
-  // The daemon reports where it listens; trusting that avoids a second place
-  // for the port to be configured and get out of step.
-  const fallback = { host: '127.0.0.1', port: 8080 };
-  if (!listen) return fallback;
-  const [host, port] = listen.split(':');
-  if (!host || !port) return fallback;
-  const parsed = Number.parseInt(port, 10);
-  return Number.isFinite(parsed) ? { host, port: parsed } : fallback;
-}
-
 /**
- * Record a daemon refusal, and stop claiming to be paired.
- *
- * Returns the code when the daemon answered with one, and null when the call
- * failed for any other reason — the caller needs that distinction, because
- * "the daemon refused me" and "the daemon is not there" have opposite remedies
- * and used to be reported as the same thing.
- *
- * `paired` is dropped here rather than only in the health monitor because the
- * popup can provoke a refusal on any action, and a stale `paired: true` is what
- * hides the pairing prompt that would fix it.
+ * What the action functions are allowed to reach for. Assembled here because
+ * this is the only place that may touch `chrome.*` at module scope; everything
+ * in actions.ts takes it as an argument and is therefore testable.
  */
-async function noteAuthFailure(error: unknown): Promise<ExtErrorCode | null> {
-  const code = classifyApiError(error);
-  if (code === null) return null;
-  await store.save({
-    paired: false,
-    lastError: { code, message: remedyFor(code), at: Date.now() },
-  });
-  await refreshBadge();
-  return code;
-}
-
-/**
- * The message for a failed daemon call: the remedy for a refusal, and the
- * error's own text for anything else. Never the bare wire message for a 401 or
- * 403 — "origin not permitted" is true and tells the user nothing they can act
- * on (REQ EXT-024).
- */
-async function failureMessage(error: unknown): Promise<string> {
-  const code = await noteAuthFailure(error);
-  if (code !== null) return remedyFor(code);
-  return String((error as Error)?.message ?? error);
-}
-
-async function enableProxy(): Promise<ActionReply> {
-  const client = await apiForState();
-  const state = await store.load();
-
-  if (!(await proxy.isControllable())) {
-    const { level } = await proxy.status();
-    return {
-      ok: false,
-      error:
-        level === 'controlled_by_policy'
-          ? 'Chrome’s proxy is controlled by an enterprise policy.'
-          : 'Another extension is controlling Chrome’s proxy.',
-    };
-  }
-
-  let listen: string | undefined;
-  try {
-    listen = (await client.getState()).proxy.listen;
-  } catch (error) {
-    // This catch used to swallow everything into "cannot reach the daemon",
-    // which is how an unpaired extension sent people to restart a daemon that
-    // was running fine — at the exact moment they were looking for the reason.
-    await noteAuthFailure(error);
-    return { ok: false, error: daemonFailureMessage(error) };
-  }
-
-  try {
-    // Scoped mode is a PAC script rather than a bypass list: bypassList only
-    // subtracts from "everything", and scoping needs the opposite default.
-    if (state.proxyScope === 'scoped') {
-      await proxy.enablePac(state.scopedHosts, proxyTargetFrom(listen));
-    } else {
-      await proxy.enable(proxyTargetFrom(listen), state.controlOrigin);
-    }
-  } catch (error) {
-    return { ok: false, error: `Could not set the proxy: ${String(error)}` };
-  }
-
-  health.reset();
-  const next = await store.save({
-    proxyEnabled: true,
-    proxyApplied: true,
-    failSafeTrippedAt: null,
-    lastError: null,
-  });
-  health.start(POLL_INTERVAL_MS);
-  await refreshBadge();
-  return { ok: true, state: next };
-}
-
-async function disableProxy(): Promise<ActionReply> {
-  try {
-    await proxy.disable();
-  } catch (error) {
-    return { ok: false, error: `Could not clear the proxy: ${String(error)}` };
-  }
-  health.stop();
-  health.reset();
-  const next = await store.save({ proxyEnabled: false, proxyApplied: false });
-  await refreshBadge();
-  return { ok: true, state: next };
-}
-
-async function status(): Promise<StatusReply> {
-  const state = await store.load();
-  const client = await apiForState();
-  const { level } = await proxy.status();
-
-  let daemonReachable = false;
-  let version: string | null = null;
-  let profiles: string[] = [];
-  let counters: StatusReply['counters'] = null;
-
-  try {
-    const daemon = await client.getState();
-    daemonReachable = true;
-    version = daemon.version;
-    counters = {
-      flows: daemon.counters.flows_total,
-      blocked: daemon.counters.blocked,
-      modified: daemon.counters.modified,
-      passthrough: daemon.counters.passthrough,
-    };
-    // Keep the mirrored state honest so the popup never shows a stale toggle.
-    await store.save({
-      activeProfile: daemon.active_profile,
-      devToggles: daemon.dev_toggles,
-      moduleHealth: {
-        errors: daemon.modules.errors.length,
-        quarantined: daemon.modules.quarantined,
-      },
-      recordingSession: daemon.capture.recording_session,
-    });
-  } catch (error) {
-    // A refusal is proof the daemon is up: it answered. Falling through to the
-    // health probe would only collect the same 403 and score it as "down",
-    // which suppresses the popup's pairing prompt — the one control that fixes
-    // it. Reachability and usability are different questions.
-    if ((await noteAuthFailure(error)) !== null) {
-      daemonReachable = true;
-    } else {
-      try {
-        daemonReachable = (await client.health()).ok;
-      } catch {
-        daemonReachable = false;
-      }
-    }
-  }
-
-  if (daemonReachable && state.paired) {
-    try {
-      profiles = (await client.listProfiles()).map((p) => p.name);
-    } catch {
-      profiles = [];
-    }
-  }
-
-  return {
-    state: await store.load(),
-    attributionGranted: await hasAttributionPermission(),
-    daemonReachable,
-    proxyControllable:
-      level === 'controllable_by_this_extension' || level === 'controlled_by_this_extension',
-    controlLevel: level,
-    profiles,
-    counters,
-    version,
-    // version_name carries the full semver; `version` is the numeric core
-    // Chrome will store. Prefer the former so a prerelease is visible to the
-    // person trying to work out what they are running (OI-25).
-    extensionVersion:
-      chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version,
-  };
-}
+const deps: ActionDeps = {
+  client: apiForState,
+  store,
+  proxy,
+  health,
+  refreshBadge: () => refreshBadge(),
+  attributionGranted: hasAttributionPermission,
+  // version_name carries the full semver; `version` is the numeric core Chrome
+  // will store. Prefer the former so a prerelease is visible to the person
+  // trying to work out what they are running (OI-25).
+  extensionVersion: () =>
+    chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version,
+  pollIntervalMs: POLL_INTERVAL_MS,
+};
 
 async function handle(message: Message): Promise<ActionReply | StatusReply> {
   switch (message.type) {
     case 'get_status':
-      return status();
+      return status(deps);
 
     case 'set_proxy':
-      return message.enabled ? enableProxy() : disableProxy();
+      return message.enabled ? enableProxy(deps) : disableProxy(deps);
 
     case 'pair': {
       const client = await apiForState();
@@ -304,7 +142,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         const daemon = await client.activateProfile(message.name);
         return { ok: true, state: await store.save({ activeProfile: daemon.active_profile }) };
       } catch (error) {
-        return { ok: false, error: await failureMessage(error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -316,7 +154,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: await failureMessage(error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -330,7 +168,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         ]);
         return { ok: true };
       } catch (error) {
-        return { ok: false, error: await failureMessage(error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -359,7 +197,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
       // Re-apply immediately if the proxy is already on, otherwise the setting
       // silently does nothing until the next toggle.
       if (next.proxyApplied) {
-        const reply = await enableProxy();
+        const reply = await enableProxy(deps);
         if (!reply.ok) return reply;
       }
       return { ok: true, state: await store.load() };
@@ -373,7 +211,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         await refreshBadge();
         return { ok: true, state: next };
       } catch (error) {
-        return { ok: false, error: await failureMessage(error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
     }
 
@@ -389,7 +227,7 @@ async function handle(message: Message): Promise<ActionReply | StatusReply> {
         // something that is not recording is the worse failure.
         await store.save({ recordingSession: null });
         await refreshBadge();
-        return { ok: false, error: await failureMessage(error) };
+        return { ok: false, error: await failureMessage(deps, error) };
       }
       const next = await store.save({ recordingSession: null });
       await refreshBadge();

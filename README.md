@@ -1,4 +1,4 @@
-# pporlock
+# <img src="docs/images/poppy.svg" width="26" height="26" align="top" alt=""> pporlock
 
 [![gate](https://github.com/thowland/pporlock/actions/workflows/gate.yml/badge.svg)](https://github.com/thowland/pporlock/actions/workflows/gate.yml)
 [![licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg)](LICENSE)

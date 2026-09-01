@@ -23,6 +23,7 @@ popup should show a human.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import re
 import sys
@@ -30,6 +31,50 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 VERSION_FILE = REPO / "VERSION"
+
+#: The year of the first commit. A fixed fact, not derived: a shallow clone has
+#: no first commit to read, and the year a work was first published does not
+#: change however the history is later rewritten.
+COPYRIGHT_START = 2026
+
+#: Every place the notice appears, and the one occurrence in each. Three files,
+#: one of which is a README that nothing compiles, lints or serves — which is
+#: exactly why this is generated rather than remembered. The two constants were
+#: written by hand as 2025 and were wrong from the moment they were typed.
+COPYRIGHT_FILES = (
+    REPO / "web" / "src" / "lib" / "about.ts",
+    REPO / "extension" / "src" / "shared" / "about.ts",
+    REPO / "README.md",
+)
+
+#: `© 2026 Tim Howland` or `© 2026-2027 Tim Howland`.
+#:
+#: A hyphen rather than the en dash a year range takes typographically: ruff
+#: flags an en dash in source as an ambiguous character, and a suppression on
+#: five lines to win a punctuation argument is a bad trade. A hyphenated range
+#: is what almost every copyright line in software uses anyway.
+COPYRIGHT_PATTERN = re.compile(r"© (\d{4}(?:-\d{4})?) Tim Howland")
+
+
+def copyright_years(today: datetime.date | None = None) -> str:
+    """The notice's year, as of now.
+
+    **The current year, not the year of the last commit.** A copyright notice
+    claims a year of modification, and this is only ever written immediately
+    before a commit — `make version-sync` is run by `make bump-*`, and CLAUDE.md
+    requires a bump on every branch before merge. So "now" is the year the
+    modification is being made, while the last commit's year is the *previous*
+    modification and would be a year stale every January.
+
+    It also keeps this script independent of git, which matters: it runs in the
+    gate, and a gate step that needs a git history fails in a tarball.
+
+    Collapses to a single year while the project is still in its first one, and
+    becomes a range on its own the first time it is synced in a later year.
+    """
+    year = (today or datetime.date.today()).year
+    return str(COPYRIGHT_START) if year <= COPYRIGHT_START else f"{COPYRIGHT_START}-{year}"
+
 
 #: Full semver, anchored. Prerelease and build metadata are permitted here even
 #: though the Chrome manifest cannot hold them — see the module docstring.
@@ -94,6 +139,61 @@ def targets(version: str) -> list[tuple[Path, str]]:
     ]
 
 
+def sync_copyright(years: str) -> list[Path]:
+    """Rewrite the notice wherever it appears."""
+    changed: list[Path] = []
+    for path in COPYRIGHT_FILES:
+        text = path.read_text()
+        new, count = COPYRIGHT_PATTERN.subn(f"© {years} Tim Howland", text)
+        if count != 1:
+            # Same rule as _sub_once: a sync that quietly skips a file it can no
+            # longer find is how the drift this exists to prevent comes back.
+            raise SystemExit(
+                f"{path.relative_to(REPO)}: expected one copyright notice, found {count}"
+            )
+        if new != text:
+            path.write_text(new)
+            changed.append(path)
+    return changed
+
+
+def check_copyright(today: datetime.date | None = None) -> list[str]:
+    """Notices that disagree with each other, or claim a year not yet reached.
+
+    Deliberately *not* "every file says the current year". A project untouched
+    since 2026 correctly says 2026 for ever, and a check that failed every 1
+    January on an unchanged tree would be noise — the kind that teaches people
+    to run the gate with one step disabled.
+
+    What must hold is that the three agree, and that none of them claims a year
+    that has not happened. `make version-sync` moves them forward, and it runs
+    on every version bump, which CLAUDE.md requires on every branch.
+    """
+    problems: list[str] = []
+    seen: dict[str, list[str]] = {}
+    for path in COPYRIGHT_FILES:
+        found = COPYRIGHT_PATTERN.search(path.read_text())
+        name = str(path.relative_to(REPO))
+        if found is None:
+            problems.append(f"{name}: no copyright notice found")
+            continue
+        seen.setdefault(found.group(1), []).append(name)
+
+    if len(seen) > 1:
+        for years, files in sorted(seen.items()):
+            problems.append(f"copyright {years} in {', '.join(files)}")
+
+    now = (today or datetime.date.today()).year
+    for years in seen:
+        latest = int(years.split("-")[-1])
+        if latest > now:
+            problems.append(f"copyright {years} is in the future")
+        if int(years.split("-")[0]) != COPYRIGHT_START:
+            problems.append(f"copyright {years} does not start at {COPYRIGHT_START}")
+
+    return problems
+
+
 def sync(version: str) -> list[Path]:
     changed: list[Path] = []
     core = numeric_core(version)
@@ -112,6 +212,8 @@ def sync(version: str) -> list[Path]:
     if _sub_once(manifest, r"^  version_name: '[^']*',$", f"  version_name: '{version}',"):
         if manifest not in changed:
             changed.append(manifest)
+
+    changed.extend(sync_copyright(copyright_years()))
 
     return changed
 
@@ -139,6 +241,8 @@ def check(version: str) -> list[str]:
             f"extension/src/manifest.config.ts: version_name "
             f"{named.group(1) if named else None!r}, expected {version!r}"
         )
+
+    problems.extend(check_copyright())
     return problems
 
 
@@ -190,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {problem}", file=sys.stderr)
             print("\nRun `make version-sync`.", file=sys.stderr)
             return 1
-        print(f"version {version} — all files agree")
+        print(f"version {version}, copyright {copyright_years()} — all files agree")
         return 0
 
     new = bump(args.part, version)

@@ -2063,3 +2063,53 @@ It also checks the path the README actually points at is one of them. Nothing
 else in the build looks at the README: it is not compiled, linted or served, and
 a broken image there is the project's first impression. Both halves were watched
 failing — once with the link renamed, once with the file deleted.
+
+### 0.12.4 — the copyright year, and a gate step that was never in the gate
+
+The about box said **© 2025**. The project's first commit is 2026, so the year
+was not stale — it was never right. It was typed by hand into two `about.ts`
+constants while the README, written separately, already said 2026. Three
+notices, two values, nothing comparing them.
+
+So the year joins the machinery that already exists for exactly this shape of
+problem. `make version-sync` writes it into all three; `make version-check`
+fails when they disagree or when one claims a year that has not happened.
+
+Two decisions worth recording:
+
+**The current year at sync time, not the year of the last commit.** Sync always
+runs immediately before a commit — `make bump-*` calls it, and a bump is
+required on every branch — so "now" *is* the year of the modification being
+recorded, while the last commit's year is the previous one and would read a year
+stale every January. It also keeps `version.py` independent of git, which
+matters because it now runs in the gate and a gate step that needs a git history
+fails in a tarball.
+
+**`check` does not demand the current year.** A project untouched since 2026
+correctly says 2026 for ever. A check that failed every 1 January on an
+unchanged tree is the kind that teaches people to run the gate with one step
+disabled. What it enforces is that the three agree and that none claims a year
+not yet reached; `version-sync` moves them forward, and it runs on every bump.
+
+The notice becomes `© 2026-2027` on its own the first time it is synced in a
+later year. Hyphen rather than en dash: ruff flags an en dash in source as an
+ambiguous character, and five suppressions to win a punctuation argument is a
+bad trade.
+
+### Found on the way
+
+**OI-38 — `make gate` never ran `version-check`.** The Makefile comment said it
+did, and `CLAUDE.md` repeated it. `gate` was `lint test coverage security`;
+`version-check` appeared nowhere in it, in anything it depends on, in the
+pre-commit hook, or in CI. It had only ever run by hand.
+
+It happened not to matter — `bump-*` calls `sync` directly and nobody had
+hand-edited a version — but that is luck. OI-25's whole finding was that nine
+version declarations sat at 0.1.0 for eighteen sprints *because nothing checked
+them*, and its fix reproduced the same gap one level up: a complete, correct
+guard that nothing invokes. OI-11 in the build system rather than the product.
+
+`scripts/version.py` also had no tests at all, for the usual reason — it is not
+shipped code. It is, however, what decides the version the running system
+reports, which is the first question of every diagnosis. It has thirteen now,
+including one that reads the `gate:` line out of the Makefile.

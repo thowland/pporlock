@@ -29,14 +29,21 @@ Documentation is layered. Load only what the task needs; the specs are written t
 
 | Document | What it tells you |
 |---|---|
-| `docs/open-issues.md` | **Read before starting anything.** 35 issues — 27 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
+| `docs/open-issues.md` | **Read before starting anything.** 36 issues — 28 closed (one partly), 8 open. The closed ones record decisions you would otherwise re-litigate, and several record a bug's *shape* rather than just its fix. |
 | `docs/sprint-log.md` | What each sprint delivered, deferred, and why. Every bug found, with the shape of the mistake. |
 | `docs/implementation-plan.md` | Sprint history and §2.5, the hand-reviewed security checklist — still the real security gate. |
 
 ### Versioning
 
 Semver, one source: the `VERSION` file at the repository root. Everything else
-is generated from it and `make version-check` fails the gate on drift.
+is generated from it and `make version-check` fails the gate on drift — which it
+genuinely does since OI-38, when the gate turned out never to have invoked it.
+
+The copyright year rides the same machinery: `version-sync` writes the current
+year into the two `about.ts` constants and the README, and `version-check`
+fails when they disagree or claim a year that has not happened. It does *not*
+demand the current year — an untouched tree correctly keeps saying the year it
+was last modified.
 
 | Change | Bump |
 |---|---|
@@ -144,7 +151,7 @@ make version     # print it   /  version-sync, version-check, bump-minor, bump-p
 make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
-**Current baseline:** daemon 2070, web 606, extension 336, mcp 134, E2E 37. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
+**Current baseline:** daemon 2083, web 606, extension 336, mcp 134, E2E 37. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
 
 If a number drops, something was deleted. Find out what.
 

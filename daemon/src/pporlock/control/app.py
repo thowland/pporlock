@@ -157,7 +157,21 @@ CLIENT_ACTIVE_TTL_S = 60.0
 
 #: Path prefixes served without a token. The web UI's own assets: the page has
 #: to load before it can present a token, and the assets are ours, not data.
-PUBLIC_PREFIXES: tuple[str, ...] = ("/assets/", "/favicon", "/vite.svg")
+#:
+#: ``/poppy.svg`` is the mark — the same file the extension draws in the toolbar
+#: — used both as the favicon and beside the name in the header. It is fetched
+#: by ``<img src>`` and by ``<link rel=icon>``, neither of which can carry an
+#: Authorization header, which is the same reason ``/assets/`` is here and the
+#: same trap as OI-30.
+#:
+#: ``/favicon`` stays even though nothing links to ``/favicon.ico``: browsers
+#: request it unprompted, and 401 is a worse answer to that than 404.
+#:
+#: ``/vite.svg`` is gone. It came from the Vite template in Sprint 4 and no
+#: build has ever emitted that file — ``git log --all -- '*vite.svg'`` is empty.
+#: An allowlist entry for a path that cannot exist is the kind of thing that
+#: accumulates until nobody is willing to touch the list.
+PUBLIC_PREFIXES: tuple[str, ...] = ("/assets/", "/favicon", "/poppy.svg")
 
 
 class ClientActivity:

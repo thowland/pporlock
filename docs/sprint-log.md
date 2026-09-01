@@ -2016,3 +2016,32 @@ the top. Both were watched failing with the fix reverted.
 
 The shape of the mistake is the project's most familiar one: a convention every
 view followed individually and nothing asserted. It is asserted now.
+
+### 0.12.2 — the mark in the header, and an allowlist entry that was never real
+
+The poppy now sits beside the name in the web UI's status bar and is the page's
+favicon, so the tab, the toolbar and the header are recognisably one thing.
+
+It is a *copy* of `extension/public/icons/poppy.svg`, not a second drawing of
+the same flower: the web UI and the extension are separate builds that must not
+reach into each other's trees, so the file is duplicated and
+`web/src/lib/poppy.test.ts` asserts the two are byte-identical. The whole point
+of the mark is that it is the same mark; two files that both look like a poppy
+would satisfy nobody's eye but a reviewer's.
+
+**It 401'd.** `PUBLIC_PREFIXES` — the short list of paths the daemon serves
+without a bearer token, because the page has to load before it can present one —
+did not include it. An `<img src>` and a `<link rel=icon>` are plain navigations
+carrying no Authorization header, which is precisely OI-30's trap in a new
+place: the header would have rendered a broken-image icon and the tab no
+favicon, with nothing in any log saying why. Caught by curling the running
+daemon before committing, which is the only thing that could have caught it —
+the unit tests stub no static server and the browser reports a broken image the
+same way whatever the status code.
+
+While there: **`/vite.svg` came off the list.** It has been on it since Sprint 4,
+from the Vite starter template, naming a file no build has ever emitted —
+`git log --all -- '*vite.svg'` is empty. `/favicon` stays despite nothing
+linking to `/favicon.ico`, because browsers request it unprompted and 401 is a
+worse answer to that than 404. The list is now pinned by a test that fails if it
+grows, which is the corollary this project already had and had not applied here.

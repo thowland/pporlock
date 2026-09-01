@@ -96,3 +96,21 @@ describe('StatusBar', () => {
     expect(screen.getByText('pporlock')).toBeTruthy();
   });
 });
+
+describe('the poppy mark  # visual continuity with the extension', () => {
+  it('shows the mark beside the name', () => {
+    const { container } = render(
+      <StatusBar state={null} connection="connected" streamState="open" flowCount={0} />,
+    );
+    const mark = container.querySelector('img.mark');
+    expect(mark?.getAttribute('src')).toBe('/poppy.svg');
+  });
+
+  it('gives the mark no accessible name, because the word beside it has one', () => {
+    render(<StatusBar state={null} connection="connected" streamState="open" flowCount={0} />);
+    // A decorative mark with alt text makes a screen reader say "pporlock
+    // pporlock". `poppy.test.ts` holds the file itself to the extension's.
+    expect(screen.queryAllByRole('img')).toHaveLength(0);
+    expect(screen.getByText('pporlock')).toBeTruthy();
+  });
+});

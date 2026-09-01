@@ -74,6 +74,16 @@ body {
   flex: 0 0 auto;
 }
 
+/* Optically matched to the 13px brand beside it rather than set to it: the
+   glyph is a filled silhouette with no ascender, so a 13px box reads smaller
+   than 13px of text. */
+.statusbar .mark {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: 0 0 auto;
+  margin-right: -8px;
+}
 .statusbar .brand {
   font-weight: 600;
   letter-spacing: 0.02em;

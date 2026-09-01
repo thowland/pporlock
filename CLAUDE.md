@@ -144,7 +144,7 @@ make version     # print it   /  version-sync, version-check, bump-minor, bump-p
 make bench-saturation  # concurrency/throughput vs mitmproxy's own ceiling (OI-21)
 ```
 
-**Current baseline:** daemon 2039, web 597, extension 336, mcp 134, E2E 37. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
+**Current baseline:** daemon 2070, web 602, extension 336, mcp 134, E2E 37. Coverage: daemon 93%, `engine/` 96%, web 94.6%, extension 93%, mcp 98.6%.
 
 If a number drops, something was deleted. Find out what.
 

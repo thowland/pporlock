@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    The pporlock mark: a poppy, in silhouette.
+
+    Drawn as four identical petals rotated about the centre rather than as one
+    outline, because the toolbar renders this at 16px and a radially symmetric
+    shape is the only kind that survives that: at 16px the eye gets a colour and
+    a silhouette, nothing else. A letterform ("P") gave up at the same size and
+    read as a smudge.
+
+    Kept inside a 108-unit circle, off-centre low, so the two status lights the
+    service worker composites into the top corners (background/icon.ts) land on
+    background rather than on a petal.
+  -->
+  <g transform="translate(64 68)">
+    <g fill="#cf2f2a">
+      <path d="M0 0 C-27 -8 -42 -27 -32 -45 C-22 -61 22 -61 32 -45 C42 -27 27 -8 0 0 Z"/>
+      <path d="M0 0 C-27 -8 -42 -27 -32 -45 C-22 -61 22 -61 32 -45 C42 -27 27 -8 0 0 Z" transform="rotate(90)"/>
+      <path d="M0 0 C-27 -8 -42 -27 -32 -45 C-22 -61 22 -61 32 -45 C42 -27 27 -8 0 0 Z" transform="rotate(180)"/>
+      <path d="M0 0 C-27 -8 -42 -27 -32 -45 C-22 -61 22 -61 32 -45 C42 -27 27 -8 0 0 Z" transform="rotate(270)"/>
+    </g>
+    <!-- The dark capsule. A poppy without it is a generic four-petal flower. -->
+    <circle r="13" fill="#241a17"/>
+    <g fill="#241a17">
+      <circle cx="0" cy="-20" r="3.4"/>
+      <circle cx="19" cy="-7" r="3.4"/>
+      <circle cx="12" cy="16" r="3.4"/>
+      <circle cx="-12" cy="16" r="3.4"/>
+      <circle cx="-19" cy="-7" r="3.4"/>
+    </g>
+  </g>
+</svg>

@@ -69,6 +69,11 @@ export function StatusBar({ state, connection, streamState, flowCount }: Props) 
 
   return (
     <div className="statusbar">
+      {/* The same file the extension draws in the toolbar, byte for byte —
+          `poppy.test.ts` asserts it. `alt=""` because the word beside it says
+          the same thing: a screen reader announcing "pporlock pporlock" is the
+          usual cost of a decorative mark given a name. */}
+      <img className="mark" src="/poppy.svg" alt="" width={16} height={16} />
       <span className="brand">pporlock</span>
       {connectionPill(connection, streamState)}
 

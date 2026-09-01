@@ -367,3 +367,27 @@ describe('module settings', () => {
     expect(list.mock.calls.length).toBeGreaterThan(1);
   });
 });
+
+describe('finding the documentation  # the guides are useless if nothing points at them', () => {
+  it('offers the guides from the library toolbar', async () => {
+    render(<ModuleLibrary api={api([makeModule({})])} onOpen={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'How to write a module' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('offers them from the empty state too', async () => {
+    // The empty library is the moment someone most needs them, and used to say
+    // "author it here" with nothing to click.
+    render(<ModuleLibrary api={api([])} onOpen={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Read the module guides' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('closes again, leaving the library where it was', async () => {
+    render(<ModuleLibrary api={api([makeModule({ name: 'ad-blocker' })])} onOpen={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'How to write a module' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByText('ad-blocker')).toBeTruthy();
+  });
+});

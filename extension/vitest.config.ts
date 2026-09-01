@@ -22,6 +22,9 @@ export default defineConfig({
         // wiring itself is covered by the Playwright extension suite.
         'src/popup/main.tsx',
         'src/popup/options.tsx',
+        // Same category: it reads status, picks defaults and renders AboutView,
+        // which is tested directly in AboutView.test.tsx.
+        'src/popup/about.tsx',
         'src/background/index.ts',
         'src/manifest.config.ts',
         'src/test/**',

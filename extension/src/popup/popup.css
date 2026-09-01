@@ -237,3 +237,55 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The about page. Not a popup: it opens in a tab, so it may be wider than the
+   330px `body` above and is the one place in this stylesheet that overrides it.
+   `:has` rather than a class on <body>, so the page's own markup stays a single
+   component and nothing has to remember to set a body class. Chrome 105+, and
+   the manifest already requires 116. */
+body:has(.about) {
+  width: auto;
+}
+.about {
+  width: 560px;
+  max-width: 100%;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+.about h2 {
+  font-size: 13px;
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+.about p {
+  margin: 0 0 10px;
+}
+.about a {
+  color: var(--accent);
+}
+.lamps,
+.links {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+}
+.lamp-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: var(--dim);
+  padding: 3px 0;
+}
+/* Drawn the way the service worker draws it: a filled dot with a dark ring, so
+   the legend and the icon are recognisably the same thing. */
+.lamp {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid #1b1210;
+}
+.links li {
+  padding: 3px 0;
+}

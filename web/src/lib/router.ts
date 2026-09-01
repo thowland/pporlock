@@ -20,7 +20,12 @@ export type Route =
   | { view: 'sessions' }
   | { view: 'session'; id: string }
   | { view: 'dryrun'; id: string }
-  | { view: 'settings' };
+  | { view: 'settings' }
+  // Linked into from outside the app: the extension's about page points at
+  // `#/help` and `#/about`, so these two are part of a contract rather than
+  // just internal navigation, and renaming either breaks a shipped build.
+  | { view: 'help' }
+  | { view: 'about' };
 
 export const DEFAULT_ROUTE: Route = { view: 'traffic' };
 
@@ -44,6 +49,8 @@ export function parseRoute(hash: string): Route {
     return { view: 'sessions' };
   }
   if (head === 'settings') return { view: 'settings' };
+  if (head === 'help') return { view: 'help' };
+  if (head === 'about') return { view: 'about' };
   if (head === 'profiles') return { view: 'profiles' };
   if (head === 'newrule') return { view: 'newrule' };
   return DEFAULT_ROUTE;
@@ -67,6 +74,10 @@ export function routeToHash(route: Route): string {
       return `#/sessions/${encodeURIComponent(route.id)}/dryrun`;
     case 'settings':
       return '#/settings';
+    case 'help':
+      return '#/help';
+    case 'about':
+      return '#/about';
     default:
       return '#/traffic';
   }

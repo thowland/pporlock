@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client';
 import type { ModuleStatus } from '../../api/types';
+import { GuidesDialog } from './GuidesDialog';
 import { ModuleReport } from './ModuleReport';
 import { ModuleSettings } from './ModuleSettings';
 
@@ -35,6 +36,7 @@ export function ModuleLibrary({ api, onOpen }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [reportFor, setReportFor] = useState<string | null>(null);
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const [guidesOpen, setGuidesOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -93,6 +95,12 @@ export function ModuleLibrary({ api, onOpen }: Props) {
       <div className="viewbar">
         <h2>Modules</h2>
         <span className="spacer" style={{ flex: 1 }} />
+        {/* Here rather than in the help view: this is the page where someone
+            decides to write a module, and documentation nothing points at is
+            documentation nobody finds. */}
+        <button type="button" className="action" onClick={() => setGuidesOpen(true)}>
+          How to write a module
+        </button>
         <button type="button" className="action" onClick={() => void refresh()}>
           Refresh
         </button>
@@ -115,6 +123,14 @@ export function ModuleLibrary({ api, onOpen }: Props) {
         <div className="empty">
           <h2>No modules</h2>
           <p>Create one from a flow in the traffic view, or author it here.</p>
+          <p>
+            {/* Worded differently from the toolbar button beside it, which is
+                always present: two controls with the same accessible name are
+                two things a screen reader cannot tell apart. */}
+            <button type="button" className="linkish" onClick={() => setGuidesOpen(true)}>
+              Read the module guides
+            </button>
+          </p>
         </div>
       ) : (
         <table className="modules">
@@ -166,6 +182,8 @@ export function ModuleLibrary({ api, onOpen }: Props) {
       {/* Refreshed on save: a settings change can alter what the module does
           on the next flow, and a table still showing the old state is how you
           end up debugging a change you already made. */}
+      {guidesOpen && <GuidesDialog onClose={() => setGuidesOpen(false)} />}
+
       {settingsFor !== null && (
         <ModuleSettings
           api={api}

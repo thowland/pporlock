@@ -1900,3 +1900,94 @@ by calling the coroutine directly and passing while the runner created nothing.
 They now come from `start_background_tasks`, which a test can call and count.
 That is the same move the extension's action layer needed a release earlier, and
 for the same reason.
+
+---
+
+## 0.12.0 — help, about, and an icon that says what is happening
+
+Fit-and-finish, driven by use rather than by an issue: the product had good
+documentation nothing pointed at, no way to find out what it was or what licence
+it carried, and a toolbar icon that was a grey puzzle piece.
+
+### Web UI
+
+**`#/help`** — a new view, reached from the nav. Two things live in it that
+lived nowhere else. First, a walk through what each view shows, in the order a
+new user meets them: what provenance *is*, what a passthrough row means, what
+redaction does and where unmasking is allowed, and why a dry run is safe for
+your browsing but not safe from the module. Second, the extension's complete
+error catalogue — code, cause, and the steps to clear it. The popup already
+explains each error at the moment it happens and is then gone; anyone trying to
+work out what they saw yesterday had nowhere to look.
+
+**`#/about`** — what pporlock is, both version numbers and mitmproxy's, what it
+does to the machine in plain terms (it terminates TLS and can rewrite anything),
+copyright, GPL-3.0-or-later, and the project on GitHub. A route rather than a
+dialog because the extension links into it from outside the app, and because
+"which version are you on" needs to be something you can send a link to.
+
+**A guides dialog on the modules page.** The library said "author it here" and
+left you with a YAML editor; six documents existed and nothing in the product
+mentioned them. Offered from the toolbar and, in different words, from the empty
+state. It carries the module directory layout inline — the thing everybody looks
+up once — and links each guide to its file on GitHub.
+
+This is the UI's first real modal (`components/Modal.tsx`). Everything that
+could have been one before is deliberately an inline panel, because those are
+read *against* the table beside them.
+
+### Extension
+
+**A poppy, in place of the puzzle piece.** Four PNG sizes rendered from an SVG
+in `public/icons/`. Drawn as four petals rotated about the centre: at the 16px
+Chrome actually uses, a radially symmetric silhouette is the only kind that
+survives, and a letterform is a smudge.
+
+**Two status lamps composited into the icon** (`background/icon.ts`). Grey/green
+top left for whether traffic is *actually* being intercepted; red top right,
+present only while recording. The badge answers "what happened"; these answer
+"what is true now", and the badge can only say one thing at a time.
+
+The green lamp is not `state.proxyEnabled`. It is enabled **and** applied **and**
+the daemon reachable **and** the fail-safe not tripped — four clauses because
+there are four ways to have asked for the proxy and not be getting it, and a
+lamp reporting the request would be green through every one of them.
+
+**An about page**, opened from the popup in a tab of its own: overview, the lamp
+legend (the only place it is written down), licence, GitHub, and deep links to
+the web UI's help and about built from the *configured* control origin rather
+than a hard-coded port.
+
+### Found on the way
+
+**OI-37 — the fail-safe's notification named an icon that was never in the
+repository.** `iconUrl: 'icon-128.png'`, introduced in Sprint 5, pointing at a
+file no commit has ever added. `chrome.notifications.create` rejects on an icon
+it cannot fetch, and the call sits in a `try`/`catch` written for a missing
+permission — so the notification that fires at the worst moment there is has
+never once appeared, and never complained.
+
+### New guards, each watched failing
+
+- `build-inputs.test.ts` now holds **every `*.html` string literal in the
+  source** to being a real build entry, not just the DevTools panel path. The
+  about page is reached through `chrome.runtime.getURL(ABOUT_PAGE)` — the same
+  invisible-string shape as OI-28. It also asserts every icon the manifest
+  names, the artwork `icon.ts` fetches, and the notification's `iconUrl` are
+  files in `public/`.
+- `web/src/lib/extension-errors.test.ts` reads the extension's `ExtErrorCode`
+  union out of its source and fails if the help documents an error that cannot
+  happen, or misses one that can.
+- `web/src/lib/about.test.ts` checks every linked document exists in the
+  repository, and parses the extension's `WEB_UI_*` constants to confirm they
+  resolve to real routes rather than the traffic fallback — the two builds share
+  those strings and nothing compiles them together.
+
+All four were sabotaged once and watched to fail before being restored.
+
+### Counts
+
+web 518 → 597 tests, extension 263 → 336. Coverage held: web 94.6%, extension
+93%. `about.tsx` joins the other entry points in the coverage exclusions with
+the same justification; the icon's canvas adapter is *not* excluded and is
+tested against a stubbed worker global instead.

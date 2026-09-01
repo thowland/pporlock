@@ -11,6 +11,7 @@ import { StateStore, chromeArea, DEFAULT_CONTROL_ORIGIN } from '../shared/state'
 import { type ActionDeps, disableProxy, enableProxy, failureMessage, status } from './actions';
 import { Attributor } from './attribution';
 import { applyBadge, badgeView, chromeBadgeApi, resolveBadgeState } from './badge';
+import { describeLights, iconLights, renderIcon } from './icon';
 import { HealthMonitor, POLL_INTERVAL_MS } from './health';
 import { ProxyController, chromeProxyApi } from './proxy';
 
@@ -60,7 +61,7 @@ const health = new HealthMonitor({
       // A badge alone is too quiet for "your proxy just turned itself off".
       await chrome.notifications?.create?.({
         type: 'basic',
-        iconUrl: 'icon-128.png',
+        iconUrl: 'icons/poppy-128.png',
         title: 'pporlock turned the proxy off',
         message:
           'The daemon stopped responding, so Chrome was returned to a direct ' +
@@ -94,7 +95,27 @@ async function refreshBadge(tabId?: number): Promise<void> {
     }),
     counters,
   );
-  await applyBadge(badge, view, tabId);
+
+  // The lamps say what is true right now; the badge says what has happened.
+  // Both are wanted at once, which is why they are not the same surface.
+  const lights = iconLights({
+    proxyEnabled: state.proxyEnabled,
+    proxyApplied: state.proxyApplied,
+    daemonReachable: health.reachable,
+    failSafeTripped: state.failSafeTrippedAt !== null,
+    recording: state.recordingSession !== null,
+  });
+
+  await applyBadge(badge, { ...view, title: `${view.title} — ${describeLights(lights)}` }, tabId);
+
+  // An icon that could not be drawn must never take down the badge refresh:
+  // the badge is carrying the more important message, and a stale icon is a
+  // far smaller failure than a fail-safe trip that goes unannounced.
+  try {
+    await renderIcon(lights, tabId);
+  } catch {
+    /* the packaged PNG remains, unlit */
+  }
 }
 
 /**

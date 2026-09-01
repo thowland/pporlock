@@ -51,7 +51,8 @@ interface Manifest {
   host_permissions: string[];
   optional_host_permissions?: string[];
   background: { service_worker: string; type: 'module' };
-  action: { default_popup: string; default_title?: string };
+  action: { default_popup: string; default_title?: string; default_icon?: Record<string, string> };
+  icons?: Record<string, string>;
   options_page?: string;
   devtools_page?: string;
   content_scripts?: { matches: string[]; js: string[]; run_at?: string }[];
@@ -60,8 +61,8 @@ interface Manifest {
 const manifest: Manifest = {
   manifest_version: 3,
   name: 'pporlock',
-  version: '0.11.0',
-  version_name: '0.11.0',
+  version: '0.12.0',
+  version_name: '0.12.0',
   description: 'Control and observe the pporlock local interception proxy.',
   minimum_chrome_version: '116',
   permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest', 'notifications'],
@@ -71,9 +72,27 @@ const manifest: Manifest = {
     service_worker: 'src/background/index.ts',
     type: 'module',
   },
+  // The artwork is a poppy, not a letterform. A "P" was unreadable at the 16px
+  // Chrome actually draws in the toolbar, and the toolbar is where this icon
+  // spends its entire life. The service worker composites two status lamps into
+  // the top corners at runtime (background/icon.ts); these files are the unlit
+  // fallback Chrome shows before the worker has run, and the icon everywhere
+  // else — the extensions page, the permission prompt, the notification.
+  icons: {
+    '16': 'icons/poppy-16.png',
+    '32': 'icons/poppy-32.png',
+    '48': 'icons/poppy-48.png',
+    '128': 'icons/poppy-128.png',
+  },
   action: {
     default_popup: 'src/popup/index.html',
     default_title: 'pporlock',
+    default_icon: {
+      '16': 'icons/poppy-16.png',
+      '32': 'icons/poppy-32.png',
+      '48': 'icons/poppy-48.png',
+      '128': 'icons/poppy-128.png',
+    },
   },
   options_page: 'src/popup/options.html',
   // <all_urls> here is the same grant attribution needs, and the banner is

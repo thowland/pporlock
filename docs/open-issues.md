@@ -1368,3 +1368,38 @@ never created it. They now come from `start_background_tasks`, which a test can
 call and count. The pre-existing log-rotation guard read `_run`'s source for
 `rotate_logs_forever`; it was updated rather than deleted (G4), and now asserts
 that `_run` reaches the task list and that rotation is still in it.
+
+---
+
+## OI-37 — the fail-safe's notification named an icon that was never in the repository
+
+**Found:** while adding the toolbar artwork, reading `background/index.ts` for
+places the icon is referenced.
+**CLOSED** (the manifest now ships four sizes, and the notification names one of
+them; `build-inputs.test.ts` asserts the file exists).
+
+`onTrip` — the handler that fires when the fail-safe returns Chrome to a direct
+connection — created a notification with `iconUrl: 'icon-128.png'`. That file
+has never existed. `git log -S` finds the string introduced in Sprint 5 and
+`git log --diff-filter=A` finds no icon ever added, because the extension had no
+artwork at all: no `icons` key in the manifest, no `action.default_icon`, no
+`public/` directory. Chrome had been drawing the generic grey puzzle piece for
+eighteen sprints, and nobody had written it down as a defect.
+
+`chrome.notifications.create` rejects on an `iconUrl` it cannot fetch, so the
+notification never appeared. The call sits inside a `try`/`catch` whose comment
+reads *"notifications permission is optional; the badge still reports it"* — a
+catch written for a permission that might be absent, quietly absorbing a bug
+that had nothing to do with permissions.
+
+**The shape of the mistake.** Two correct-looking things — a defensive catch and
+a plausible filename — combined into a feature that could never run and could
+never complain. The `notifications` permission is requested in the manifest and
+asserted by `manifest.test.ts`, so every test agreed the capability was there.
+Nothing asked whether the one call site could actually use it.
+
+This is lesson 5 from `CLAUDE.md` in a new place: a string naming a *shipped
+file*, checked by nothing. `build-inputs.test.ts` now reads the `iconUrl` out of
+the worker's source and asserts the file is in `public/`, alongside the same
+check for every path in `manifest.icons` and `action.default_icon`, and for the
+artwork `icon.ts` fetches at runtime.

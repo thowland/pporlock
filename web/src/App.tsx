@@ -26,6 +26,8 @@ import { SessionsView } from './components/sessions/SessionsView';
 import { SessionBrowser } from './components/sessions/SessionBrowser';
 import { DryRunView } from './components/sessions/DryRunView';
 import { SettingsView } from './components/settings/SettingsView';
+import { AboutView } from './components/help/AboutView';
+import { HelpView } from './components/help/HelpView';
 import { useDaemonState } from './hooks/useDaemonState';
 import { useFlows } from './hooks/useFlows';
 import { useHashRoute, type Route } from './lib/router';
@@ -36,6 +38,7 @@ const NAV: { route: Route; label: string }[] = [
   { route: { view: 'profiles' }, label: 'Profiles' },
   { route: { view: 'sessions' }, label: 'Sessions' },
   { route: { view: 'settings' }, label: 'Settings' },
+  { route: { view: 'help' }, label: 'Help' },
 ];
 
 /** Which nav item is highlighted for a route that has no nav item of its own. */
@@ -49,6 +52,11 @@ const NAV_GROUP: Record<Route['view'], Route['view']> = {
   session: 'sessions',
   dryrun: 'sessions',
   settings: 'settings',
+  help: 'help',
+  // About has no nav item of its own — it hangs off Help, which is where
+  // someone looking for it would go. One more top-level tab to hold a licence
+  // would cost the nav more than it is worth.
+  about: 'help',
 };
 
 export function App({ api }: { api: ApiClient }) {
@@ -203,6 +211,10 @@ export function App({ api }: { api: ApiClient }) {
         );
       case 'settings':
         return <SettingsView api={api} />;
+      case 'help':
+        return <HelpView onAbout={() => navigate({ view: 'about' })} />;
+      case 'about':
+        return <AboutView state={state} onHelp={() => navigate({ view: 'help' })} />;
       case 'newrule':
         // Deep-linking here without a rule in hand is meaningless, so it falls
         // back to the view the rule would have come from.

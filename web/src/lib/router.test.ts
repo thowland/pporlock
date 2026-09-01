@@ -92,3 +92,23 @@ describe('session and settings routes  # REQ WUI-010, WUI-011', () => {
     }
   });
 });
+
+describe('help and about  # the routes the extension links into', () => {
+  it('parses both', () => {
+    expect(parseRoute('#/help')).toEqual({ view: 'help' });
+    expect(parseRoute('#/about')).toEqual({ view: 'about' });
+  });
+
+  it('round-trips both through the hash', () => {
+    // These two are a contract, not just internal navigation: the extension's
+    // about page links to `#/help` and `#/about` from a separately-built
+    // artefact, so renaming either breaks a build nothing here compiles.
+    for (const route of [{ view: 'help' }, { view: 'about' }] as Route[]) {
+      expect(parseRoute(routeToHash(route))).toEqual(route);
+    }
+  });
+
+  it('still falls back to traffic for a hash near but not equal to them', () => {
+    expect(parseRoute('#/helping')).toEqual({ view: 'traffic' });
+  });
+});

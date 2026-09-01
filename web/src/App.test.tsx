@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
@@ -223,5 +223,44 @@ describe('App — sessions, dry run and settings  # REQ WUI-010, WUI-011, CAP-04
     await userEvent.click(await screen.findByRole('tab', { name: 'request' }));
     await waitFor(() => expect(screen.getByText(/142 bytes/)).toBeTruthy());
     expect(screen.queryByRole('button', { name: /^Reveal / })).toBeNull();
+  });
+});
+
+describe('help and about  # REQ DOC-*', () => {
+  it('reaches help from the nav', async () => {
+    render(<App api={api()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Help' }));
+    expect(window.location.hash).toBe('#/help');
+    expect(await screen.findByRole('heading', { name: 'Extension error states' })).toBeTruthy();
+  });
+
+  it('reaches about from help, and keeps Help highlighted while there', async () => {
+    render(<App api={api()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Help' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'About pporlock' }));
+    expect(window.location.hash).toBe('#/about');
+    // About has no nav item of its own; leaving nothing highlighted would make
+    // the whole nav look inactive.
+    const nav = screen.getByRole('navigation', { name: 'Views' });
+    expect(within(nav).getByRole('button', { name: 'Help' }).getAttribute('aria-current')).toBe(
+      'page',
+    );
+  });
+
+  it('opens about directly from a deep link, which is what the extension does', async () => {
+    // The extension's about page links to `${controlOrigin}/#/about` from a
+    // separately-built artefact. Reaching it by hash rather than by clicking is
+    // the path that actually ships.
+    window.location.hash = '#/about';
+    render(<App api={api()} />);
+    expect(await screen.findByRole('heading', { name: 'Source and licence' })).toBeTruthy();
+  });
+
+  it('shows the daemon version it is actually connected to', async () => {
+    window.location.hash = '#/about';
+    render(<App api={api()} />);
+    // "Which version are you on" is the first question of every diagnosis
+    // (OI-25), and this is the page that answers it.
+    expect(await screen.findByText('0.1.0')).toBeTruthy();
   });
 });

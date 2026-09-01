@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { describeError } from '../shared/errors';
+import { ABOUT_PAGE } from '../shared/about';
 import type { ActionReply, StatusReply } from '../shared/messages';
 import type { Message } from '../shared/messages';
 
@@ -386,6 +387,16 @@ export function Popup() {
           onClick={() => void chrome.tabs.create({ url: state.controlOrigin })}
         >
           open web UI
+        </button>
+        {/* A tab, not an expansion of this popup: the popup earns its keep by
+            staying one glance tall, and licence text does not belong in a
+            control surface. */}
+        <button
+          type="button"
+          className="link"
+          onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL(ABOUT_PAGE) })}
+        >
+          about
         </button>
         <span className="spacer" />
         <span className="sub" title="extension version / daemon version">

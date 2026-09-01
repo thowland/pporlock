@@ -24,6 +24,9 @@ export default defineConfig({
       input: {
         options: 'src/popup/options.html',
         panel: 'src/devtools/panel.html',
+        // Reached only through chrome.runtime.getURL() in Popup.tsx — the same
+        // kind of string-only reference that lost panel.html (OI-28).
+        about: 'src/popup/about.html',
       },
     },
   },

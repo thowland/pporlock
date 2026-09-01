@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Popup } from './Popup';
+import { ABOUT_PAGE } from '../shared/about';
 import { DEFAULT_STATE, type DurableState } from '../shared/state';
 import type { StatusReply } from '../shared/messages';
 
@@ -29,7 +30,10 @@ let sendMessage: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   sendMessage = vi.fn().mockResolvedValue(status());
   vi.stubGlobal('chrome', {
-    runtime: { sendMessage },
+    runtime: {
+      sendMessage,
+      getURL: (path: string) => `chrome-extension://pporlock/${path}`,
+    },
     tabs: {
       query: vi.fn().mockResolvedValue([{ url: 'https://cdn.example.com/x' }]),
       create: vi.fn(),
@@ -236,6 +240,21 @@ describe('Popup', () => {
       chrome: { tabs: { create: ReturnType<typeof vi.fn> } };
     };
     expect(chromeStub.chrome.tabs.create).toHaveBeenCalled();
+  });
+
+  it('opens the about page in a tab of its own', async () => {
+    // A tab rather than an expansion of the popup: the popup is only useful
+    // while it stays one glance tall, and it is reached through
+    // chrome.runtime.getURL — a string, so nothing else can check it exists.
+    sendMessage.mockResolvedValue(status({}, { paired: true }));
+    render(<Popup />);
+    await userEvent.click(await screen.findByText('about'));
+    const chromeStub = globalThis as unknown as {
+      chrome: { tabs: { create: ReturnType<typeof vi.fn> } };
+    };
+    expect(chromeStub.chrome.tabs.create).toHaveBeenCalledWith({
+      url: `chrome-extension://pporlock/${ABOUT_PAGE}`,
+    });
   });
 });
 

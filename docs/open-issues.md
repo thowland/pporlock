@@ -1291,7 +1291,8 @@ alongside the others.
 ## OI-36 — the daemon exhausts its file descriptors during ordinary browsing
 
 **Found:** while confirming OI-35, when an *authenticated* export also failed.
-**OPEN.**
+**CLOSED** (the daemon raises its own limit, launchd is told to as well, and
+`doctor` reports the headroom).
 
 `GET /sessions/<id>/export` returned 500 with `sqlite3.OperationalError: unable
 to open database file`, from `_connect` in `capture/session.py`. The file was
@@ -1318,9 +1319,52 @@ will be intermittent, will clear on restart, and will produce error messages
 that describe SQLite rather than the cause — which is the shape of a bug that
 gets diagnosed as something else entirely.
 
-Closing it needs three things, and none is large: raise `RLIMIT_NOFILE` at
-startup to `min(hard, a few thousand)`; add `SoftResourceLimits` to the plist so
-a launchd-started daemon does not depend on that; and report the headroom in
-`pporlock doctor`, because "how close am I" should be answerable before the
-failure rather than after. A test can drive it deterministically by starting a
-daemon under `ulimit -n 256` and opening connections until it breaks.
+All three were done. `limits.py` raises `RLIMIT_NOFILE` toward 8192 as the
+first thing `run_foreground` does — before anything opens a socket or a
+database — and falls back down a ladder rather than giving up, because macOS
+caps a process at `kern.maxfilesperproc` whatever the hard limit says and
+refuses outright above it. Accepting that refusal would have left the daemon on
+256 because 8192 was ambitious, which is the bug wearing a different hat. It
+never raises: a daemon that cannot lift its limit is the daemon we shipped until
+now, and refusing to start would trade a degraded proxy for no proxy.
+
+The plist gets `SoftResourceLimits: {NumberOfFiles: 8192}` as well, and the
+redundancy is deliberate: the plist covers the daemon launchd restarts after a
+crash, before any of our code runs, and the startup raise covers every way of
+starting it that is not launchd at all.
+
+`doctor` gains an eighteenth check. It asks the *daemon* through `/metrics`
+rather than measuring itself — they are different processes with different
+limits, and `doctor` run from a shell inherits the shell's while the daemon
+inherits launchd's. Reporting the wrong one would be comfort the daemon does not
+have. `/metrics` is inline-classified and may only read memory, so the reading
+is taken by a background task on the executor and cached; counting descriptors
+is a directory listing (REQ DD-3).
+
+**Two things the demonstration taught, both worth keeping.**
+
+First, `ulimit -n 256` was the wrong harness and it produced a *convincing*
+wrong answer. It lowers the hard limit too, and no unprivileged process can
+raise that — so the daemon correctly reported it could not lift itself, and the
+run looked like a failing fix rather than a failing test. launchd's actual shape
+is soft 256, hard unlimited: `ulimit -S -n 256`.
+
+Second, and worse: **`uv run` raises the soft limit to 1048576 itself.** Every
+test of this from inside the repo therefore runs with a limit the shipped daemon
+does not have, and would have shown headroom that does not exist. The installed
+`pporlock` binary — the one the user actually runs — gets no such favour. It is
+the same shape as lesson 5 in CLAUDE.md: the environment the tests run in was
+not the environment that ships. Verified against `~/.local/bin/pporlock` under
+soft 256:
+
+    files:      8192 descriptors (raised from 256)
+    /metrics    {'soft': 8192, 'hard': None, 'open': 7, 'pressure': 0.001}
+
+**A refactor the tests forced.** Both periodic jobs were started inline in
+`_run`, a coroutine no test can reach without a mitmproxy master, so "the daemon
+runs this" was an unverifiable claim — and the first version of the sampler test
+proved it by calling the coroutine directly and passing happily while the runner
+never created it. They now come from `start_background_tasks`, which a test can
+call and count. The pre-existing log-rotation guard read `_run`'s source for
+`rotate_logs_forever`; it was updated rather than deleted (G4), and now asserts
+that `_run` reaches the task list and that rotation is still in it.

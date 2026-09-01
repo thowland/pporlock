@@ -18,6 +18,7 @@ from typing import Literal
 
 from ..config import Config
 from ..engine.exclusions import load_exclusions
+from ..limits import DESIRED_NOFILE, PRESSURE_WARN
 from . import certs
 
 Level = Literal["pass", "warn", "fail"]
@@ -504,6 +505,80 @@ def _fix_launchd(config: Config) -> None:
     launchd.install(auto_start=True, log_dir=logs_mod.log_dir(config.logging.dir))
 
 
+def check_descriptor_headroom(config: Config) -> CheckResult:
+    """Is the running daemon anywhere near its descriptor ceiling? (OI-36)
+
+    Asked of the daemon rather than of this process, because they are different
+    processes with different limits: `doctor` run from a shell inherits the
+    shell's, while the daemon inherits launchd's 256 unless it raised its own.
+    Checking the wrong one would report comfort the daemon does not have.
+
+    The first symptom of running out is not "out of descriptors" — it is a
+    session export failing with `sqlite3.OperationalError: unable to open
+    database file`, on a file that is present and readable. This check exists so
+    that question is answerable before the failure rather than after.
+    """
+    from .client import ControlClient
+
+    client = ControlClient(config)
+    if not client.reachable():
+        return CheckResult(
+            "descriptor_headroom",
+            "File descriptor headroom",
+            "warn",
+            "cannot tell — the daemon is not running",
+            "Start the daemon and re-run doctor.",
+        )
+    try:
+        metrics = client.get("/metrics")
+    except Exception as exc:
+        return CheckResult("descriptor_headroom", "File descriptor headroom", "warn", str(exc))
+
+    raw = metrics.get("descriptors") if isinstance(metrics, dict) else None
+    if not isinstance(raw, dict):
+        # Either the first sample has not landed yet, or the daemon predates
+        # this. Both are "unknown", and neither is worth failing over.
+        return CheckResult(
+            "descriptor_headroom",
+            "File descriptor headroom",
+            "warn",
+            "the daemon reported no descriptor sample",
+            "If it has been up more than a minute, it is older than this check.",
+        )
+
+    soft = int(raw.get("soft") or 0)
+    open_count = raw.get("open")
+    if not isinstance(open_count, int):
+        return CheckResult(
+            "descriptor_headroom",
+            "File descriptor headroom",
+            "warn",
+            f"soft limit {soft}, open count unavailable on this platform",
+        )
+
+    used = open_count / soft if soft else 1.0
+    detail = f"{open_count} of {soft} descriptors in use ({used:.0%})"
+
+    if soft < DESIRED_NOFILE:
+        return CheckResult(
+            "descriptor_headroom",
+            "File descriptor headroom",
+            "warn",
+            f"{detail} — the daemon could not raise its soft limit to {DESIRED_NOFILE}",
+            "Restart the daemon. If it persists, check `launchctl limit maxfiles`.",
+        )
+    if used >= PRESSURE_WARN:
+        return CheckResult(
+            "descriptor_headroom",
+            "File descriptor headroom",
+            "warn",
+            f"{detail} — close to the ceiling",
+            "Restart the daemon to clear held connections, and report it: at the "
+            "ceiling, anything that opens a file fails in that subsystem's words.",
+        )
+    return CheckResult("descriptor_headroom", "File descriptor headroom", "pass", detail)
+
+
 CHECKS: list[Check] = [
     Check("mitmproxy_present", "mitmproxy importable", check_mitmproxy),
     Check("config_valid", "Configuration is valid", check_config_valid),
@@ -529,6 +604,7 @@ CHECKS: list[Check] = [
     Check("daemon_reachable", "Daemon reachable", check_daemon_reachable),
     Check("extension_paired", "Extension paired", check_extension_paired),
     Check("disk_space", "Disk space", check_disk_space),
+    Check("descriptor_headroom", "File descriptor headroom", check_descriptor_headroom),
 ]
 
 #: Checks whose fix `--fix` runs without being asked. Everything else needs a

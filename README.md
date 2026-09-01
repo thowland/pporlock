@@ -141,7 +141,7 @@ Load `extension/dist/` unpacked at `chrome://extensions`, then:
 ```bash
 pporlock run          # leave running
 pporlock pair         # prints a code; type it into the popup
-pporlock doctor       # 17 checks
+pporlock doctor       # 18 checks
 ```
 
 ---

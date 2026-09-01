@@ -77,6 +77,24 @@ class TestPlist:
         assert data["KeepAlive"] == {"SuccessfulExit": False}
         assert data["ThrottleInterval"] == launchd.THROTTLE_INTERVAL_S
 
+    def test_the_agent_gets_descriptor_headroom(self) -> None:
+        """OI-36. launchd hands an agent macOS's 256-descriptor soft limit, and
+        an interception proxy holding two per flow exhausts that during ordinary
+        browsing — at which point everything that opens a file fails in the
+        words of whatever tried to open it.
+
+        Belt and braces with the raise in `run_foreground`, deliberately: the
+        plist covers the daemon launchd restarts after a crash, before any of
+        our code runs, and the startup raise covers every way of starting it
+        that is not launchd.
+        """
+        from pporlock.limits import DESIRED_NOFILE
+
+        limits = launchd.plist_dict()["SoftResourceLimits"]
+        assert isinstance(limits, dict)
+        assert limits["NumberOfFiles"] == DESIRED_NOFILE
+        assert DESIRED_NOFILE > 256
+
     def test_keepalive_is_not_a_bare_true(self) -> None:
         """A bare `KeepAlive: true` restarts the agent after a deliberate stop,
         which makes `pporlock stop` a command that does not stop anything."""

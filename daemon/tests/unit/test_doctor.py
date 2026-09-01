@@ -266,3 +266,69 @@ class TestCerts:
     ) -> None:
         monkeypatch.setattr(certs, "CA_CERT", tmp_path / "nope.pem")
         certs.remove_trust()
+
+
+class TestDescriptorHeadroom:
+    """OI-36. Whether the daemon is near its descriptor ceiling.
+
+    Asked of the *daemon*, not of this process: `doctor` run from a shell
+    inherits the shell's limit while the daemon inherits launchd's 256 unless it
+    raised its own. Checking the wrong process would report comfort the daemon
+    does not have, which is worse than not checking.
+    """
+
+    def _client(
+        self, monkeypatch: pytest.MonkeyPatch, payload: object, *, reachable: bool = True
+    ) -> None:
+        from pporlock.cli import client as client_mod
+
+        monkeypatch.setattr(client_mod.ControlClient, "reachable", lambda _self: reachable)
+        monkeypatch.setattr(
+            client_mod.ControlClient, "get", lambda _self, _path: {"descriptors": payload}
+        )
+
+    def test_passes_with_headroom(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._client(monkeypatch, {"soft": 8192, "hard": 8192, "open": 120, "pressure": 0.015})
+        result = doctor.check_descriptor_headroom(Config())
+        assert result.level == "pass"
+        assert "120 of 8192" in result.message
+
+    def test_warns_at_the_pressure_that_actually_broke_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The measured failure: 247 of 256, and every session export 500ing
+        with SQLite's message for EMFILE."""
+        self._client(monkeypatch, {"soft": 256, "hard": 256, "open": 247, "pressure": 0.965})
+        result = doctor.check_descriptor_headroom(Config())
+        assert result.level == "warn"
+        assert "247 of 256" in result.message
+
+    def test_warns_when_the_daemon_could_not_raise_its_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A daemon still on 256 is one restart away from the same failure even
+        while it is idle, so idleness must not read as health."""
+        self._client(monkeypatch, {"soft": 256, "hard": 256, "open": 12, "pressure": 0.047})
+        result = doctor.check_descriptor_headroom(Config())
+        assert result.level == "warn"
+        assert "could not raise" in result.message
+
+    def test_says_it_cannot_tell_rather_than_guessing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._client(monkeypatch, None, reachable=False)
+        assert doctor.check_descriptor_headroom(Config()).level == "warn"
+
+    def test_tolerates_a_daemon_that_has_no_sample_yet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The first sample lands a moment after startup, and an older daemon
+        never sends one. Neither is worth failing over."""
+        self._client(monkeypatch, None)
+        result = doctor.check_descriptor_headroom(Config())
+        assert result.level == "warn"
+        assert "no descriptor sample" in result.message
+
+    def test_is_registered_so_doctor_actually_runs_it(self) -> None:
+        """A check nobody registered is a function, not a check."""
+        assert "descriptor_headroom" in {c.check_id for c in doctor.CHECKS}

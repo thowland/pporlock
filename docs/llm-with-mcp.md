@@ -31,7 +31,7 @@ package and opens no database — if the daemon is down, every tool fails with
 
 ```bash
 pporlock run        # leave it running
-pporlock doctor     # 17 checks; fix anything failing before involving an agent
+pporlock doctor     # 18 checks; fix anything failing before involving an agent
 ```
 
 ### Registering the server

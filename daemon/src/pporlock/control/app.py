@@ -56,6 +56,7 @@ from ..errors import (
     RuleValidationError,
     SessionError,
 )
+from ..limits import DescriptorUsage
 from ..version import VERSION
 from .audit import AuditLog
 from .auth import (
@@ -339,6 +340,12 @@ class ControlApp:
         self.config = config
         self.ring = ring
         self.interceptor = interceptor
+        # The last descriptor-pressure reading (OI-36). Written by the runner's
+        # sampler, off the event loop; this route may only read memory, and
+        # counting open descriptors is a directory listing. None until the first
+        # sample lands, and `/metrics` says so rather than reporting a zero that
+        # would read as "no descriptors open".
+        self.descriptors: DescriptorUsage | None = None
         # Both optional: the CLI wires them, but a daemon with no module root —
         # and every test that only cares about flows — is a legitimate state,
         # and the module routes answer "nothing here" rather than failing.
@@ -934,6 +941,10 @@ class ControlApp:
             {
                 "ring": stats.to_dict(),
                 "counters": counters,
+                # OI-36. The daemon runs out of these before it runs out of
+                # anything else, and every failure that follows is reported in
+                # the vocabulary of whatever tried to open a file.
+                "descriptors": None if self.descriptors is None else self.descriptors.to_dict(),
                 # An expensive module should be identifiable rather than merely
                 # suspected, so this is ordered most-expensive first and carries
                 # max alongside mean: a module that is slow on one page and fast

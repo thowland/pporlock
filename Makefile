@@ -56,7 +56,11 @@ help:
 
 # ---------------------------------------------------------------- version ---
 # One source of truth: the VERSION file. Everything else is generated from it
-# and `version-check` fails the gate on drift (OI-25).
+# and `version-check` fails the gate on drift (OI-25) — which it does since
+# OI-38, when it turned out `gate` had never invoked it.
+#
+# The copyright year rides along: it is written into two `about.ts` constants
+# and the README, one of which nothing else in the build ever looks at.
 .PHONY: version
 version:
 	@python3 scripts/version.py show
@@ -269,7 +273,9 @@ security:
 
 # -------------------------------------------------------------- the gate ---
 .PHONY: gate
-gate: lint test coverage security
+# version-check is first because it is the cheapest and because the comment
+# above claimed for four releases that it ran here, and it did not (OI-38).
+gate: version-check lint test coverage security
 	@echo ""
 	@echo "======================================================================"
 	@echo " GATE PASS — G2, G3, G5, G6 automated checks clean."

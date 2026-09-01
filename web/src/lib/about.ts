@@ -15,7 +15,7 @@ export const HOMEPAGE = 'https://github.com/thowland/pporlock';
 export const ISSUES = `${HOMEPAGE}/issues`;
 export const LICENSE = 'GPL-3.0-or-later';
 export const LICENSE_URL = 'https://www.gnu.org/licenses/gpl-3.0.html';
-export const COPYRIGHT = '© 2025 Tim Howland';
+export const COPYRIGHT = '© 2026 Tim Howland';
 
 export const SUMMARY =
   'pporlock is a local HTTPS interception proxy for a single machine. It decrypts, ' +

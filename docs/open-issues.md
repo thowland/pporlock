@@ -1403,3 +1403,42 @@ file*, checked by nothing. `build-inputs.test.ts` now reads the `iconUrl` out of
 the worker's source and asserts the file is in `public/`, alongside the same
 check for every path in `manifest.icons` and `action.default_icon`, and for the
 artwork `icon.ts` fetches at runtime.
+
+---
+
+## OI-38 — `make gate` never ran `version-check`
+
+**Found:** while making the copyright year self-maintaining, reading the
+Makefile to decide where the new check should hang.
+**CLOSED** (`gate` now depends on `version-check`, and a test asserts it does).
+
+The comment above the version targets said:
+
+> One source of truth: the VERSION file. Everything else is generated from it
+> and `version-check` fails the gate on drift (OI-25).
+
+`CLAUDE.md` repeated the claim in its Versioning section. Both were false.
+`gate` was `lint test coverage security` and nothing else; `version-check`
+appeared nowhere in `gate`, in anything `gate` depends on, in the pre-commit
+hook, or in CI. The only way it had ever run was by hand.
+
+It happened not to matter, because `make bump-minor` / `bump-patch` call `sync`
+directly and nobody had hand-edited a version — the failure this guard exists to
+catch had not occurred in the four releases since OI-25 introduced it. That is
+luck, not evidence: OI-25's entire finding was that nine version declarations
+had sat at 0.1.0 for eighteen sprints *because nothing checked them*, and the
+fix reproduced the same gap one level up.
+
+**The shape of the mistake.** A guard was written, documented in two places as
+being enforced, and never wired to the thing that enforces. It is OI-11 again —
+"the running daemon did not build what the sprints delivered" — in the build
+system rather than the product: a complete, correct mechanism that nothing
+constructs.
+
+The corollary the project already had covers this and was not applied: *a guard
+you have not watched fail is not a guard.* Watching `version-check` fail would
+have required running it, and running it would have shown that the gate did not.
+
+`test_version_script.py::test_the_gate_actually_runs_version_check` reads the
+`gate:` line out of the Makefile. It is a crude test of a build file, and it is
+the only kind that can see this.

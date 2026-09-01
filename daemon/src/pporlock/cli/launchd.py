@@ -29,6 +29,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..limits import DESIRED_NOFILE
+
 LABEL = "com.pporlock.daemon"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LABEL}.plist"
@@ -156,6 +158,13 @@ def plist_dict(
         # asks the scheduler to deprioritise it and shows up as latency on every
         # intercepted request.
         "ProcessType": "Interactive",
+        # OI-36. launchd hands an agent macOS's 256-descriptor soft limit, and
+        # an interception proxy holding two per flow exhausts that during
+        # ordinary browsing. The daemon also raises this itself at startup —
+        # both, because the plist covers a daemon launchd restarts after a
+        # crash before any of our code runs, and the startup raise covers every
+        # way of starting it that is not launchd at all.
+        "SoftResourceLimits": {"NumberOfFiles": DESIRED_NOFILE},
         "EnvironmentVariables": {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
         },

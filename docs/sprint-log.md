@@ -1857,3 +1857,46 @@ The new `rejected` failure kind is narrow on purpose: 401 and 403 only. A 5xx
 still trips the fail-safe as it always did, with a test that fails if that is
 ever widened, because a fail-safe that has been quietly taught to forgive is
 worse than none.
+
+## OI-35 / OI-36 — an export that could never work, and the ceiling under it
+
+A user reported "file was not available on the site" on session export. Two
+unrelated bugs sat on top of each other, and the second was only visible because
+fixing the first stopped hiding it.
+
+OI-35 is OI-30 again: an `<a href download>` cannot carry an Authorization
+header. Worth recording is not the fix but what the suite was doing. A test
+asserted `har.getAttribute('href')` contained `format=har` — it pinned the
+mechanism, and the mechanism was the defect, so it passed for the life of the
+project while the feature was entirely broken. **A test written against how a
+thing is built cannot notice that it does not work.** No e2e touched export
+either, which is the only place a download can be observed at all.
+
+OI-36 was underneath: the daemon accepted whatever descriptor limit it was
+launched with, and macOS gives a launchd agent 256. An interception proxy holds
+two per flow. At the ceiling every open fails in the words of whatever tried to
+open it — here, `sqlite3.OperationalError: unable to open database file` on a
+file that was present and readable. Measured: 247 of 256 and ten failures out of
+ten; 34 after a restart and a 1.27 MB export.
+
+Two things from demonstrating it are worth more than the fix.
+
+**The first harness gave a convincing wrong answer.** `ulimit -n 256` lowers the
+hard limit too, which no unprivileged process can raise, so the daemon correctly
+reported it could not lift itself and the run read as a failing fix. launchd's
+real shape is soft 256, hard unlimited.
+
+**`uv run` raises the soft limit to 1048576 itself.** Every test of this from
+inside the repo runs with headroom the shipped daemon does not have. That is
+lesson 5 again — a test that reads the working tree cannot tell you what you
+shipped — in a new place: the environment the tests run in was not the
+environment that ships. It was only caught by running `~/.local/bin/pporlock`,
+the binary a user actually invokes.
+
+The tests also forced a refactor worth keeping. Both periodic jobs were started
+inline in `_run`, which no test can reach without a mitmproxy master, so "the
+daemon runs this" was unverifiable — and the first sampler test proved the point
+by calling the coroutine directly and passing while the runner created nothing.
+They now come from `start_background_tasks`, which a test can call and count.
+That is the same move the extension's action layer needed a release earlier, and
+for the same reason.

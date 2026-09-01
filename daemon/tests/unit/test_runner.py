@@ -15,6 +15,11 @@ import pytest
 from pporlock.cli.runner import ConsoleSink, emit, run_foreground
 from pporlock.config import Config
 from pporlock.engine.provenance import NoteCode, ProvenanceBuilder
+from pporlock.limits import FileLimit
+
+#: A raise that succeeded, for the wiring test — which is about whether the
+#: runner calls it, not about what it returns.
+_FAKE_LIMIT = FileLimit(soft=8192, hard=8192, was=256, detail="raised from 256")
 
 
 def make_request(**kwargs: Any) -> Any:
@@ -167,6 +172,70 @@ class TestStartupWiring:
         directory = root / name
         directory.mkdir(parents=True)
         (directory / "module.yaml").write_text(body)
+
+    def test_run_foreground_raises_the_descriptor_limit_before_anything_opens(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OI-36. The raise has to happen in the daemon, not merely exist.
+
+        `limits.py` could be complete, correct and fully tested while
+        `run_foreground` never called it — the exact gap this class exists for,
+        and the one that cost two sprints in the module system. It also has to
+        happen *before* `asyncio.run`, because by then the control server has a
+        socket and the session store may have a database.
+        """
+        from pporlock.cli import runner
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            runner, "raise_file_limit", lambda: order.append("raised") or _FAKE_LIMIT
+        )
+        monkeypatch.setattr(
+            runner, "build_evaluator", lambda _c: (None, None, None, None, None, None)
+        )
+
+        def fake_run(coro: Any) -> int:
+            coro.close()
+            order.append("ran")
+            return 0
+
+        monkeypatch.setattr(runner.asyncio, "run", fake_run)
+
+        assert runner.run_foreground(self._config(tmp_path), quiet=True) == 0
+        assert order == ["raised", "ran"]
+
+    def test_the_daemon_starts_the_descriptor_sampler(self, tmp_path: Any) -> None:
+        """OI-36. `/metrics` may only read memory, so the descriptor reading is
+        taken by a background task and cached — and a task nobody starts caches
+        nothing.
+
+        This asserts the *wiring*, not the coroutine: an earlier version of this
+        test called `sample_descriptors_forever` directly, and went on passing
+        when the runner was changed to never create it. That is precisely the
+        gap this class exists for, and it caught me writing it.
+        """
+        import asyncio
+
+        from pporlock.capture.ring import RingBuffer
+        from pporlock.cli.runner import start_background_tasks
+        from pporlock.control.app import ControlApp
+
+        control = ControlApp(self._config(tmp_path), ring=RingBuffer())
+        assert control.descriptors is None
+
+        async def start_and_wait() -> int:
+            tasks = start_background_tasks(control, self._config(tmp_path))
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if control.descriptors is not None:
+                    break
+            for task in tasks:
+                task.cancel()
+            return len(tasks)
+
+        assert asyncio.run(start_and_wait()) == 2
+        assert control.descriptors is not None
+        assert control.descriptors.soft > 0
 
     def test_the_runner_builds_a_module_registry(self, tmp_path: Any) -> None:
         """REQ MOD-001. Modules were loadable and reloadable through the API,
@@ -413,12 +482,22 @@ class TestStartupWiring:
 
         from pporlock.cli import runner
 
+        # `_run` needs a mitmproxy master to execute, so its scheduling is
+        # asserted by reading it. The list of jobs itself is no longer in here
+        # — it moved to `start_background_tasks`, which a test can actually
+        # call (see test_the_daemon_starts_the_descriptor_sampler) — so this
+        # only has to establish that `_run` still reaches it and still tears it
+        # down. That is the half a source read can honestly cover.
         source = inspect.getsource(runner._run)
-        assert "rotate_logs_forever" in source, (
-            "cli/runner._run does not schedule log rotation; REQ PXY-007 would "
-            "be implemented and never executed"
+        assert "start_background_tasks" in source, (
+            "cli/runner._run does not start its background tasks; REQ PXY-007 "
+            "log rotation would be implemented and never executed"
         )
-        assert "rotator.cancel()" in source, "the rotation task is never cancelled on shutdown"
+        assert "task.cancel()" in source, "the background tasks are never cancelled on shutdown"
+        assert any(
+            "rotate_logs_forever" in inspect.getsource(fn)
+            for fn in (runner.start_background_tasks,)
+        ), "log rotation is no longer one of the daemon's background tasks"
 
         # And the coroutine itself actually rotates, on the interval it is given.
         config = self._config(tmp_path)

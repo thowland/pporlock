@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .. import limits
 from ..addon.interceptor import Interceptor, NullSink
 from ..capture.ring import RingBuffer
 from ..capture.sink import RingSink
@@ -32,6 +33,7 @@ from ..engine.modules.state import STATE_FILENAME
 from ..engine.profiles import ProfileManager
 from ..engine.rules_file import load_rules_file
 from ..engine.ruleset import RuleSet
+from ..limits import DESIRED_NOFILE, raise_file_limit
 
 
 def _repo_web_dist() -> Path:
@@ -79,6 +81,10 @@ def web_assets_hint() -> str:
     )
 
 
+#: How often descriptor pressure is sampled. See `sample_descriptors_forever`.
+DESCRIPTOR_SAMPLE_INTERVAL_S = 60.0
+
+
 async def rotate_logs_forever(config: Config, *, interval: float | None = None) -> None:
     """Keep the daemon's own logs bounded while it runs (REQ PXY-007).
 
@@ -109,6 +115,46 @@ async def rotate_logs_forever(config: Config, *, interval: float | None = None) 
         )
         for path in rotated:
             emit(f"  rotated {path}")
+
+
+async def sample_descriptors_forever(control: ControlApp, *, interval: float | None = None) -> None:
+    """Keep `/metrics` supplied with a descriptor reading (OI-36).
+
+    `/metrics` is inline-classified: it may read memory and nothing else, so it
+    cannot count open descriptors itself — that is a directory listing (REQ
+    DD-3). The reading is taken here instead, on the executor, and cached on the
+    control app for the route to hand back.
+
+    A minute is the right cadence for a number that is a pressure indicator
+    rather than an alarm. Descriptors leak slowly or not at all; what changes
+    fast is in-flight connections, and a sample that lands mid-burst is more
+    misleading than one taken steadily.
+    """
+    every = DESCRIPTOR_SAMPLE_INTERVAL_S if interval is None else interval
+    loop = asyncio.get_running_loop()
+    while True:
+        control.descriptors = await loop.run_in_executor(None, limits.sample)
+        await asyncio.sleep(every)
+
+
+def start_background_tasks(control: ControlApp, config: Config) -> list[asyncio.Task[None]]:
+    """Every periodic job the daemon runs, in one place.
+
+    Not for tidiness. Both of these were started inline in `_run`, a coroutine
+    no test can reach without a mitmproxy master — so "the daemon runs this"
+    was an unverifiable claim, which is the shape of OI-11 and of the two
+    sprints whose module system the daemon never built. Enumerating them here
+    makes the claim a test (`test_runner.py::TestStartupWiring`).
+
+    Both must be started on the running loop rather than at import: a rotation
+    that only happens at startup does nothing for the uptime this daemon is
+    built for (REQ PXY-007), and a descriptor sample taken once says nothing
+    about pressure (OI-36).
+    """
+    return [
+        asyncio.create_task(rotate_logs_forever(config)),
+        asyncio.create_task(sample_descriptors_forever(control)),
+    ]
 
 
 def emit(line: str) -> None:
@@ -393,7 +439,7 @@ async def _run(
 
     # REQ PXY-007. Started here, on the running loop, because a rotation that
     # only runs at startup does nothing for the uptime this daemon is built for.
-    rotator = asyncio.create_task(rotate_logs_forever(config))
+    background = start_background_tasks(control, config)
 
     emit(f"pporlock proxy listening on {config.proxy.listen_host}:{config.proxy.listen_port}")
     from_profile = sum(1 for e in interceptor.exclusions.entries if e.source == "profile")
@@ -438,7 +484,8 @@ async def _run(
 
     await master.run()
 
-    rotator.cancel()
+    for task in background:
+        task.cancel()
 
     if interceptor.control_server is not None:
         await interceptor.control_server.stop()
@@ -452,8 +499,21 @@ async def _run(
 
 def run_foreground(config: Config, *, quiet: bool = False) -> int:
     sink: Any = ConsoleSink(quiet=quiet)
+    # Before anything opens a socket or a database (OI-36). macOS hands a
+    # launchd agent a soft limit of 256 descriptors, which an interception
+    # proxy holding two per flow exhausts during ordinary browsing — and the
+    # failures that follow are reported in the vocabulary of whatever tried to
+    # open a file, never as "out of descriptors".
+    file_limit = raise_file_limit()
     # Loaded before the loop exists, so no filesystem work lands on it.
     evaluator, registry, profiles, base_ruleset, rules_path, rules_error = build_evaluator(config)
+    if file_limit.raised:
+        emit(f"  files:      {file_limit.soft} descriptors ({file_limit.detail})")
+    elif file_limit.soft < DESIRED_NOFILE:
+        # Worth a line even though it is not fatal: it is the precondition for
+        # a class of failure that will otherwise be blamed on SQLite.
+        emit(f"  files:      {file_limit.soft} descriptors — {file_limit.detail}")
+
     try:
         return asyncio.run(
             _run(

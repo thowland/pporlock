@@ -1240,3 +1240,131 @@ itself leaves no persistent record on this side" and infers pairing from
 attribution counts. Since OI-19 the `paired-extension` sidecar exists and doctor
 could read it directly — it would have reported this install as unpaired
 outright.
+
+---
+
+## OI-35 — session export could never have worked
+
+**Found:** by a user, whose export produced Chrome's "file was not available on
+the site". **CLOSED** for the export link; a second bug it uncovered is
+recorded as OI-36 and is *not* fixed.
+
+Both export controls were `<a href download>`. A navigation carries no
+Authorization header, so the daemon answered 401 and Chrome rendered that as a
+download failure naming neither cause nor remedy. Verified against the running
+daemon: `GET /sessions/<id>/export?format=har` with no header is 401, with the
+bearer token it is a 1.27 MB HAR.
+
+**This is OI-30 exactly, one component over.** The module report link was the
+same anchor making the same mistake, and its fix — fetch with the header the UI
+already holds, render the result yourself — is the fix here too, with a blob and
+a synthetic click instead. Putting the token in the URL "fixes" it and is
+forbidden (SPEC-0 §9): the URL reaches history, referrers and the audit log.
+
+**A test asserted the bug.** `SessionsView.test.tsx` contained:
+
+    const har = await screen.findByRole('link', { name: 'Export HAR' });
+    expect(har.getAttribute('href')).toContain('format=har');
+
+It passed for the life of the project. It asserted the *mechanism* — that the
+control is an anchor with an href — and the mechanism was the defect. A test
+written against how a thing is built cannot notice that it does not work. It is
+replaced (G4) by tests that assert what the user gets: that clicking calls the
+client, that no anchor is offered, and that a failure is reported rather than
+swallowed. One of them fails if either control becomes a link again.
+
+**No e2e touched export**, which is where a browser would have caught it in
+minutes — only a browser can say whether a download happened.
+`e2e/web/session-export.spec.ts` now clicks both buttons against a real daemon
+and asserts a file arrives with bytes in it. Watched failing: restoring the
+anchor fails it, with the 401 in the alert region rather than a bare timeout.
+
+The lesson is the one already at the top of CLAUDE.md, and this is its fifth
+instance: **the tests agreed with the client, and the client was wrong.** Every
+unit test here stubbed `ApiClient`, so they all agreed a link was enough. The
+guard that would have caught it is the one from OI-16 — stub `fetch`, not your
+own client — and the export request is now pinned in `wire-shapes.test.ts`
+alongside the others.
+
+---
+
+## OI-36 — the daemon exhausts its file descriptors during ordinary browsing
+
+**Found:** while confirming OI-35, when an *authenticated* export also failed.
+**CLOSED** (the daemon raises its own limit, launchd is told to as well, and
+`doctor` reports the headroom).
+
+`GET /sessions/<id>/export` returned 500 with `sqlite3.OperationalError: unable
+to open database file`, from `_connect` in `capture/session.py`. The file was
+present and readable; SQLite reports EMFILE with that message.
+
+Measured on the running daemon:
+
+| open file descriptors | export |
+|---|---|
+| 247 | 500, ten times out of ten |
+| 34, after a restart | 200, 1.27 MB |
+
+221 of those were sockets — an HTTPS interception proxy holds a client and a
+server connection per flow, and a browsing session reaches a few hundred without
+trying. `launchctl limit maxfiles` on macOS is **256 soft**, and nothing in the
+daemon raises it: there is no `setrlimit` anywhere in `daemon/src`, and
+`cli/launchd.py::plist_dict` writes no `SoftResourceLimits`/`NumberOfFiles`. So
+a daemon started by the supported path — `pporlock install`, then launchd —
+inherits 256 and will hit this.
+
+**Export is only the most visible casualty.** Anything that opens a file at the
+ceiling fails the same way: session writes, module reload, the CA. The failures
+will be intermittent, will clear on restart, and will produce error messages
+that describe SQLite rather than the cause — which is the shape of a bug that
+gets diagnosed as something else entirely.
+
+All three were done. `limits.py` raises `RLIMIT_NOFILE` toward 8192 as the
+first thing `run_foreground` does — before anything opens a socket or a
+database — and falls back down a ladder rather than giving up, because macOS
+caps a process at `kern.maxfilesperproc` whatever the hard limit says and
+refuses outright above it. Accepting that refusal would have left the daemon on
+256 because 8192 was ambitious, which is the bug wearing a different hat. It
+never raises: a daemon that cannot lift its limit is the daemon we shipped until
+now, and refusing to start would trade a degraded proxy for no proxy.
+
+The plist gets `SoftResourceLimits: {NumberOfFiles: 8192}` as well, and the
+redundancy is deliberate: the plist covers the daemon launchd restarts after a
+crash, before any of our code runs, and the startup raise covers every way of
+starting it that is not launchd at all.
+
+`doctor` gains an eighteenth check. It asks the *daemon* through `/metrics`
+rather than measuring itself — they are different processes with different
+limits, and `doctor` run from a shell inherits the shell's while the daemon
+inherits launchd's. Reporting the wrong one would be comfort the daemon does not
+have. `/metrics` is inline-classified and may only read memory, so the reading
+is taken by a background task on the executor and cached; counting descriptors
+is a directory listing (REQ DD-3).
+
+**Two things the demonstration taught, both worth keeping.**
+
+First, `ulimit -n 256` was the wrong harness and it produced a *convincing*
+wrong answer. It lowers the hard limit too, and no unprivileged process can
+raise that — so the daemon correctly reported it could not lift itself, and the
+run looked like a failing fix rather than a failing test. launchd's actual shape
+is soft 256, hard unlimited: `ulimit -S -n 256`.
+
+Second, and worse: **`uv run` raises the soft limit to 1048576 itself.** Every
+test of this from inside the repo therefore runs with a limit the shipped daemon
+does not have, and would have shown headroom that does not exist. The installed
+`pporlock` binary — the one the user actually runs — gets no such favour. It is
+the same shape as lesson 5 in CLAUDE.md: the environment the tests run in was
+not the environment that ships. Verified against `~/.local/bin/pporlock` under
+soft 256:
+
+    files:      8192 descriptors (raised from 256)
+    /metrics    {'soft': 8192, 'hard': None, 'open': 7, 'pressure': 0.001}
+
+**A refactor the tests forced.** Both periodic jobs were started inline in
+`_run`, a coroutine no test can reach without a mitmproxy master, so "the daemon
+runs this" was an unverifiable claim — and the first version of the sampler test
+proved it by calling the coroutine directly and passing happily while the runner
+never created it. They now come from `start_background_tasks`, which a test can
+call and count. The pre-existing log-rotation guard read `_run`'s source for
+`rotate_logs_forever`; it was updated rather than deleted (G4), and now asserts
+that `_run` reaches the task list and that rotation is still in it.

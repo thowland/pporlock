@@ -261,6 +261,30 @@ class TestOtherRoutes:
     def test_metrics(self, client: TestClient, token: str) -> None:
         assert "ring" in client.get("/metrics", headers=auth(token)).json()
 
+    def test_metrics_reports_descriptor_pressure(
+        self, app: ControlApp, client: TestClient, token: str
+    ) -> None:
+        """OI-36. The daemon runs out of descriptors before it runs out of
+        anything else, and the failures that follow name SQLite, or the CA, or
+        whatever else happened to open a file — never the cause. This is where
+        the question becomes answerable in advance.
+        """
+        from pporlock.limits import DescriptorUsage
+
+        payload = client.get("/metrics", headers=auth(token)).json()
+        # Null until the runner's sampler has taken a reading: the route may
+        # only read memory, and counting descriptors is a directory listing.
+        assert payload["descriptors"] is None
+
+        app.descriptors = DescriptorUsage(soft=256, hard=256, open_count=247)
+        payload = client.get("/metrics", headers=auth(token)).json()
+        assert payload["descriptors"] == {
+            "soft": 256,
+            "hard": 256,
+            "open": 247,
+            "pressure": 0.965,
+        }
+
     def test_audit_is_newest_first(self, client: TestClient, token: str) -> None:
         client.delete("/flows", headers=auth(token))
         client.post("/state", json={"dev_toggles": {"anticomp": True}}, headers=auth(token))

@@ -6,6 +6,7 @@
  * latter is what makes a cross-origin form POST impossible (REQ API-013).
  */
 import { resolveControlOrigin } from '../lib/control-origin';
+import { filenameFromDisposition } from '../lib/download';
 import type { ApiError, DaemonState, DetailLevel, FlowFilter, FlowPage } from './types';
 import { filterToParams } from './types';
 import type { FlowRecord, Health } from './types';
@@ -369,12 +370,53 @@ export class ApiClient {
     return this.request<FlowPage>(`/sessions/${encodeURIComponent(sessionId)}/flows`, { params });
   }
 
-  /** Export URL (REQ CAP-024). A plain link, so the browser does the download. */
+  /** Where an export lives. Not linkable — see `fetchSessionExport`. */
   sessionExportUrl(sessionId: string, format: 'har' | 'pporlock'): string {
     return this.url(
       `/sessions/${encodeURIComponent(sessionId)}/export`,
       new URLSearchParams({ format }),
     );
+  }
+
+  /**
+   * Fetch a session export with the bearer token (REQ CAP-024, OI-35).
+   *
+   * This was an `<a href download>` for the whole life of the project, and it
+   * could never have worked: a navigation carries no Authorization header, so
+   * the daemon answered 401 and Chrome rendered that as "file was not available
+   * on the site" — a message that names neither the cause nor a remedy. The
+   * same anchor made the same mistake for the module report link (OI-30); this
+   * is that repair, applied to the surface that still had it.
+   *
+   * Putting the token in the query string would "fix" it and is forbidden
+   * (SPEC-0 §9): the URL reaches history, referrers and the audit log.
+   */
+  async fetchSessionExport(
+    sessionId: string,
+    format: 'har' | 'pporlock',
+  ): Promise<{ blob: Blob; filename: string }> {
+    const headers: Record<string, string> = { 'X-Pporlock-Client': 'ui' };
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+
+    const response = await fetch(this.sessionExportUrl(sessionId, format), { headers });
+    if (!response.ok) {
+      let code = `http_${response.status}`;
+      let message = response.statusText;
+      try {
+        const payload = (await response.json()) as ApiError;
+        code = payload.error?.code ?? code;
+        message = payload.error?.message ?? message;
+      } catch {
+        /* a non-JSON error body is still an error */
+      }
+      throw new ApiRequestError(response.status, code, message);
+    }
+    return {
+      blob: await response.blob(),
+      filename:
+        filenameFromDisposition(response.headers.get('content-disposition')) ??
+        `${sessionId}.${format}.json`,
+    };
   }
 
   /**

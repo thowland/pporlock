@@ -2045,3 +2045,21 @@ from the Vite starter template, naming a file no build has ever emitted —
 linking to `/favicon.ico`, because browsers request it unprompted and 401 is a
 worse answer to that than 404. The list is now pinned by a test that fails if it
 grows, which is the corollary this project already had and had not applied here.
+
+### 0.12.3 — the mark in the README
+
+The poppy sits beside the title on the project page, which is where most people
+meet pporlock first. Copied to `docs/images/` alongside the screenshots the
+README already uses, rather than linked into `extension/public/icons/` — the
+README should not reach into a component's build tree to draw itself.
+
+That is a third copy of the same 1.5 kB file, so `poppy.test.ts` stopped naming
+the two it knew about and now *discovers* every `poppy.svg` in the repository,
+asserts they are byte-identical, and asserts the set is exactly the three that
+should exist. A fourth copy added later is covered without anyone remembering to
+come back to the test.
+
+It also checks the path the README actually points at is one of them. Nothing
+else in the build looks at the README: it is not compiled, linted or served, and
+a broken image there is the project's first impression. Both halves were watched
+failing — once with the link renamed, once with the file deleted.

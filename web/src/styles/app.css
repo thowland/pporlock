@@ -1084,6 +1084,11 @@ textarea:focus-visible,
 .sessions,
 .sessionbrowser,
 .dryrun,
+/* Help and about are long prose, so they need this more than anything else
+   does — and needed it most obviously, because they are the only views that do
+   not end at the bottom of the window. */
+.helpview,
+.aboutview,
 .settings {
   display: flex;
   flex-direction: column;
@@ -1617,9 +1622,15 @@ button.action.primary {
 }
 
 /* -- help and about ------------------------------------------------------ */
+/* The shell gives a view no scrolling of its own: `body` is `overflow: hidden`
+   at `100vh` and every view is a flex child that must manage its own overflow
+   (see the `.sessions, … , .settings` rule above, which these two join). A view
+   that forgets simply clips, silently, with no scrollbar — which is what these
+   did, and which no unit test can see because jsdom has no layout. Only the
+   padding is theirs. */
 .helpview,
 .aboutview {
-  padding: 0 0 40px;
+  padding-bottom: 40px;
 }
 /* Prose is capped for line length; the section rules and the error table are
    not, so the dividers still span the view rather than stopping mid-page. */

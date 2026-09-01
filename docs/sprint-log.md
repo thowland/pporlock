@@ -1991,3 +1991,28 @@ web 518 → 597 tests, extension 263 → 336. Coverage held: web 94.6%, extensio
 93%. `about.tsx` joins the other entry points in the coverage exclusions with
 the same justification; the icon's canvas adapter is *not* excluded and is
 tested against a stubbed worker global instead.
+
+### 0.12.1 — the help view could not be scrolled
+
+Reported immediately after 0.12.0 shipped: the bottom two thirds of `#/help`
+were unreachable.
+
+The shell gives a view no scrolling of its own. `body` is `overflow: hidden` at
+`100vh`, `#root` is a flex column, and each view is a flex child that declares
+`overflow: auto` for itself — `.modulelib`, `.profiles`, `.sessions`,
+`.settings` and the rest all do, in two rules near the bottom of `app.css`. The
+two new views did not join either rule, so they clipped: no scrollbar, no error,
+nothing in a console.
+
+**Nothing in the unit suite could have caught this.** jsdom has no layout, so a
+clipped element and a visible one are the same element to it — every assertion
+in `HelpView.test.tsx` passed on content the user could not reach. The property
+only exists in a browser, so the guard is in the Playwright suite
+(`e2e/web/scrolling.spec.ts`): at a 500px viewport, navigate to each long view
+and reach the heading of its last section, plus a second case asserting that
+what scrolled was the *view* and not the document — because `body { overflow:
+auto }` would satisfy the first test while scrolling the status bar and nav off
+the top. Both were watched failing with the fix reverted.
+
+The shape of the mistake is the project's most familiar one: a convention every
+view followed individually and nothing asserted. It is asserted now.

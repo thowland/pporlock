@@ -18,6 +18,7 @@ from pporlock.config import Config
 from pporlock.control.app import (
     INLINE_ROUTES,
     OFFLOAD_ROUTES,
+    PUBLIC_PREFIXES,
     PUBLIC_ROUTES,
     ControlApp,
 )
@@ -1448,3 +1449,69 @@ class TestModuleAndProfileRoutesAreGuarded:
             headers={**auth(mtoken), "Origin": "https://evil.example"},
         )
         assert response.status_code == 403
+
+
+class TestUnauthenticatedStaticAssets:
+    """What the web UI is allowed to fetch before it has a token (REQ API-003).
+
+    The page has to load before it can present one, so a small set of paths is
+    served without. The set is small on purpose, and the risk of an allowlist is
+    always the same: it grows, and then nobody is willing to prune it because
+    nobody remembers what each entry was for.
+
+    ``/poppy.svg`` is the mark — the same file the extension draws in the
+    toolbar, shown beside the name in the header and used as the favicon. Both
+    an ``<img src>`` and a ``<link rel=icon>`` fetch it as a plain navigation
+    with no Authorization header, which is exactly the mistake OI-30 recorded:
+    a URL the browser must fetch on its own, sitting behind a bearer token.
+    """
+
+    def test_the_mark_is_served_without_a_token(self, tmp_path: Path) -> None:
+        static = tmp_path / "ui"
+        static.mkdir()
+        (static / "poppy.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+        (static / "index.html").write_text("<!doctype html><title>x</title>")
+        config = Config()
+        config.state_dir = str(tmp_path / "state")
+        app = ControlApp(
+            config,
+            ring=RingBuffer(),
+            interceptor=Interceptor(config, exclusions=ExclusionList([])),
+            static_dir=str(static),
+        )
+        with TestClient(app.asgi) as client:
+            response = client.get("/poppy.svg")
+        # 401 here means the header renders a broken-image icon and the tab
+        # shows no favicon, with nothing in any log to say why.
+        assert response.status_code == 200
+        assert response.text.startswith("<svg")
+
+    def test_an_asset_not_on_the_list_still_needs_a_token(self, tmp_path: Path) -> None:
+        static = tmp_path / "ui"
+        static.mkdir()
+        (static / "notes.txt").write_text("private")
+        (static / "index.html").write_text("<!doctype html><title>x</title>")
+        config = Config()
+        config.state_dir = str(tmp_path / "state")
+        app = ControlApp(
+            config,
+            ring=RingBuffer(),
+            interceptor=Interceptor(config, exclusions=ExclusionList([])),
+            static_dir=str(static),
+        )
+        with TestClient(app.asgi) as client:
+            assert client.get("/notes.txt").status_code == 401
+
+    def test_the_list_stays_short_and_every_entry_is_reachable(self) -> None:
+        # Not a style rule. Each of these is a hole, and the only thing keeping
+        # the list honest is having to justify an addition here. ``/vite.svg``
+        # sat on it from Sprint 4 until it was removed, naming a file no build has ever
+        # emitted, which is how an allowlist stops being read.
+        assert set(PUBLIC_PREFIXES) == {"/assets/", "/favicon", "/poppy.svg"}
+
+    def test_no_entry_opens_a_whole_tree_by_accident(self) -> None:
+        # ``startswith`` on a prefix with no trailing slash matches siblings:
+        # "/favicon" also allows "/faviconXYZ". That is tolerable for these
+        # three; it would not be for a prefix like "/s" or "/a".
+        for prefix in PUBLIC_PREFIXES:
+            assert len(prefix) > 5, prefix

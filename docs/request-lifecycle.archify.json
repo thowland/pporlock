@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "pporlock Request Lifecycle",
+    "viewBox": [
+      1060,
+      930
+    ],
+    "column_fit": "spread",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "clienthello",
+        "label": "Phase 1: exclusion",
+        "focus": [
+          "chrome",
+          "addon",
+          "engine"
+        ],
+        "note": "Before any byte is decrypted, the SNI is checked against the exclusion list. Excluded hosts are tunneled and recorded as passthrough."
+      },
+      {
+        "id": "request",
+        "label": "Phases 2-3: request",
+        "focus": [
+          "chrome",
+          "addon",
+          "engine",
+          "origin"
+        ],
+        "note": "Short-circuit rules run first; the first match wins and the origin is never contacted. Header rules follow."
+      },
+      {
+        "id": "headers",
+        "label": "Phases 4-5: buffering",
+        "focus": [
+          "origin",
+          "addon",
+          "engine"
+        ],
+        "note": "Header mutations and the stream-or-buffer decision must both happen before mitmproxy puts headers on the wire."
+      },
+      {
+        "id": "body",
+        "label": "Phase 6: body",
+        "focus": [
+          "origin",
+          "addon",
+          "engine",
+          "chrome"
+        ],
+        "note": "Body transforms run only on buffered responses, inside a per-flow time budget, offloaded to a thread when heavy."
+      },
+      {
+        "id": "record",
+        "label": "Record and publish",
+        "focus": [
+          "addon",
+          "capture",
+          "control"
+        ],
+        "note": "The flow that actually happened, with its provenance, lands in the ring and fans out to every reader."
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "chrome",
+      "type": "external",
+      "label": "Chrome",
+      "sublabel": "browser"
+    },
+    {
+      "id": "addon",
+      "type": "backend",
+      "label": "mitmproxy Addon",
+      "sublabel": "hooks · apply"
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "Rules Engine",
+      "sublabel": "evaluator"
+    },
+    {
+      "id": "origin",
+      "type": "external",
+      "label": "Origin",
+      "sublabel": "upstream"
+    },
+    {
+      "id": "capture",
+      "type": "database",
+      "label": "Capture",
+      "sublabel": "ring sink"
+    },
+    {
+      "id": "control",
+      "type": "frontend",
+      "label": "Readers",
+      "sublabel": "SSE · MCP · panel"
+    }
+  ],
+  "segments": [
+    {
+      "from": 168,
+      "to": 274,
+      "label": "1 · ClientHello"
+    },
+    {
+      "from": 300,
+      "to": 440,
+      "label": "2-3 · Request"
+    },
+    {
+      "from": 466,
+      "to": 572,
+      "label": "4-5 · Response headers"
+    },
+    {
+      "from": 598,
+      "to": 738,
+      "label": "6 · Response body"
+    },
+    {
+      "from": 764,
+      "to": 836,
+      "label": "Record"
+    }
+  ],
+  "messages": [
+    {
+      "id": "hello",
+      "from": "chrome",
+      "to": "addon",
+      "y": 192,
+      "label": "TLS ClientHello (SNI)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "exclude",
+      "from": "addon",
+      "to": "engine",
+      "y": 226,
+      "label": "exclusions.decide(sni, ip)",
+      "variant": "security"
+    },
+    {
+      "id": "exclude-result",
+      "from": "engine",
+      "to": "addon",
+      "y": 260,
+      "label": "intercept, or tunnel undecrypted + passthrough record",
+      "variant": "return"
+    },
+    {
+      "id": "request",
+      "from": "chrome",
+      "to": "addon",
+      "y": 324,
+      "label": "decrypted request",
+      "variant": "emphasis"
+    },
+    {
+      "id": "eval-request",
+      "from": "addon",
+      "to": "engine",
+      "y": 358,
+      "label": "evaluate_request: short-circuit rules, then header rules",
+      "variant": "default"
+    },
+    {
+      "id": "request-decision",
+      "from": "engine",
+      "to": "addon",
+      "y": 392,
+      "label": "RequestDecision: block · map_local · redirect · mutate · pass",
+      "variant": "return"
+    },
+    {
+      "id": "forward",
+      "from": "addon",
+      "to": "origin",
+      "y": 426,
+      "label": "forward the mutated request (skipped on short-circuit)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "resp-headers",
+      "from": "origin",
+      "to": "addon",
+      "y": 490,
+      "label": "response headers",
+      "variant": "return"
+    },
+    {
+      "id": "eval-headers",
+      "from": "addon",
+      "to": "engine",
+      "y": 524,
+      "label": "evaluate_response_headers, then decide_buffering",
+      "variant": "default"
+    },
+    {
+      "id": "buffer-decision",
+      "from": "engine",
+      "to": "addon",
+      "y": 558,
+      "label": "header mutation · stream or buffer (size, type, wants_body)",
+      "variant": "return"
+    },
+    {
+      "id": "resp-body",
+      "from": "origin",
+      "to": "addon",
+      "y": 622,
+      "label": "body, streamed or buffered",
+      "variant": "return"
+    },
+    {
+      "id": "eval-body",
+      "from": "addon",
+      "to": "engine",
+      "y": 656,
+      "label": "evaluate_response_body, on a worker thread when heavy (still one core)",
+      "variant": "dashed"
+    },
+    {
+      "id": "body-decision",
+      "from": "engine",
+      "to": "addon",
+      "y": 690,
+      "label": "ResponseDecision + provenance (skipped if streamed or over budget)",
+      "variant": "return"
+    },
+    {
+      "id": "deliver",
+      "from": "addon",
+      "to": "chrome",
+      "y": 724,
+      "label": "the response Chrome actually receives",
+      "variant": "emphasis"
+    },
+    {
+      "id": "record",
+      "from": "addon",
+      "to": "capture",
+      "y": 788,
+      "label": "record_http(request, response, provenance, timing)",
+      "variant": "default"
+    },
+    {
+      "id": "publish",
+      "from": "capture",
+      "to": "control",
+      "y": 822,
+      "label": "flow event → SSE, /flows, MCP list_flows",
+      "variant": "dashed"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "addon",
+      "from": 186,
+      "to": 828,
+      "type": "backend"
+    },
+    {
+      "participant": "engine",
+      "from": 221,
+      "to": 265,
+      "type": "security"
+    },
+    {
+      "participant": "engine",
+      "from": 353,
+      "to": 397,
+      "type": "backend"
+    },
+    {
+      "participant": "engine",
+      "from": 519,
+      "to": 563,
+      "type": "backend"
+    },
+    {
+      "participant": "engine",
+      "from": 651,
+      "to": 695,
+      "type": "backend"
+    },
+    {
+      "participant": "origin",
+      "from": 421,
+      "to": 627,
+      "type": "external"
+    },
+    {
+      "participant": "capture",
+      "from": 783,
+      "to": 828,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Order is the contract",
+      "items": [
+        "Six phases in fixed order: clienthello, request short-circuit, request headers, buffering decision, response headers, response body",
+        "Header mutations are applied in responseheaders(), because once a response streams its headers are already on the wire",
+        "First match wins for short-circuit actions; the origin is never contacted"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Stream or buffer",
+      "items": [
+        "A body is buffered only when some rule wants it, it is under the size cap, and its content type is on the allowlist",
+        "A streamed body is never held in memory, so body transforms are recorded as skipped rather than silently not run",
+        "Heavy body transforms are handed to a worker thread (PXY-024). That relieves head-of-line blocking on the loop; it does not lift the single-core ceiling (OI-21), and Python hooks ride along on that thread"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "What gets recorded",
+      "items": [
+        "The request and response are re-normalized after mutation, so the record shows what was sent and received, not the input",
+        "Provenance is built alongside the flow and explains every match, skip, and budget exhaustion",
+        "Redaction happens in capture; the ring is what the web UI, DevTools panel, and MCP tools all read"
+      ]
+    }
+  ]
+}

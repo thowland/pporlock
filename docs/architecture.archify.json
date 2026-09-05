@@ -1,0 +1,489 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "pporlock System Architecture",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/thowland/pporlock",
+      "revision": "8b193cdbf89b19dc5ac7bcd19a4ed8913966bdaa"
+    },
+    "views": [
+      {
+        "id": "traffic-path",
+        "label": "The traffic path",
+        "focus": [
+          "chrome",
+          "addon",
+          "engine",
+          "origin",
+          "modules"
+        ],
+        "note": "Chrome is pointed at the proxy; every HTTPS flow is normalized, evaluated against modules, and applied."
+      },
+      {
+        "id": "mcp-loop",
+        "label": "AI authoring over MCP",
+        "focus": [
+          "agent",
+          "mcp",
+          "control",
+          "capture",
+          "sessions",
+          "modules"
+        ],
+        "note": "Record, inspect provenance, draft a module, dry-run it against the session, then enable it as a separate explicit step."
+      },
+      {
+        "id": "extension-role",
+        "label": "What only the extension can do",
+        "focus": [
+          "chrome",
+          "extension",
+          "control"
+        ],
+        "note": "Chrome proxy control, tab attribution, and the fail-safe that clears the proxy when the daemon dies."
+      },
+      {
+        "id": "capture-safety",
+        "label": "Capture and redaction",
+        "focus": [
+          "engine",
+          "capture",
+          "sessions",
+          "webui"
+        ],
+        "note": "Secrets are masked at write time; unmask is web-UI-only, live-ring-only, one value at a time."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "chrome",
+      "type": "external",
+      "label": "Chrome",
+      "sublabel": "proxied to :8080",
+      "pos": [
+        40,
+        70
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "extension",
+      "type": "frontend",
+      "label": "Chrome Extension",
+      "sublabel": "MV3 · proxy · tab ids",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "extension/",
+      "sources": [
+        {
+          "path": "extension/src/background/proxy.ts",
+          "line": 1,
+          "label": "proxy control"
+        },
+        {
+          "path": "extension/src/background/attribution.ts",
+          "line": 1,
+          "label": "tab attribution"
+        },
+        {
+          "path": "extension/src/background/health.ts",
+          "line": 1,
+          "label": "fail-safe"
+        }
+      ]
+    },
+    {
+      "id": "webui",
+      "type": "frontend",
+      "label": "Web UI",
+      "sublabel": "React · served by daemon",
+      "pos": [
+        40,
+        350
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "web/",
+      "sources": [
+        {
+          "path": "web/src/api/events.ts",
+          "line": 1,
+          "label": "SSE stream"
+        },
+        {
+          "path": "web/src/api/client.ts",
+          "line": 1,
+          "label": "API client"
+        }
+      ]
+    },
+    {
+      "id": "agent",
+      "type": "external",
+      "label": "AI Agent",
+      "sublabel": "any MCP client",
+      "pos": [
+        40,
+        490
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "mcp",
+      "type": "backend",
+      "label": "MCP Server",
+      "sublabel": "stdio · 25 tools",
+      "pos": [
+        330,
+        490
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "mcp/",
+      "sources": [
+        {
+          "path": "mcp/src/pporlock_mcp/server.py",
+          "line": 1,
+          "label": "server"
+        },
+        {
+          "path": "mcp/src/pporlock_mcp/tools.py",
+          "line": 458,
+          "label": "tool registry"
+        },
+        {
+          "path": "mcp/src/pporlock_mcp/guardrails.py",
+          "line": 1,
+          "label": "guardrails"
+        }
+      ]
+    },
+    {
+      "id": "addon",
+      "type": "backend",
+      "label": "mitmproxy Addon",
+      "sublabel": "TLS termination :8080",
+      "pos": [
+        330,
+        70
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "addon/",
+      "sources": [
+        {
+          "path": "daemon/src/pporlock/addon/interceptor.py",
+          "line": 1,
+          "label": "hooks"
+        },
+        {
+          "path": "daemon/src/pporlock/addon/normalize.py",
+          "line": 1,
+          "label": "the only boundary"
+        }
+      ]
+    },
+    {
+      "id": "control",
+      "type": "security",
+      "label": "Control API",
+      "sublabel": "loopback :8081 · bearer",
+      "pos": [
+        330,
+        350
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "control/",
+      "sources": [
+        {
+          "path": "daemon/src/pporlock/control/app.py",
+          "line": 119,
+          "label": "OFFLOAD_ROUTES"
+        },
+        {
+          "path": "daemon/src/pporlock/control/auth.py",
+          "line": 1,
+          "label": "access control"
+        },
+        {
+          "path": "daemon/src/pporlock/control/server.py",
+          "line": 1,
+          "label": "shared loop"
+        }
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "Rules Engine",
+      "sublabel": "evaluate · provenance",
+      "pos": [
+        620,
+        210
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "engine/",
+      "sources": [
+        {
+          "path": "daemon/src/pporlock/engine/evaluator.py",
+          "line": 1,
+          "label": "evaluator"
+        },
+        {
+          "path": "daemon/src/pporlock/engine/provenance.py",
+          "line": 1,
+          "label": "provenance"
+        },
+        {
+          "path": "daemon/src/pporlock/engine/modules/loader.py",
+          "line": 1,
+          "label": "module loader"
+        }
+      ]
+    },
+    {
+      "id": "capture",
+      "type": "backend",
+      "label": "Capture",
+      "sublabel": "ring · redact · dry run",
+      "pos": [
+        900,
+        350
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "capture/",
+      "sources": [
+        {
+          "path": "daemon/src/pporlock/capture/sink.py",
+          "line": 1,
+          "label": "ring sink"
+        },
+        {
+          "path": "daemon/src/pporlock/capture/dryrun.py",
+          "line": 1,
+          "label": "dry run"
+        },
+        {
+          "path": "daemon/src/pporlock/capture/redact.py",
+          "line": 1,
+          "label": "redactor"
+        }
+      ]
+    },
+    {
+      "id": "modules",
+      "type": "database",
+      "label": "Module Library",
+      "sublabel": "yaml · py · assets/",
+      "pos": [
+        1170,
+        210
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "examples/modules/"
+    },
+    {
+      "id": "sessions",
+      "type": "database",
+      "label": "Sessions & State",
+      "sublabel": "SQLite · token · sidecars",
+      "pos": [
+        1170,
+        350
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "~/.pporlock",
+      "sources": [
+        {
+          "path": "daemon/src/pporlock/capture/session.py",
+          "line": 1,
+          "label": "session writer"
+        }
+      ]
+    },
+    {
+      "id": "origin",
+      "type": "external",
+      "label": "Origin Servers",
+      "sublabel": "upstream HTTPS",
+      "pos": [
+        1170,
+        70
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "pporlock daemon — one process, one event loop (pporlock run)",
+      "wraps": [
+        "addon",
+        "control",
+        "engine",
+        "capture"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "security-group",
+      "label": "on disk, user-owned",
+      "wraps": [
+        "modules",
+        "sessions"
+      ],
+      "pad": 14
+    },
+    {
+      "kind": "region",
+      "label": "AI authoring surface",
+      "wraps": [
+        "agent",
+        "mcp"
+      ],
+      "pad": 14
+    }
+  ],
+  "connections": [
+    {
+      "from": "chrome",
+      "to": "addon",
+      "label": "HTTPS via proxy",
+      "variant": "emphasis"
+    },
+    {
+      "from": "addon",
+      "to": "origin",
+      "label": "upstream TLS",
+      "variant": "emphasis"
+    },
+    {
+      "from": "addon",
+      "to": "engine",
+      "label": "normalize → evaluate → apply"
+    },
+    {
+      "from": "engine",
+      "to": "modules",
+      "label": "loads modules"
+    },
+    {
+      "from": "engine",
+      "to": "capture",
+      "label": "flow + provenance"
+    },
+    {
+      "from": "capture",
+      "to": "sessions",
+      "label": "redacted on write",
+      "variant": "security"
+    },
+    {
+      "from": "extension",
+      "to": "chrome",
+      "label": "chrome.proxy set / clear"
+    },
+    {
+      "from": "extension",
+      "to": "control",
+      "label": "pairing code · health · tab ids",
+      "variant": "security"
+    },
+    {
+      "from": "webui",
+      "to": "control",
+      "label": "bearer + SSE /events",
+      "labelDy": 18
+    },
+    {
+      "from": "agent",
+      "to": "mcp",
+      "label": "MCP over stdio",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mcp",
+      "to": "control",
+      "label": "loopback HTTP, token from state dir",
+      "variant": "emphasis"
+    },
+    {
+      "from": "control",
+      "to": "engine",
+      "label": "enable · reload · profiles"
+    },
+    {
+      "from": "control",
+      "to": "capture",
+      "label": "flows · sessions · dry run"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "MCP: the AI authoring loop",
+      "items": [
+        "start_recording → reproduce in Chrome → stop_recording; list_session_flows + get_provenance say what happened and why",
+        "suggest_rule_from_flow → validate_module → create_module, which arrives disabled; dry_run replays the session through the live evaluator",
+        "set_module_enabled is the one separate step that touches live browsing"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "What MCP deliberately cannot do",
+      "items": [
+        "Enable a module as a side effect of creating or updating it (MCP-030)",
+        "Unmask a redacted value; the client refuses unmask parameters (MCP-003). Unmask is web-UI-only, live-ring-only, per value",
+        "Return unbounded output: every tool states its token cost and pages its listings (MCP-005)"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Three clients, one control API",
+      "items": [
+        "Web UI: bearer token plus streaming SSE, the only surface with unmask",
+        "Extension: pairing code instead of the token file; proxy control, tab attribution, fail-safe",
+        "MCP server: reads the token file as the user and speaks the same loopback HTTP as everyone else"
+      ]
+    }
+  ]
+}

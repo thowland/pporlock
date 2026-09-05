@@ -1,0 +1,367 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "pporlock Rules Engine",
+    "viewBox": [
+      1080,
+      500
+    ],
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "dsl",
+        "label": "The declarative tier",
+        "focus": [
+          "manifest",
+          "rulesfile",
+          "loader",
+          "compile",
+          "registry"
+        ],
+        "note": "module.yaml and rules.yaml are parsed strictly, then every rule becomes a CompiledRule with a pre-compiled matcher and validated params."
+      },
+      {
+        "id": "python",
+        "label": "The Python tier",
+        "focus": [
+          "python",
+          "loader",
+          "registry",
+          "context",
+          "transforms",
+          "evaluator"
+        ],
+        "note": "module.py is imported at load; its hooks run through a per-module ModuleContext and may register new transforms."
+      },
+      {
+        "id": "assemble",
+        "label": "Assembling the active set",
+        "focus": [
+          "loader",
+          "sidecar",
+          "registry",
+          "ruleset"
+        ],
+        "note": "Loaded, enabled, not quarantined, in the active profile. File rules and module rules become one phase-partitioned RuleSet."
+      },
+      {
+        "id": "evaluate",
+        "label": "Per-flow evaluation",
+        "focus": [
+          "ruleset",
+          "context",
+          "transforms",
+          "evaluator",
+          "provenance"
+        ],
+        "note": "Six phases in fixed order; declarative rules first, then hooks; every outcome recorded."
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "On disk"
+    },
+    {
+      "label": "Load"
+    },
+    {
+      "label": "Compile & register"
+    },
+    {
+      "label": "Assemble"
+    },
+    {
+      "label": "Evaluate"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "manifest",
+      "type": "database",
+      "label": "module.yaml",
+      "sublabel": "manifest + rules",
+      "stage": 0,
+      "row": 1,
+      "tag": "declarative"
+    },
+    {
+      "id": "python",
+      "type": "database",
+      "label": "module.py",
+      "sublabel": "optional hooks",
+      "stage": 0,
+      "row": 2,
+      "tag": "trusted code"
+    },
+    {
+      "id": "rulesfile",
+      "type": "database",
+      "label": "rules.yaml",
+      "sublabel": "user file rules",
+      "stage": 0,
+      "row": 0,
+      "tag": "state_dir"
+    },
+    {
+      "id": "loader",
+      "type": "backend",
+      "label": "ModuleLoader",
+      "sublabel": "never raises",
+      "stage": 1,
+      "row": 1,
+      "tag": "MOD-005"
+    },
+    {
+      "id": "compile",
+      "type": "backend",
+      "label": "compile_rule",
+      "sublabel": "action · match",
+      "stage": 2,
+      "row": 0,
+      "tag": "ruleset.py"
+    },
+    {
+      "id": "transforms",
+      "type": "backend",
+      "label": "TransformRegistry",
+      "sublabel": "built-ins + cost",
+      "stage": 3,
+      "row": 2,
+      "tag": "PXY-024"
+    },
+    {
+      "id": "context",
+      "type": "backend",
+      "label": "ModuleContext",
+      "sublabel": "ctx API per module",
+      "stage": 3,
+      "row": 1,
+      "tag": "SPEC-0 §8"
+    },
+    {
+      "id": "registry",
+      "type": "backend",
+      "label": "ModuleRegistry",
+      "sublabel": "active module set",
+      "stage": 2,
+      "row": 1,
+      "tag": "registry.py"
+    },
+    {
+      "id": "sidecar",
+      "type": "security",
+      "label": "State sidecar",
+      "sublabel": "enabled · priority",
+      "stage": 1,
+      "row": 2,
+      "tag": "state_dir"
+    },
+    {
+      "id": "ruleset",
+      "type": "backend",
+      "label": "RuleSet",
+      "sublabel": "phase-partitioned",
+      "stage": 3,
+      "row": 0,
+      "tag": "MOD-023"
+    },
+    {
+      "id": "evaluator",
+      "type": "backend",
+      "label": "Evaluator",
+      "sublabel": "six phases",
+      "stage": 4,
+      "row": 1,
+      "tag": "PXY-020"
+    },
+    {
+      "id": "provenance",
+      "type": "database",
+      "label": "Provenance",
+      "sublabel": "every outcome",
+      "stage": 4,
+      "row": 2,
+      "tag": "CAP-010"
+    }
+  ],
+  "flows": [
+    {
+      "id": "rules-compile",
+      "from": "rulesfile",
+      "to": "compile",
+      "label": "file rules",
+      "classification": "file rules",
+      "variant": "default",
+      "route": "straight"
+    },
+    {
+      "id": "manifest-load",
+      "from": "manifest",
+      "to": "loader",
+      "label": "parse manifest",
+      "classification": "parse",
+      "variant": "emphasis",
+      "labelDy": -20,
+      "route": "straight"
+    },
+    {
+      "id": "python-import",
+      "from": "python",
+      "to": "loader",
+      "label": "import; top level runs",
+      "classification": "trusted",
+      "variant": "security"
+    },
+    {
+      "id": "loader-compile",
+      "from": "loader",
+      "to": "compile",
+      "label": "each rule",
+      "classification": "per rule",
+      "variant": "emphasis",
+      "channelX": 385,
+      "route": "vertical-channel"
+    },
+    {
+      "id": "loader-registry",
+      "from": "loader",
+      "to": "registry",
+      "label": "LoadedModule",
+      "classification": "MOD-005",
+      "variant": "default",
+      "labelDy": -23,
+      "route": "straight",
+      "labelDx": 4
+    },
+    {
+      "id": "sidecar-registry",
+      "from": "sidecar",
+      "to": "registry",
+      "label": "enabled · priority · config",
+      "classification": "user state",
+      "variant": "security",
+      "channelX": 385,
+      "route": "vertical-channel"
+    },
+    {
+      "id": "compile-registry",
+      "from": "compile",
+      "to": "registry",
+      "label": "CompiledRule[]",
+      "classification": "compiled",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelDy": 30,
+      "labelDx": -48
+    },
+    {
+      "id": "registry-ruleset",
+      "from": "registry",
+      "to": "ruleset",
+      "label": "build + combine",
+      "classification": "assembled",
+      "variant": "emphasis",
+      "channelX": 600,
+      "route": "vertical-channel"
+    },
+    {
+      "id": "registry-context",
+      "from": "registry",
+      "to": "context",
+      "label": "ctx per module",
+      "classification": "python tier",
+      "variant": "default",
+      "labelDy": -23,
+      "route": "straight",
+      "labelDx": 8
+    },
+    {
+      "id": "context-transforms",
+      "from": "context",
+      "to": "transforms",
+      "label": "register_transform",
+      "classification": "extension point",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelDy": 30,
+      "labelDx": -52
+    },
+    {
+      "id": "ruleset-evaluator",
+      "from": "ruleset",
+      "to": "evaluator",
+      "label": "priority, then index",
+      "classification": "ordering",
+      "variant": "emphasis",
+      "channelX": 890,
+      "route": "vertical-channel"
+    },
+    {
+      "id": "context-evaluator",
+      "from": "context",
+      "to": "evaluator",
+      "label": "hooks run last",
+      "classification": "hooks",
+      "variant": "default",
+      "labelDy": -23,
+      "labelDx": -8
+    },
+    {
+      "id": "transforms-evaluator",
+      "from": "transforms",
+      "to": "evaluator",
+      "label": "apply(kind, text)",
+      "classification": "body phase",
+      "variant": "default",
+      "channelX": 815,
+      "route": "vertical-channel"
+    },
+    {
+      "id": "evaluator-provenance",
+      "from": "evaluator",
+      "to": "provenance",
+      "label": "outcome + duration",
+      "classification": "structural",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The DSL: what a rule is",
+      "items": [
+        "name, action, match, params. The action fixes the phase: block, map_local, redirect short-circuit; headers run on request or response; body runs last",
+        "match compiles once: host glob, path regex, method, dest, query, headers; status and content type only on response-phase rules, else a load error",
+        "Order is module priority, then declaration index. First match wins for short-circuits; header and body rules all apply"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "The Python tier",
+      "items": [
+        "Hooks: on_load, on_unload, on_request, on_response, on_websocket_message, on_report, on_config, each with a per-module ctx: matches(), config, store, assets, synthesize(), register_transform()",
+        "Hooks run after the declarative rules of the same phase and see the transformed body, so the tiers compose rather than race",
+        "A raising hook is attributed and ignored; repeated failures quarantine the module. Code is trusted, unsandboxed, and dry run executes it"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Where to extend",
+      "items": [
+        "New transform: a TransformSpec in build_registry with its params and Cost class, plus the cost table",
+        "New action: the Action enum, ACTION_PHASE, _validate_params, an evaluator apply path, and the rule schema in contracts/",
+        "examples/modules/ is the conformance suite; validate_module reports line numbers before anything loads"
+      ]
+    }
+  ]
+}

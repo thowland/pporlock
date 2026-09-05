@@ -163,6 +163,21 @@ pporlock doctor       # 18 checks
 | [Rule and manifest schema](docs/rule-schema.md) | Every field, generated from the JSON Schemas |
 | [Open issues](docs/open-issues.md) | Known gaps, each with why it is still open |
 
+### How it fits together
+
+Three interactive diagrams, generated from the source tree and checked against
+it. Each opens as a self-contained HTML page with guided views, search, and
+click-through to the files it describes. GitHub shows the HTML as source, so
+open them from a clone, or use the thumbnails for the shape of the thing.
+
+| | |
+|---|---|
+| [<img src="docs/images/diagram-architecture.png" width="420" alt="System architecture: Chrome, extension, web UI, MCP server, and the daemon's addon, control API, rules engine and capture">](docs/architecture.html) | **[System architecture](docs/architecture.html)** — the components and how they collaborate. The MCP server is a first-class client of the same loopback control API as the web UI and the extension, with its own authoring loop and its own deliberate limits. |
+| [<img src="docs/images/diagram-request-lifecycle.png" width="420" alt="Request lifecycle: ClientHello, request, response headers, response body, record">](docs/request-lifecycle.html) | **[Request lifecycle](docs/request-lifecycle.html)** — one HTTPS flow through the daemon, phase by phase, including the buffering decision, the return path, and where heavy body work leaves the event loop (and where it does not lift the single-core ceiling). |
+| [<img src="docs/images/diagram-rules-engine.png" width="420" alt="Rules engine: from module.yaml, module.py and rules.yaml through loading, compilation, assembly and evaluation">](docs/rules-engine.html) | **[Rules engine](docs/rules-engine.html)** — how a module goes from files on disk to a compiled, phase-partitioned rule set, how the Python tier composes with the declarative one, and where to extend it. |
+
+The sources are the `docs/*.archify.json` files beside each page.
+
 Design and specification documents live in `docs/`: the requirements
 (`pporlock_requirements-v1.md`), the contracts (`spec-0-contracts.md`), and one
 spec per component.

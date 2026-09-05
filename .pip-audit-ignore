@@ -8,35 +8,6 @@
 # Format:  ignore: <VULN-ID>
 #
 # ---------------------------------------------------------------------------
-# tornado — 7 advisories, none on our execution path.
-#
-# mitmproxy 12.2.3 caps tornado at <=6.5.5; the fixes land in 6.5.6, 6.5.7 and
-# 6.5.8. Verified by inspection and empirically: tornado is imported only by
-# mitmproxy/tools/web/* (mitmweb) and mitmproxy/tools/console/master.py (the
-# TUI). We run mitmdump, and `import mitmproxy.tools.dump` leaves tornado
-# absent from sys.modules — re-verified 2026-09-05, and `import
-# pporlock.cli.runner` leaves it absent too. Three of the first four advisories
-# are in tornado's HTTP *client* (SimpleAsyncHTTPClient, CurlAsyncHTTPClient,
-# AsyncHTTPClient), which nothing in our path constructs.
-#
-# The three fixed in 6.5.8 are all in tornado's HTTP *server* request path:
-# RequestHandler.set_cookie attribute injection (GHSA-wwv5-g3v4-889x),
-# multipart parsing memory amplification (GHSA-8423-8fgw-73vq), and urlencoded
-# body parsing without max_num_fields (CVE-2026-82397 / GHSA-mpf4-983q-p7j4).
-# A tornado HTTPServer only exists under mitmweb.
-#
-# Re-check trigger: if we ever ship mitmweb, run the console tool, or import
-# tornado directly, these stop being acceptable immediately.
-ignore: PYSEC-2026-3387
-ignore: PYSEC-2026-3388
-ignore: PYSEC-2026-3389
-ignore: GHSA-pw6j-qg29-8w7f
-ignore: GHSA-wwv5-g3v4-889x
-ignore: GHSA-8423-8fgw-73vq
-ignore: CVE-2026-82397
-ignore: GHSA-mpf4-983q-p7j4
-
-# ---------------------------------------------------------------------------
 # msgpack PYSEC-2026-3625 — availability issue, not on our execution path.
 #
 # Reaches us twice: via pip-audit's own cachecontrol (a dev-group dependency

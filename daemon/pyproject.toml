@@ -1,6 +1,6 @@
 [project]
 name = "pporlock"
-version = "0.12.5"
+version = "0.12.6"
 description = "Local HTTPS interception and modification proxy daemon"
 requires-python = "==3.12.*"
 license = { text = "GPL-3.0-or-later" }
@@ -25,6 +25,16 @@ dependencies = [
     "starlette>=0.41.0",
     "uvicorn>=0.34.0",
 ]
+
+# tornado is the one transitive dependency we lift PAST mitmproxy's cap rather
+# than floor beneath it. mitmproxy 12.2.3 declares tornado<=6.5.5; seven
+# advisories are fixed in 6.5.6–6.5.8, all in tornado's HTTP server and client
+# paths. mitmproxy only imports tornado for mitmweb and the console TUI, neither
+# of which mitmdump loads, so the cap protects nothing we run and the override
+# removes seven accepted advisories from .pip-audit-ignore. Re-examine when the
+# mitmproxy pin moves: if a new mitmproxy relaxes its own cap, delete this.
+[tool.uv]
+override-dependencies = ["tornado>=6.5.8"]
 
 [project.scripts]
 pporlock = "pporlock.cli.main:main"

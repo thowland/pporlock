@@ -7,7 +7,8 @@
 
 Point Chrome at a proxy you control, watch every request, and change the ones
 you need to — with a structured, per-flow record of exactly what was changed and
-why.
+why. Then hand the same record, and the same authoring tools, to an AI agent
+over MCP.
 
 > ⚠️ pporlock decrypts your HTTPS traffic and can rewrite any page. It runs
 > unsandboxed module code with your full privileges. It is a single-user tool for
@@ -33,6 +34,46 @@ Read it top to bottom: a `csp_modified` warning naming the module responsible,
 the buffering decision, the rule that applied in the response-header phase, and
 a body transform that ran and reported `no change` — with the reason it was
 offloaded. Nothing here is inferred from logs.
+
+---
+
+## An agent can drive it
+
+The provenance record is written for two readers. One is you, in the web UI.
+The other is an AI agent, over the [Model Context Protocol](docs/llm-with-mcp.md).
+pporlock ships an MCP server that exposes the captured traffic, the provenance
+that explains it, and the module authoring loop as tools — so the agent that
+is helping you debug a page can look at what actually happened rather than
+guessing from a description of it.
+
+**Examining traffic.** Record a session, reproduce the problem in Chrome, stop.
+The agent can then list the flows, pull one with its full provenance, ask for
+statistics across the session, read WebSocket messages, and filter by host,
+path, tab, module, or outcome. Redaction is applied before anything leaves the daemon:
+cookies, authorization headers, and credential-shaped values arrive masked, and
+the MCP interface has no way to unmask them.
+
+**Authoring modules.** From a flow it has just read, the agent can ask for a
+suggested rule, write a manifest and optional Python hooks, validate them with
+line-numbered errors, and dry-run the candidate against the recorded session to
+see exactly what it would have changed — through the live evaluator, not a
+second implementation. Creating a module never enables it. Enabling is a
+separate, explicit call, and the one step that touches your browsing.
+
+```
+start_recording → reproduce → stop_recording
+list_session_flows → get_provenance         what happened, and why
+suggest_rule_from_flow → validate_module    a candidate, checked
+create_module → dry_run                     what it would do, with diffs
+set_module_enabled                          the one step that is live
+```
+
+Every tool states its token cost and pages its output, so an agent can work a
+long session without reading bodies it did not ask for. What the guardrails
+stop is an agent *quietly* changing your browsing. They do not stop code you
+enabled without reading; module Python is trusted and unsandboxed, and dry run
+executes it. [Driving it with an LLM](docs/llm-with-mcp.md) covers the setup,
+the prompting, and how to review what an agent wrote.
 
 ---
 
@@ -167,14 +208,15 @@ pporlock doctor       # 18 checks
 
 Three interactive diagrams, generated from the source tree and checked against
 it. Each opens as a self-contained HTML page with guided views, search, and
-click-through to the files it describes. GitHub shows the HTML as source, so
-open them from a clone, or use the thumbnails for the shape of the thing.
+click-through to the files it describes. They are served from
+**[thowland.github.io/pporlock](https://thowland.github.io/pporlock/)**, along
+with an index of the guides.
 
 | | |
 |---|---|
-| [<img src="docs/images/diagram-architecture.png" width="420" alt="System architecture: Chrome, extension, web UI, MCP server, and the daemon's addon, control API, rules engine and capture">](docs/architecture.html) | **[System architecture](docs/architecture.html)** — the components and how they collaborate. The MCP server is a first-class client of the same loopback control API as the web UI and the extension, with its own authoring loop and its own deliberate limits. |
-| [<img src="docs/images/diagram-request-lifecycle.png" width="420" alt="Request lifecycle: ClientHello, request, response headers, response body, record">](docs/request-lifecycle.html) | **[Request lifecycle](docs/request-lifecycle.html)** — one HTTPS flow through the daemon, phase by phase, including the buffering decision, the return path, and where heavy body work leaves the event loop (and where it does not lift the single-core ceiling). |
-| [<img src="docs/images/diagram-rules-engine.png" width="420" alt="Rules engine: from module.yaml, module.py and rules.yaml through loading, compilation, assembly and evaluation">](docs/rules-engine.html) | **[Rules engine](docs/rules-engine.html)** — how a module goes from files on disk to a compiled, phase-partitioned rule set, how the Python tier composes with the declarative one, and where to extend it. |
+| [<img src="docs/images/diagram-architecture.png" width="420" alt="System architecture: Chrome, extension, web UI, MCP server, and the daemon's addon, control API, rules engine and capture">](https://thowland.github.io/pporlock/architecture.html) | **[System architecture](https://thowland.github.io/pporlock/architecture.html)** — the components and how they collaborate. The MCP server is a first-class client of the same loopback control API as the web UI and the extension, with its own authoring loop and its own deliberate limits. |
+| [<img src="docs/images/diagram-request-lifecycle.png" width="420" alt="Request lifecycle: ClientHello, request, response headers, response body, record">](https://thowland.github.io/pporlock/request-lifecycle.html) | **[Request lifecycle](https://thowland.github.io/pporlock/request-lifecycle.html)** — one HTTPS flow through the daemon, phase by phase, including the buffering decision, the return path, and where heavy body work leaves the event loop (and where it does not lift the single-core ceiling). |
+| [<img src="docs/images/diagram-rules-engine.png" width="420" alt="Rules engine: from module.yaml, module.py and rules.yaml through loading, compilation, assembly and evaluation">](https://thowland.github.io/pporlock/rules-engine.html) | **[Rules engine](https://thowland.github.io/pporlock/rules-engine.html)** — how a module goes from files on disk to a compiled, phase-partitioned rule set, how the Python tier composes with the declarative one, and where to extend it. |
 
 The sources are the `docs/*.archify.json` files beside each page.
 

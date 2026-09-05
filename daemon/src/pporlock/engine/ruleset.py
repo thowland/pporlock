@@ -101,7 +101,12 @@ class CompiledRule:
 
 
 def compile_rule(
-    raw: dict[str, Any], *, module: str, index: int, priority: int = DEFAULT_PRIORITY
+    raw: dict[str, Any],
+    *,
+    module: str,
+    index: int,
+    priority: int = DEFAULT_PRIORITY,
+    transforms: Any = None,
 ) -> CompiledRule:
     """Validate and compile one rule. Raises rather than skipping.
 
@@ -144,12 +149,22 @@ def compile_rule(
         if key not in {"name", "action", "match", "enabled"}
     }
     _validate_params(action, params, module=module, index=index)
+    if transforms is not None and action is Action.BODY:
+        validate_transforms(params, transforms, module=module, index=index)
 
+    # A two-sided headers rule mutates the request *before* any response
+    # exists, so it is bound by request-phase criteria even though its later
+    # half runs at response time. Classifying it purely by its latest phase let
+    # a rule declare `status: 500` and still add its request header to every
+    # matching request, response or no (SEP_5_REVIEW F-09, REQ MOD-011).
+    request_phase = phase_for(action, params) in REQUEST_PHASES or (
+        action is Action.HEADERS and "request" in params
+    )
     matcher = compile_matcher(
         raw.get("match"),
         module=module,
         index=index,
-        request_phase=phase_for(action, params) in REQUEST_PHASES,
+        request_phase=request_phase,
     )
 
     return CompiledRule(
@@ -208,6 +223,60 @@ def _validate_params(action: Action, params: dict[str, Any], *, module: str, ind
             )
 
 
+#: Transform kinds that are declared as body transforms but operate on headers.
+#:
+#: `strip_csp` is applied during response-*header* evaluation, where a mutation
+#: can still reach the wire on a streamed response. Treating a rule whose only
+#: transform is one of these as body demand made every matching HTML response
+#: eligible for buffering for a header edit that needs no body at all
+#: (SEP_5_REVIEW F-14, REQ PXY-021).
+HEADER_ONLY_TRANSFORMS = frozenset({"strip_csp"})
+
+
+def transforms_of(rule_params: dict[str, Any]) -> list[dict[str, Any]]:
+    """A rule's transform blocks, whether declared singly or as a list."""
+    single = rule_params.get("transform")
+    many = rule_params.get("transforms")
+    out: list[dict[str, Any]] = []
+    if isinstance(single, dict):
+        out.append(single)
+    if isinstance(many, list):
+        out.extend(item for item in many if isinstance(item, dict))
+    return out
+
+
+def needs_body(rule: CompiledRule) -> bool:
+    """Whether evaluating this rule requires the response body in memory."""
+    if rule.action is not Action.BODY:
+        return False
+    return any(
+        str(t.get("kind", "")) not in HEADER_ONLY_TRANSFORMS for t in transforms_of(rule.params)
+    )
+
+
+def validate_transforms(
+    params: dict[str, Any], registry: Any, *, module: str = "", index: int = 0
+) -> None:
+    """Check every transform block of a body rule against the live registry.
+
+    Separate from `_validate_params` because it needs the registry, and the
+    registry is not always complete at compile time: a module's own `on_load`
+    may register a transform its rules use, and rules compile during load. So
+    this runs wherever the registry *is* complete — the loader's post-load pass,
+    the validation endpoint, the dry runner — and the shallow structural check
+    runs everywhere (SEP_5_REVIEW F-07, REQ MOD-014/015).
+
+    `strip_csp` is not in the registry: it is applied by the evaluator during
+    header evaluation rather than as a registered body transform. It is a
+    declared kind all the same, so it is accepted here.
+    """
+    for transform in transforms_of(params):
+        kind = str(transform.get("kind") or "")
+        if kind in HEADER_ONLY_TRANSFORMS:
+            continue
+        registry.validate(transform, module=module, index=index)
+
+
 class RuleSet:
     """An immutable, phase-partitioned set of rules.
 
@@ -263,23 +332,20 @@ class RuleSet:
         self.rules = tuple(enabled)
 
     def __len__(self) -> int:
-        return (
-            len(self.passthrough)
-            + len(self.short_circuit)
-            + len(self.request_headers)
-            + len(self.response_headers)
-            + len(self.response_body)
-        )
+        """How many rules were declared.
+
+        `self.rules`, not the sum of the phase partitions. A two-sided headers
+        rule is deliberately placed in both the request and response partitions
+        — it applies in both — so summing them counted one declared rule twice
+        and any aggregate view built from them returned it twice
+        (SEP_5_REVIEW F-09).
+        """
+        return len(self.rules)
 
     @property
     def all_rules(self) -> tuple[CompiledRule, ...]:
-        return (
-            *self.passthrough,
-            *self.short_circuit,
-            *self.request_headers,
-            *self.response_headers,
-            *self.response_body,
-        )
+        """Every declared rule, once, in priority then declaration order."""
+        return self.rules
 
     def wants_body(self, request: NormalizedRequest) -> bool:
         """Could any enabled rule produce a body transform for this flow?
@@ -289,7 +355,7 @@ class RuleSet:
         optimisation available, and it applies to the overwhelming majority of
         flows on any real page.
         """
-        return any(r.matcher.matches_request(request) for r in self.response_body)
+        return any(needs_body(r) and r.matcher.matches_request(request) for r in self.response_body)
 
     def first_short_circuit(self, request: NormalizedRequest) -> CompiledRule | None:
         """First-match-wins across all modules (REQ MOD-012)."""
@@ -314,6 +380,20 @@ class RuleSet:
     ) -> tuple[CompiledRule, ...]:
         return tuple(r for r in self.response_body if r.matcher.matches_response(request, response))
 
+    def validate_transforms(self, registry: Any) -> None:
+        """Check every body rule against a now-complete transform registry.
+
+        The late half of the two-stage validation described in
+        `validate_transforms`. Raises `RuleValidationError` for the first
+        offender, which is a load error: a rule naming a transform that does not
+        exist can never run, and letting it sit in the set until traffic matches
+        turns a deterministic typo into a per-flow runtime failure blamed on the
+        module author (SEP_5_REVIEW F-07).
+        """
+        for rule in self.rules:
+            if rule.action is Action.BODY:
+                validate_transforms(rule.params, registry, module=rule.module, index=rule.index)
+
     @classmethod
     def from_rules(
         cls,
@@ -321,9 +401,10 @@ class RuleSet:
         *,
         module: str = "inline",
         priority: int = DEFAULT_PRIORITY,
+        transforms: Any = None,
     ) -> RuleSet:
         compiled = [
-            compile_rule(raw, module=module, index=index, priority=priority)
+            compile_rule(raw, module=module, index=index, priority=priority, transforms=transforms)
             for index, raw in enumerate(raw_rules)
         ]
         return cls(compiled, modules=(module,))

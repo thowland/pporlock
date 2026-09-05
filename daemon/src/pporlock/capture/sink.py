@@ -15,6 +15,28 @@ from ..engine.provenance import Action, NoteCode, Outcome, Provenance
 from .records import FlowError, FlowRecord, Timing, truncate
 from .ring import RingBuffer
 
+#: How much WebSocket payload one flow record retains. Generous enough that an
+#: ordinary page's socket is captured whole, small enough that a socket left
+#: open for a day cannot be the reason the daemon runs out of memory.
+DEFAULT_MAX_WS_BYTES = 1024 * 1024
+
+
+def _trim_ws_messages(record: FlowRecord, max_bytes: int) -> int:
+    """Drop the oldest frames until the retained payload fits.
+
+    Returns the bytes released, for the ring's accounting. ``ws_dropped``
+    counts the frames, so a truncated capture is never mistaken for a complete
+    one — the same promise per-message truncation makes.
+    """
+    total = sum(len(m.payload) for m in record.ws_messages)
+    released = 0
+    dropped = 0
+    while record.ws_messages and total - released > max_bytes:
+        released += len(record.ws_messages.pop(0).payload)
+        dropped += 1
+    record.ws_dropped += dropped
+    return released
+
 
 class RingSink:
     """Writes completed flows into the ring buffer.
@@ -24,19 +46,23 @@ class RingSink:
     flagged so a shortened body is never mistaken for a complete one.
     """
 
-    __slots__ = ("max_body_bytes", "on_flow", "resolve_tab", "ring", "session")
+    __slots__ = ("max_body_bytes", "max_ws_bytes", "on_flow", "resolve_tab", "ring", "session")
 
     def __init__(
         self,
         ring: RingBuffer,
         *,
         max_body_bytes: int = 512 * 1024,
+        max_ws_bytes: int = DEFAULT_MAX_WS_BYTES,
         on_flow: Any = None,
         resolve_tab: Any = None,
         session: Any = None,
     ) -> None:
         self.ring = ring
         self.max_body_bytes = max_body_bytes
+        #: Total retained frame payload for one socket (REQ PXY-050). Bounds a
+        #: record that grows for as long as the connection is open.
+        self.max_ws_bytes = max_ws_bytes
         # Sprint 13: the session store, when one is recording. Its ``enqueue``
         # is a non-blocking put onto a bounded queue — recording must never be
         # able to slow the loop that is serving the browser (REQ CAP-023).
@@ -195,6 +221,20 @@ class RingSink:
                 truncated=cut,
             )
         )
+        # An explicit retention policy, then the accounting.
+        #
+        # Per-message truncation bounds one frame; nothing bounded how many
+        # frames one connection accumulated, and appending to a list already in
+        # the ring never moved the ring's byte counter — so a chatty socket grew
+        # memory that `max_bytes` could not see and `stats` under-reported
+        # (SEP_5_REVIEW F-05, REQ PXY-050, CAP-003, PRF-005).
+        #
+        # The newest frames are kept rather than the oldest: the question being
+        # asked of a live socket is what it is doing now. Re-accounting alone
+        # would let the active socket evict every other flow to make room for
+        # itself, which is why the per-record cap comes first.
+        released = _trim_ws_messages(record, self.max_ws_bytes)
+        self.ring.adjust(record.flow_id, len(payload or b"") - released)
         # Re-enqueued whole rather than appended to: the session's flows row is
         # the record, and a frame that only reached the ring would leave the
         # recorded flow claiming fewer messages than actually crossed the wire.

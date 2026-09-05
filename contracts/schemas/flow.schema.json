@@ -327,6 +327,11 @@
           "type": "integer",
           "minimum": 0
         },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Oldest frames discarded to keep the record within its retention bound (REQ CAP-003). Non-zero means this capture is a window on the socket, not the whole of it."
+        },
         "messages": {
           "type": "array",
           "description": "Omitted at summary detail. Inspection-only in v1 (REQ PXY-051).",

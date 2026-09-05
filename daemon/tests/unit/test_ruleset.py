@@ -208,9 +208,16 @@ class TestWantsBody:
         assert not RuleSet.from_rules([block("b")]).wants_body(req())
 
     def test_true_when_a_body_rule_could_match(self) -> None:
+        # A transform that actually consumes the body. `strip_csp` is declared
+        # as a body transform and applied to headers, so it is deliberately not
+        # body demand (SEP_5_REVIEW F-14) — see TestF14 in test_review_sep_5.
         rules = RuleSet.from_rules(
             [
-                {"name": "b", "action": "body", "transform": {"kind": "strip_csp"}},
+                {
+                    "name": "b",
+                    "action": "body",
+                    "transform": {"kind": "replace_literal", "find": "a", "replace": "b"},
+                },
             ]
         )
         assert rules.wants_body(req())
@@ -222,7 +229,7 @@ class TestWantsBody:
                     "name": "b",
                     "action": "body",
                     "match": {"host": "other.test"},
-                    "transform": {"kind": "strip_csp"},
+                    "transform": {"kind": "replace_literal", "find": "a", "replace": "b"},
                 },
             ]
         )

@@ -304,6 +304,11 @@ def build_evaluator(
         asset_root=rules_path.parent,
         buffer_types=tuple(config.buffering.content_types),
         max_buffer_bytes=config.buffering.max_body_bytes,
+        # Configured, not defaulted. The setting is documented in SPEC-1 and
+        # published by GET /config; leaving the constructor default here meant
+        # changing it did nothing, and a test that built its own Evaluator with
+        # an explicit threshold could not notice (SEP_5_REVIEW F-11).
+        offload_threshold=config.budget.executor_threshold_bytes,
         registry=registry,
     )
 
@@ -313,7 +318,19 @@ def build_evaluator(
 
     # File rules and module rules are one rule set to the engine; a module's
     # priority orders its rules against everything else (REQ MOD-023).
-    evaluator.ruleset = RuleSet.combine(ruleset, registry.build_ruleset(profiles.module_filter()))
+    combined = RuleSet.combine(ruleset, registry.build_ruleset(profiles.module_filter()))
+
+    # Now — and only now — is the transform registry complete: a module's own
+    # `on_load` may have registered a transform its rules name. This is the late
+    # half of transform validation (SEP_5_REVIEW F-07, REQ MOD-014). A bad
+    # transform in rules.yaml is reported the same way a parse failure is,
+    # rather than deferred to the first request that matches it.
+    try:
+        combined.validate_transforms(evaluator.transforms)
+    except Exception as exc:
+        if error is None:
+            error = str(exc)
+    evaluator.ruleset = combined
 
     return evaluator, registry, profiles, ruleset, rules_path, error
 
@@ -382,6 +399,18 @@ async def _run(
     )
 
     master = DumpMaster(options, with_termlog=False, with_dumper=False)
+
+    # The real bound on an unknown-length body (REQ PXY-021, PRF-005).
+    # `decide_buffering` can only weigh a *declared* Content-Length, so a
+    # chunked response of any size was accumulated in memory for transformation.
+    # mitmproxy applies this option to the observed size as the body arrives and
+    # streams past it, which is the half the engine cannot do for itself; the
+    # engine's `enforce_observed_size` is the guard behind it
+    # (SEP_5_REVIEW F-06). Registered by mitmproxy's own addon set, so it is set
+    # here rather than on the bare Options above.
+    # A string by mitmproxy's own type: the option accepts a human size, and a
+    # plain byte count is one.
+    master.options.stream_large_bodies = str(config.buffering.max_body_bytes)
 
     ring = RingBuffer(
         max_flows=config.capture.ring_max_flows,

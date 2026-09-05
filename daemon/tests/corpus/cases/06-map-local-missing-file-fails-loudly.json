@@ -1,6 +1,6 @@
 {
   "id": "06-map-local-missing-file-fails-loudly",
-  "description": "A map_local pointing at a file that is not there looks exactly like a rule that did not match, so it is recorded as an error and raises MAP_LOCAL_MISSING rather than passing the request through quietly (REQ PXY-034).",
+  "description": "A map_local pointing at a file that is not there looks exactly like a rule that did not match, so it is recorded as an error and raises MAP_LOCAL_MISSING rather than passing the request through quietly (REQ PXY-034). The request *does* go upstream, so the flow was not short-circuited and provenance must not say it was (SEP_5_REVIEW F-12).",
   "requirements": [
     "PXY-034",
     "CAP-010"
@@ -57,6 +57,6 @@
       }
     ],
     "total_ms": "<timing>",
-    "short_circuited_by": "corpus:0"
+    "short_circuited_by": null
   }
 }

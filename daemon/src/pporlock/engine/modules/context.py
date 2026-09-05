@@ -16,12 +16,16 @@ from __future__ import annotations
 import fnmatch
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 from ...errors import AssetPathError
 from ..models import NormalizedRequest, NormalizedResponse, SyntheticResponse
 from ..provenance import NoteCode, Severity
+
+#: Sentinel for a queued delete, distinct from a queued ``None``.
+_DELETED = object()
 
 #: The module API version this daemon implements (SPEC-0 §8.1).
 MODULE_API_VERSION = "1"
@@ -34,17 +38,47 @@ class ModuleStore:
     """Module-scoped persistent key/value storage (REQ MOD-022).
 
     Backed by SQLite with a write-through in-memory cache, so ``get`` never
-    touches disk on the proxy's event loop and ``set`` returns immediately. A
-    module doing bookkeeping across flows should not be able to make browsing
-    slower by doing it.
+    touches disk on the proxy's event loop and ``set`` returns immediately.
+
+    "Returns immediately" was not true of writes. ``set`` and ``delete`` opened
+    a connection and executed a statement on the caller's thread — and a request
+    hook's caller is the proxy event loop, so a module doing bookkeeping on every
+    request put SQLite connection setup, locking and journal work in front of
+    every other connection the browser had open (SEP_5_REVIEW F-13, REQ DD-3).
+
+    So the cache update is synchronous — read-after-write must hold, a module
+    reading back what it just wrote is ordinary — and persistence is queued to a
+    single background writer thread. Writes to one key coalesce: only the last
+    value queued is written, which is what makes a per-request counter cost one
+    statement per drain rather than one per request.
     """
 
-    __slots__ = ("_cache", "_module", "_path")
+    __slots__ = (
+        "_cache",
+        "_closed",
+        "_lock",
+        "_module",
+        "_path",
+        "_pending",
+        "_wake",
+        "_writer",
+        "last_error",
+    )
 
     def __init__(self, path: Path, module: str) -> None:
         self._path = path
         self._module = module
         self._cache: dict[str, Any] = {}
+        #: key -> value to write, or `_DELETED`. One entry per key: a module
+        #: that writes the same key on every flow drains as one statement.
+        self._pending: dict[str, Any] = {}
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._closed = False
+        self._writer: threading.Thread | None = None
+        #: The last persistence failure, or None. Surfaced in the module report:
+        #: a store that silently stopped persisting is worse than one that says so.
+        self.last_error: str | None = None
         self._load()
 
     def _connect(self) -> sqlite3.Connection:
@@ -78,29 +112,89 @@ class ModuleStore:
 
     def set(self, key: str, value: Any) -> None:
         self._cache[key] = value
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    "INSERT INTO store (module, key, value) VALUES (?, ?, ?) "
-                    "ON CONFLICT(module, key) DO UPDATE SET value = excluded.value",
-                    (self._module, key, json.dumps(value)),
-                )
-        except (sqlite3.Error, TypeError):
-            # The in-memory value stands; persistence is best-effort.
-            pass
+        self._enqueue(key, value)
 
     def delete(self, key: str) -> None:
         self._cache.pop(key, None)
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    "DELETE FROM store WHERE module = ? AND key = ?", (self._module, key)
-                )
-        except sqlite3.Error:
-            pass
+        self._enqueue(key, _DELETED)
 
     def keys(self) -> tuple[str, ...]:
         return tuple(sorted(self._cache))
+
+    # -- persistence -----------------------------------------------------
+
+    def _enqueue(self, key: str, value: Any) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._pending[key] = value
+            if self._writer is None:
+                # Started on first write rather than at construction: most
+                # modules never write, and a thread per loaded module that only
+                # ever reads is pure cost.
+                self._writer = threading.Thread(
+                    target=self._drain_forever,
+                    name=f"pporlock-store-{self._module}",
+                    daemon=True,
+                )
+                self._writer.start()
+        self._wake.set()
+
+    def _drain_forever(self) -> None:
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            self._drain_once()
+            if self._closed:
+                self._drain_once()
+                return
+
+    def _drain_once(self) -> None:
+        with self._lock:
+            batch = self._pending
+            self._pending = {}
+        if not batch:
+            return
+        try:
+            with self._connect() as connection:
+                for key, value in batch.items():
+                    if value is _DELETED:
+                        connection.execute(
+                            "DELETE FROM store WHERE module = ? AND key = ?", (self._module, key)
+                        )
+                    else:
+                        connection.execute(
+                            "INSERT INTO store (module, key, value) VALUES (?, ?, ?) "
+                            "ON CONFLICT(module, key) DO UPDATE SET value = excluded.value",
+                            (self._module, key, json.dumps(value)),
+                        )
+        except (sqlite3.Error, TypeError) as exc:
+            # The in-memory value stands; persistence is best-effort. Recorded
+            # rather than discarded, because "unexplained stalls plus silent
+            # durability loss" was the exact combination the review named
+            # (SEP_5_REVIEW F-13). The exception's own text only: a value that
+            # failed to serialise must not be echoed into a field that anything
+            # might later display or log (§2.5, A09).
+            self.last_error = f"{type(exc).__name__}: {exc}"
+
+    def flush(self) -> None:
+        """Write anything outstanding, on the calling thread.
+
+        Deliberately synchronous: the callers are reload and shutdown, where
+        blocking is correct. Without it a value written on the last flow before
+        a restart would be in the cache, reported by ``store_get``, and absent
+        from disk.
+        """
+        self._drain_once()
+
+    def close(self, timeout: float = 2.0) -> None:
+        """Stop the writer and persist what is left (REQ MOD-022)."""
+        self._closed = True
+        self._wake.set()
+        writer = self._writer
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=timeout)
+        self._drain_once()
 
 
 class ModuleContext:
@@ -203,6 +297,31 @@ class ModuleContext:
     def drain(self) -> None:
         self._notes.clear()
         self._log.clear()
+
+    def for_invocation(self) -> ModuleContext:
+        """A context for one hook call, owning its own notes and logs.
+
+        Everything a module may legitimately share across flows is shared —
+        configuration, assets, the persistent store, the transform registry.
+        What is *not* shared is the output buffers, because they belong to one
+        flow.
+
+        The registry used to hand every invocation the same context object. Two
+        concurrent response hooks in the same module appended into the same
+        lists, and whichever drained first carried away both flows' notes: a
+        note about one page attached to another, and the correct flow left with
+        none. Rare under a serial test, routine under a real page load
+        (SEP_5_REVIEW F-10, REQ CAP-010/012/013).
+        """
+        return ModuleContext(
+            name=self.name,
+            version=self.version,
+            config=self.config,
+            profile=self.profile,
+            assets=self._assets,
+            store=self._store,
+            registry=self._registry,
+        )
 
     # -- storage ---------------------------------------------------------
 

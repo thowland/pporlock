@@ -993,8 +993,15 @@ class ControlApp:
         if not isinstance(raw, list):
             raise RuleValidationError("'rules' must be a list")
 
+        # Compiled against the *live* transform registry, so a rule naming a
+        # transform that does not exist is rejected here rather than accepted
+        # and left to fail on the first request that matches it
+        # (SEP_5_REVIEW F-07, REQ MOD-014).
+        transforms = self.interceptor.evaluator.transforms if self.interceptor else None
         ruleset = await self.offload(
-            lambda: RuleSet.from_rules(raw, module=str(body.get("module") or "api"))
+            lambda: RuleSet.from_rules(
+                raw, module=str(body.get("module") or "api"), transforms=transforms
+            )
         )
 
         if self.interceptor is not None:
@@ -1212,7 +1219,12 @@ class ControlApp:
         raw_name = body.get("name")
         name = str(raw_name) if raw_name else None
         report = await self.offload(
-            validate_module_files, name, {k: str(v) for k, v in files.items()}
+            validate_module_files,
+            name,
+            {k: str(v) for k, v in files.items()},
+            # The live transform registry, so validation and load agree about
+            # what transforms exist (SEP_5_REVIEW F-07).
+            self.interceptor.evaluator.transforms if self.interceptor else None,
         )
         return JSONResponse(report.to_dict())
 

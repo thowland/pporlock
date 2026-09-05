@@ -166,20 +166,21 @@ def text(self) -> str | None: ...        # decoded per charset, None if not text
 Module and rule code does not mutate the frozen normalized objects. It returns, or accumulates into, a mutable proposal:
 
 ```python
+class HeaderOp(NamedTuple):
+    op: Literal["set", "add", "remove"]
+    name: str                            # lowercased
+    value: str                           # "" for a remove
+
 @dataclass
 class RequestMutation:
-    set_headers: dict[str, str]
-    add_headers: list[tuple[str, str]]
-    remove_headers: list[str]
+    ops: list[HeaderOp]                  # ordered; see below
     redirect: RedirectSpec | None
     short_circuit: SyntheticResponse | None
     body: bytes | None                   # None = unchanged
 
 @dataclass
 class ResponseMutation:
-    set_headers: dict[str, str]
-    add_headers: list[tuple[str, str]]
-    remove_headers: list[str]
+    ops: list[HeaderOp]
     status: int | None
     body: bytes | None                   # None = unchanged
 
@@ -200,6 +201,10 @@ class SyntheticResponse:
 ```
 
 The adapter (SPEC-1 §3) is the only code that applies a mutation to a mitmproxy flow.
+
+**Header operations are ordered.** `ops` is the storage; `set_headers` (a mapping of the net effect of every `set`), `add_headers` and `remove_headers` are read-only views over it, and writing goes through the `set(name, value)`, `add(name, value)` and `remove(name)` methods. The views are immutable so that assigning through one fails rather than being silently discarded.
+
+The order matters and is normative: operations apply in the order the rules declared them (REQ MOD-012, PXY-036). Rule 1 adding `X-Review` and rule 2 removing it leaves the header gone; the reverse declaration order leaves it present. Until the September 2026 review the three collections were applied remove-then-set-then-add, so both orders produced the same wire result while provenance faithfully reported two rules applied in the order written (SEP_5_REVIEW F-02).
 
 ### 3.4 Flow record
 
@@ -864,7 +869,9 @@ Returning `None` means no mutation. Raising is caught, logged, attributed, and d
 
 `on_websocket_message` is **read-only**: any value it returns is ignored. Frames are inspection-only in v1 (REQ PXY-051), and a hook whose return value were quietly dropped while provenance reported a change would be worse than one that cannot change anything at all.
 
-Mutations are `pporlock.engine.models.RequestMutation` and `ResponseMutation`. Both carry `set_headers`, `add_headers`, `remove_headers` and `body`; `RequestMutation` also carries `redirect` and `short_circuit` (a `SyntheticResponse`, as returned by `ctx.synthesize` or `ctx.stub_for`), and `ResponseMutation` also carries `status`.
+Mutations are `pporlock.engine.models.RequestMutation` and `ResponseMutation`. Both carry ordered header `ops` and `body`; `RequestMutation` also carries `redirect` and `short_circuit` (a `SyntheticResponse`, as returned by `ctx.synthesize` or `ctx.stub_for`), and `ResponseMutation` also carries `status`. Set headers with `mutation.set(name, value)`, `mutation.add(name, value)` and `mutation.remove(name)`; `set_headers`, `add_headers` and `remove_headers` remain available as read-only views (§3.3).
+
+**Notes and logs are per invocation.** The context a hook receives is a child of the module's own, owning its own note and log buffers while sharing configuration, assets, the persistent store and the transform registry. Two concurrent response hooks in the same module therefore cannot exchange notes — which they did, until the September 2026 review, whenever two flows overlapped (SEP_5_REVIEW F-10).
 
 A returned mutation is folded into the same mutation the declarative rules contribute to, rather than applied in a separate pass. That is what makes ordering between the two tiers meaningful (REQ MOD-023).
 

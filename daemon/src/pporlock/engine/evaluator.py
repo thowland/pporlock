@@ -248,28 +248,123 @@ class Evaluator:
         rule = self.ruleset.first_short_circuit(request)
         if rule is not None:
             self._apply_short_circuit(rule, request, decision, builder)
-            builder.short_circuit(rule.rule_id)
+            # Only when it took effect. `_apply_short_circuit` already refuses
+            # to claim the action for a rule that matched and then failed — a
+            # missing map_local file, an unknown stub — and recording the flow
+            # as short-circuited anyway contradicted it: the request went
+            # upstream and provenance named the rule that did not stop it
+            # (SEP_5_REVIEW F-12, REQ PXY-034, CAP-010).
+            if decision.short_circuit_action is not None:
+                builder.short_circuit(rule.rule_id)
 
         # Header rules still run on a short-circuited request: a rule that adds
         # a header the synthesised response should carry is legitimate, and
         # skipping them silently would be surprising.
+        state = _HeaderState(request.headers)
         for header_rule in self.ruleset.matching_request_headers(request):
             self._apply_header_rule(
-                header_rule, "request", decision.mutation, builder, Phase.REQUEST_HEADERS
+                header_rule,
+                "request",
+                decision.mutation,
+                builder,
+                Phase.REQUEST_HEADERS,
+                state,
             )
 
         self._run_python_hooks(
-            "on_request", builder, decision.mutation, request=request, decision=decision
+            "on_request",
+            builder,
+            decision.mutation,
+            request=request,
+            decision=decision,
+            budget=budget,
         )
 
-        decision.wants_body = self.ruleset.wants_body(request)
+        decision.wants_body = self.wants_body(request)
 
-        # Charge the budget for request-side work too. Matching a large rule set
+        # Charge the budget for the matching work too. Matching a large rule set
         # is not free, and a budget that only counted body transforms would let
-        # the request phase overrun it unnoticed.
+        # the request phase overrun it unnoticed. Hook time is charged inside
+        # `_run_python_hooks`, per hook, so that one slow module is what stops
+        # rather than the module that happens to run after it.
         if budget is not None:
             budget.consume((time.perf_counter() - started) * 1000)
         return decision
+
+    # -- body demand and offload, over both tiers ------------------------
+
+    def wants_body(self, request: NormalizedRequest) -> bool:
+        """Could anything transform this response body?
+
+        Both tiers, not just the declarative one. `RuleSet.wants_body` knows
+        only about body rules, so a module whose entire content is an
+        `on_response` hook — a layout the Python tutorial presents as
+        supported — reported no body demand, streamed, and was handed
+        `response.body=None`. The hook ran and could do nothing, and nothing
+        said so (SEP_5_REVIEW F-01, REQ MOD-020, PXY-021).
+        """
+        return self.ruleset.wants_body(request) or self.has_response_hook()
+
+    def has_response_hook(self) -> bool:
+        """Whether any module active in this snapshot reads response bodies."""
+        if self.registry is None:
+            return False
+        profile_modules = None if not self.ruleset.modules else list(self.ruleset.modules)
+        return any(
+            "on_response" in module.hooks() for module in self.registry.active(profile_modules)
+        )
+
+    def should_offload(self, request: NormalizedRequest, response: NormalizedResponse) -> bool:
+        """Whether this flow's body work belongs on a worker thread.
+
+        Python response hooks count. They were absent from this decision
+        entirely, so a hook-only module ran inline on the proxy event loop
+        however large the body, while an unrelated declarative transform on the
+        same flow would have moved it to a worker — non-local behaviour, and the
+        opposite of what SPEC-1 documents (REQ PXY-024, MOD-023).
+
+        A hook's cost is unknown, so it is treated the way a module-registered
+        transform is: expensive above the configured threshold. That is the same
+        rule `decide_offload` applies to a SIZED transform, and the threshold is
+        the one the operator configured.
+        """
+        if any(
+            decide_offload(
+                str(t.get("kind", "")), response.body_size, self.offload_threshold
+            ).offload
+            for rule in self.ruleset.matching_response_body(request, response)
+            for t in _transforms_of(rule)
+        ):
+            return True
+        return self.has_response_hook() and response.body_size >= self.offload_threshold
+
+    def enforce_observed_size(
+        self, response: NormalizedResponse, builder: ProvenanceBuilder
+    ) -> bool:
+        """Whether a buffered body turned out to be too large to transform.
+
+        PXY-021 bounds a body by its declared *or observed* size.
+        `decide_buffering` can only see the declared one, and a chunked response
+        declares nothing — so an arbitrarily large HTML or JSON body could be
+        accumulated for transformation with no later guard. mitmproxy's own
+        `stream_large_bodies` is the memory bound (set from the same
+        configuration in `cli/runner.py`); this is the engine-side half, and it
+        is what makes the transition visible in provenance rather than leaving a
+        transform to be silently attempted on a body over the cap
+        (SEP_5_REVIEW F-06).
+        """
+        if response.streamed or response.body is None:
+            return False
+        if response.body_size <= self.max_buffer_bytes:
+            return False
+        builder.note(
+            NoteCode.RESPONSE_STREAMED,
+            f"body arrived at {response.body_size} bytes, over the "
+            f"{self.max_buffer_bytes} threshold; body transforms were skipped",
+            reason="observed_size",
+            observed_bytes=response.body_size,
+        )
+        return True
 
     def _asset_root_for(self, rule: CompiledRule) -> Path | None:
         """Where a rule's ``file:`` is resolved from.
@@ -537,6 +632,11 @@ class Evaluator:
             action=Action.BODY,
             outcome=Outcome.APPLIED,
             buffered=True,
+            # A chunked response declares no length, so this decision is taken
+            # on trust and re-checked against the delivered bytes in
+            # `enforce_observed_size`. Recorded so that a flow which then
+            # exceeds the cap has both halves of the story (REQ PXY-021).
+            declared_length=content_length,
         )
         return BufferingDecision(buffer=True)
 
@@ -556,9 +656,10 @@ class Evaluator:
         changes nothing. Found end to end rather than by reading.
         """
         decision = ResponseDecision()
+        state = _HeaderState(response.headers)
         for rule in self.ruleset.matching_response_headers(request, response):
             self._apply_header_rule(
-                rule, "response", decision.mutation, builder, Phase.RESPONSE_HEADERS
+                rule, "response", decision.mutation, builder, Phase.RESPONSE_HEADERS, state
             )
 
         # strip_csp is written as a body transform in the rule schema, but it
@@ -724,7 +825,12 @@ class Evaluator:
             response = replace(response, body=decision.mutation.body)
 
         self._run_python_hooks(
-            "on_response", builder, decision.mutation, request=request, response=response
+            "on_response",
+            builder,
+            decision.mutation,
+            request=request,
+            response=response,
+            budget=budget,
         )
 
         return decision
@@ -804,10 +910,13 @@ class Evaluator:
             None if not self.ruleset.modules else list(self.ruleset.modules)
         ):
             fn = module.hooks().get("on_websocket_message")
-            context = self.registry.context(module.name)
-            if fn is None or context is None:
+            base = self.registry.context(module.name)
+            if fn is None or base is None:
                 continue
 
+            # Per invocation, for the same reason the HTTP hooks are: frames
+            # from two sockets arrive interleaved (SEP_5_REVIEW F-10).
+            context = base.for_invocation()
             started = time.perf_counter()
             try:
                 fn(message, request, context)
@@ -830,12 +939,10 @@ class Evaluator:
                     duration_ms=(time.perf_counter() - started) * 1000,
                     error=str(exc),
                 )
-                context.drain()
                 continue
 
             for code, severity, note_message, detail in context.notes:
                 builder.note(code, note_message, severity=severity, module=module.name, **detail)
-            context.drain()
 
     def _run_python_hooks(
         self,
@@ -846,6 +953,7 @@ class Evaluator:
         request: NormalizedRequest,
         response: NormalizedResponse | None = None,
         decision: Any = None,
+        budget: TimeBudget | None = None,
     ) -> None:
         """Run each active module's hook, isolated from every other.
 
@@ -861,9 +969,39 @@ class Evaluator:
             None if not self.ruleset.modules else list(self.ruleset.modules)
         ):
             fn = module.hooks().get(hook)
-            context = self.registry.context(module.name)
-            if fn is None or context is None:
+            base = self.registry.context(module.name)
+            if fn is None or base is None:
                 continue
+
+            # The per-flow budget bounds hooks as well as transforms
+            # (REQ PXY-026, PRF-006). It cannot interrupt a hook that has
+            # already started — nothing in-process can — but charging each hook
+            # as it returns, and stopping before the next one, is what keeps one
+            # slow module from spending every other module's share of the flow.
+            # Previously the whole request phase was charged once, after every
+            # hook had run (SEP_5_REVIEW F-01).
+            if budget is not None and budget.exhausted:
+                builder.record(
+                    phase=Phase.REQUEST_HEADERS if response is None else Phase.RESPONSE_BODY,
+                    module=module.name,
+                    rule_id=f"{module.name}:python",
+                    rule_name=hook,
+                    action=Action.HEADERS if response is None else Action.BODY,
+                    outcome=Outcome.SKIPPED_BUDGET,
+                )
+                builder.note(
+                    NoteCode.TRANSFORM_BUDGET_EXCEEDED,
+                    f"per-flow budget exhausted; {module.name}.{hook} was not run",
+                    module=module.name,
+                )
+                continue
+
+            # Notes and logs are per invocation, not per module. One context
+            # object per loaded module meant two concurrent flows appended into
+            # the same lists and the first to drain took both — a note about one
+            # page attached to another, and the correct flow left with none
+            # (SEP_5_REVIEW F-10, REQ CAP-010/012).
+            context = base.for_invocation()
 
             started = time.perf_counter()
             try:
@@ -896,12 +1034,16 @@ class Evaluator:
                     duration_ms=(time.perf_counter() - started) * 1000,
                     error=str(exc),
                 )
+                if budget is not None:
+                    budget.consume((time.perf_counter() - started) * 1000)
                 continue
 
             for code, severity, message, detail in context.notes:
                 builder.note(code, message, severity=severity, module=module.name, **detail)
-            context.drain()
 
+            elapsed = (time.perf_counter() - started) * 1000
+            if budget is not None:
+                budget.consume(elapsed)
             builder.record(
                 phase=Phase.REQUEST_HEADERS if response is None else Phase.RESPONSE_BODY,
                 module=module.name,
@@ -909,7 +1051,7 @@ class Evaluator:
                 rule_name=hook,
                 action=Action.HEADERS if response is None else Action.BODY,
                 outcome=outcome,
-                duration_ms=(time.perf_counter() - started) * 1000,
+                duration_ms=elapsed,
             )
 
     def _apply_header_rule(
@@ -919,6 +1061,7 @@ class Evaluator:
         mutation: Any,
         builder: ProvenanceBuilder,
         phase: Phase,
+        state: _HeaderState | None = None,
     ) -> None:
         started = time.perf_counter()
         ops = rule.params.get(side) or {}
@@ -931,18 +1074,30 @@ class Evaluator:
         # attached to the act, not to the transform that happens to perform it.
         touched_csp: list[str] = []
 
+        # `changed` is what the operation does to the message, not what the
+        # rule declares. Removing a header that is not there and setting one to
+        # the value it already holds are both no-ops, and recording them as
+        # `applied` put untouched flows into the UI's "was modified" filter —
+        # capture derives that state from provenance (SEP_5_REVIEW F-12).
+        #
+        # The state is threaded across every rule in the phase rather than read
+        # from the message each time, so a rule removing a header an earlier
+        # rule added is correctly a change, and a second rule removing the same
+        # header is correctly not.
         for name in ops.get("remove", []) or []:
             mutation.remove(str(name))
-            changed = True
+            changed |= state is None or state.remove(str(name))
             if _is_csp_header(str(name)):
                 touched_csp.append(str(name).lower())
         for name, value in (ops.get("set") or {}).items():
             mutation.set(str(name), str(value))
-            changed = True
+            changed |= state is None or state.set(str(name), str(value))
             if _is_csp_header(str(name)):
                 touched_csp.append(str(name).lower())
         for name, value in (ops.get("add") or {}).items():
             mutation.add(str(name), str(value))
+            if state is not None:
+                state.add(str(name), str(value))
             changed = True
 
         if touched_csp and side == "response":
@@ -965,6 +1120,36 @@ class Evaluator:
             side=side,
             operations=ops,
         )
+
+
+class _HeaderState:
+    """The header collection a phase's rules are collectively editing.
+
+    Pure — it models what the adapter will do to the mitmproxy Headers object,
+    so the evaluator can record whether an operation actually changes anything
+    without reaching across the boundary it exists to stay behind (REQ DD-2).
+    Each method returns whether the state moved.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, headers: tuple[tuple[str, str], ...]) -> None:
+        self._values: dict[str, list[str]] = {}
+        for name, value in headers:
+            self._values.setdefault(name.lower(), []).append(value)
+
+    def remove(self, name: str) -> bool:
+        return self._values.pop(name.lower(), None) is not None
+
+    def set(self, name: str, value: str) -> bool:
+        key = name.lower()
+        if self._values.get(key) == [value]:
+            return False
+        self._values[key] = [value]
+        return True
+
+    def add(self, name: str, value: str) -> None:
+        self._values.setdefault(name.lower(), []).append(value)
 
 
 #: Content-Security-Policy and its report-only sibling, lowercased.
@@ -1024,13 +1209,28 @@ def _merge_mutation(target: Any, source: Any) -> None:
     Modules contribute to the same mutation declarative rules do, rather than
     getting their own application pass — which is what makes ordering between
     the two meaningful (REQ MOD-023).
+
+    Header operations are folded in the order the source declared them, so a
+    hook that adds a header and then removes it means what it says. A source
+    without ``ops`` is a hand-built object from trusted module code; it is
+    honoured in the only order it expresses.
     """
-    for name, value in getattr(source, "set_headers", {}).items():
-        target.set(name, value)
-    for name, value in getattr(source, "add_headers", []):
-        target.add(name, value)
-    for name in getattr(source, "remove_headers", []):
-        target.remove(name)
+    ops = getattr(source, "ops", None)
+    if ops is not None:
+        for op, name, value in ops:
+            if op == "set":
+                target.set(name, value)
+            elif op == "add":
+                target.add(name, value)
+            else:
+                target.remove(name)
+    else:
+        for name, value in getattr(source, "set_headers", {}).items():
+            target.set(name, value)
+        for name, value in getattr(source, "add_headers", []):
+            target.add(name, value)
+        for name in getattr(source, "remove_headers", []):
+            target.remove(name)
 
     body = getattr(source, "body", None)
     if body is not None:

@@ -92,6 +92,26 @@ class RingBuffer:
         self._evict()
         return record
 
+    def adjust(self, flow_id: str, delta: int) -> None:
+        """Account for bytes added to or removed from a record already held.
+
+        The byte counter moved only in ``add`` and ``update``. A WebSocket
+        record grows by direct append — ``record.ws_messages`` is a list, and
+        the sink appends to it — so a long-lived, high-volume socket grew
+        without ever moving the counter that ``max_bytes`` bounds. Individual
+        payloads were capped; the accumulation was not, and the ring's own
+        statistics under-reported what it was holding (SEP_5_REVIEW F-05,
+        REQ CAP-003, PRF-005).
+
+        A delta rather than a re-measurement: this runs once per frame, and
+        re-summing every record in the ring on every frame of a busy socket
+        would trade a memory bug for a throughput one.
+        """
+        if flow_id not in self._records or not delta:
+            return
+        self._bytes += delta
+        self._evict()
+
     def _evict(self) -> None:
         while self._records and (
             len(self._records) > self.max_flows or self._bytes > self.max_bytes

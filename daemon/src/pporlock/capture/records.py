@@ -90,6 +90,11 @@ class FlowRecord:
     ws_messages: list[WebSocketMessage] = field(default_factory=list)
     ws_closed: bool = False
     ws_close_code: int | None = None
+    #: Frames dropped from the front to keep this record within its retention
+    #: bound (REQ PXY-050, CAP-003). Non-zero means the capture is a window on
+    #: the socket, not the whole of it — said out loud for the same reason a
+    #: truncated body is flagged rather than silently shortened.
+    ws_dropped: int = 0
 
     # -- derived, used by the filter vocabulary (SPEC-0 §6.5) ---------------
 

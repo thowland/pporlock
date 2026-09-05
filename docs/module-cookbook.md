@@ -556,18 +556,25 @@ does not affect the flow; repeated raises quarantine the module.
 ```python
 from pporlock.engine.models import RequestMutation, ResponseMutation
 
-RequestMutation(
-    set_headers={"x-thing": "1"},      # replaces every occurrence
-    add_headers=[("x-thing", "2")],    # appends another
-    remove_headers=["cookie"],
+mutation = RequestMutation(
     body=b"...",
     redirect=RedirectSpec(host="localhost", port=5173),
     short_circuit=ctx.synthesize(...),  # ends the flow here
 )
+mutation.set("x-thing", "1")            # replaces every occurrence
+mutation.add("x-thing", "2")            # appends another
+mutation.remove("cookie")
 
-ResponseMutation(set_headers=..., add_headers=..., remove_headers=...,
-                 status=503, body=b"...")
+response_mutation = ResponseMutation(status=503, body=b"...")
+response_mutation.remove("content-security-policy")
 ```
+
+Header edits apply **in the order you make them**, and in the order your rules
+declare them relative to every other module's. `add` then `remove` on the same
+header leaves it gone; `remove` then `add` leaves it present. Read them back
+through `mutation.set_headers` (a mapping of the net effect of every `set`),
+`mutation.add_headers` and `mutation.remove_headers` — those are read-only
+views, so assigning into one raises rather than being silently dropped.
 
 ### The `ctx` surface
 

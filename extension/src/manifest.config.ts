@@ -61,8 +61,8 @@ interface Manifest {
 const manifest: Manifest = {
   manifest_version: 3,
   name: 'pporlock',
-  version: '0.12.4',
-  version_name: '0.12.4',
+  version: '0.12.5',
+  version_name: '0.12.5',
   description: 'Control and observe the pporlock local interception proxy.',
   minimum_chrome_version: '116',
   permissions: ['proxy', 'storage', 'tabs', 'alarms', 'webRequest', 'notifications'],

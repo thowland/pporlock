@@ -434,8 +434,8 @@ class TestHeaderRules:
             ]
         )
         decision = ev.evaluate_request(req(), b)
-        assert decision.mutation.add_headers == [("x-test", "1")]
-        assert decision.mutation.remove_headers == ["cookie"]
+        assert decision.mutation.add_headers == (("x-test", "1"),)
+        assert decision.mutation.remove_headers == ("cookie",)
 
     def test_response_headers_are_applied(self) -> None:
         b = builder()
@@ -449,7 +449,7 @@ class TestHeaderRules:
             ]
         )
         decision = ev.evaluate_response(req(), resp(), b)
-        assert decision.mutation.remove_headers == ["content-security-policy"]
+        assert decision.mutation.remove_headers == ("content-security-policy",)
 
     def test_all_matching_rules_apply_in_order(self) -> None:
         b = builder()
@@ -460,7 +460,7 @@ class TestHeaderRules:
             ]
         )
         decision = ev.evaluate_response(req(), resp(), b)
-        assert decision.mutation.remove_headers == ["a", "b"]
+        assert decision.mutation.remove_headers == ("a", "b")
 
     def test_a_rule_that_changes_nothing_records_no_change(self) -> None:
         b = builder()
@@ -484,7 +484,7 @@ class TestHeaderRules:
         )
         decision = ev.evaluate_request(req(), b)
         assert decision.blocked
-        assert decision.mutation.add_headers == [("x", "1")]
+        assert decision.mutation.add_headers == (("x", "1"),)
 
 
 class TestBuffering:

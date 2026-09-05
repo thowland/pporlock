@@ -13,8 +13,10 @@ the dry runner depends on (REQ CAP-031).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, NamedTuple
 
 Scheme = Literal["http", "https"]
 BodyEncoding = Literal["utf8", "base64"]
@@ -199,27 +201,64 @@ class SyntheticResponse:
         return None
 
 
+class HeaderOp(NamedTuple):
+    """One header edit, in the order it was declared.
+
+    ``value`` is empty for a remove. Keeping the operation stream rather than
+    three per-operation containers is what preserves MOD-012's all-match,
+    applied-in-order semantics across rules that use *different* operations: an
+    add in rule 1 and a remove in rule 2 must leave the header gone, and the
+    reverse order must leave it present. Three containers applied
+    remove-then-set-then-add cannot express either (SEP_5_REVIEW F-02).
+    """
+
+    op: Literal["set", "add", "remove"]
+    name: str
+    value: str = ""
+
+
 @dataclass(slots=True)
 class HeaderMutation:
-    """Accumulated header edits. Names are compared case-insensitively (REQ PXY-036)."""
+    """Accumulated header edits. Names are compared case-insensitively (REQ PXY-036).
 
-    set_headers: dict[str, str] = field(default_factory=dict)
-    add_headers: list[tuple[str, str]] = field(default_factory=list)
-    remove_headers: list[str] = field(default_factory=list)
+    ``ops`` is the storage; ``set_headers``, ``add_headers`` and
+    ``remove_headers`` are read-only views over it, kept because SPEC-0 §8.3
+    documents them and module code reads them. Writing goes through ``set``,
+    ``add`` and ``remove`` — the views are immutable so that an assignment
+    through one fails loudly instead of being silently discarded.
+    """
+
+    ops: list[HeaderOp] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not (self.set_headers or self.add_headers or self.remove_headers)
+        return not self.ops
 
     def remove(self, name: str) -> None:
-        lowered = name.lower()
-        if lowered not in [r.lower() for r in self.remove_headers]:
-            self.remove_headers.append(lowered)
+        self.ops.append(HeaderOp("remove", name.lower()))
 
     def set(self, name: str, value: str) -> None:
-        self.set_headers[name.lower()] = value
+        self.ops.append(HeaderOp("set", name.lower(), value))
 
     def add(self, name: str, value: str) -> None:
-        self.add_headers.append((name.lower(), value))
+        self.ops.append(HeaderOp("add", name.lower(), value))
+
+    @property
+    def set_headers(self) -> Mapping[str, str]:
+        """The net effect of every ``set``, last one winning."""
+        merged: dict[str, str] = {}
+        for op, name, value in self.ops:
+            if op == "set":
+                merged[name] = value
+        return MappingProxyType(merged)
+
+    @property
+    def add_headers(self) -> tuple[tuple[str, str], ...]:
+        return tuple((name, value) for op, name, value in self.ops if op == "add")
+
+    @property
+    def remove_headers(self) -> tuple[str, ...]:
+        """Every header a remove names, deduplicated, in declaration order."""
+        return tuple(dict.fromkeys(name for op, name, _ in self.ops if op == "remove"))
 
 
 @dataclass(slots=True)

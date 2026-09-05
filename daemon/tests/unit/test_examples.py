@@ -394,7 +394,7 @@ class TestUserAgentSwitcher:
         registry.set_config("user-agent-switcher", {"strip_client_hints": False})
         builder = ProvenanceBuilder("default")
         decision = self.evaluator(registry).evaluate_request(request(), builder)
-        assert decision.mutation.remove_headers == []
+        assert decision.mutation.remove_headers == ()
 
     def test_the_host_list_is_what_scopes_it(self, installed: Path) -> None:
         """The difference between auditing one site and announcing yourself as

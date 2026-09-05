@@ -631,15 +631,25 @@ class TestQuarantine:
 
 
 class TestModuleStore:
-    """REQ MOD-022 — per-module persistence that cannot slow browsing down."""
+    """REQ MOD-022 — per-module persistence that cannot slow browsing down.
+
+    Writes are queued to a background thread and flushed on reload and
+    shutdown, so a test that reopens the file has to flush first (SEP_5_REVIEW
+    F-13). That the flush is *needed* is the point: before it, the SQLite write
+    happened on the proxy event loop.
+    """
 
     def test_a_value_survives_a_new_store_on_the_same_file(self, tmp_path: Path) -> None:
-        ModuleStore(tmp_path / "s.db", "tidy").set("seen", 3)
+        store = ModuleStore(tmp_path / "s.db", "tidy")
+        store.set("seen", 3)
+        store.flush()
         assert ModuleStore(tmp_path / "s.db", "tidy").get("seen") == 3
 
     def test_modules_cannot_see_each_others_keys(self, tmp_path: Path) -> None:
         """Shared storage would make one module's bookkeeping another's bug."""
-        ModuleStore(tmp_path / "s.db", "alpha").set("k", "alpha")
+        store = ModuleStore(tmp_path / "s.db", "alpha")
+        store.set("k", "alpha")
+        store.flush()
         assert ModuleStore(tmp_path / "s.db", "beta").get("k") is None
 
     def test_a_missing_key_returns_the_default(self, tmp_path: Path) -> None:
@@ -648,14 +658,18 @@ class TestModuleStore:
     def test_delete_removes_it_from_disk_too(self, tmp_path: Path) -> None:
         store = ModuleStore(tmp_path / "s.db", "tidy")
         store.set("k", 1)
+        store.flush()
         store.delete("k")
+        store.flush()
         assert ModuleStore(tmp_path / "s.db", "tidy").get("k") is None
 
     def test_deleting_something_absent_is_not_an_error(self, tmp_path: Path) -> None:
         ModuleStore(tmp_path / "s.db", "tidy").delete("never-existed")
 
     def test_structured_values_round_trip(self, tmp_path: Path) -> None:
-        ModuleStore(tmp_path / "s.db", "tidy").set("k", {"a": [1, 2]})
+        store = ModuleStore(tmp_path / "s.db", "tidy")
+        store.set("k", {"a": [1, 2]})
+        store.flush()
         assert ModuleStore(tmp_path / "s.db", "tidy").get("k") == {"a": [1, 2]}
 
     def test_an_unserialisable_value_still_reads_back_in_this_process(self, tmp_path: Path) -> None:
@@ -663,7 +677,9 @@ class TestModuleStore:
         stashed something exotic."""
         store = ModuleStore(tmp_path / "s.db", "tidy")
         store.set("k", object())
+        store.flush()
         assert store.get("k") is not None
+        assert store.last_error is not None
         assert ModuleStore(tmp_path / "s.db", "tidy").get("k") is None
 
     def test_keys_are_listed_in_order(self, tmp_path: Path) -> None:

@@ -75,6 +75,10 @@ class TransformSpec:
     #: At least one of these must be present, when the transform needs a choice.
     one_of: tuple[str, ...] = ()
     optional: tuple[str, ...] = ()
+    #: An extra load-time check for parameters whose validity is more than
+    #: presence — a regex that must compile, say. Raising `TransformError` here
+    #: is what turns a per-flow runtime failure into a named load error.
+    check: Callable[[dict[str, Any]], None] | None = None
 
     def validate(self, params: dict[str, Any], *, module: str = "", index: int = 0) -> None:
         missing = [name for name in self.required if params.get(name) in (None, "")]
@@ -103,6 +107,17 @@ class TransformSpec:
                 rule_index=index,
                 field=next(iter(sorted(unknown))),
             )
+
+        if self.check is not None:
+            try:
+                self.check(params)
+            except TransformError as exc:
+                raise RuleValidationError(
+                    f"{self.name}: {exc.message}",
+                    module=module,
+                    rule_index=index,
+                    field="kind",
+                ) from exc
 
 
 class TransformRegistry:
@@ -196,7 +211,7 @@ def build_registry() -> TransformRegistry:
         strip_integrity_attributes,
     )
     from .json_ops import json_patch
-    from .text import regex_sub, replace_literal
+    from .text import check_regex_sub, regex_sub, replace_literal
 
     registry = TransformRegistry()
     registry.register(
@@ -227,6 +242,7 @@ def build_registry() -> TransformRegistry:
             Cost.SIZED,
             required=("pattern", "repl"),
             optional=("count", "flags"),
+            check=check_regex_sub,
         )
     )
     registry.register(

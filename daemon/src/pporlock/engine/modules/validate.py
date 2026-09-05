@@ -138,7 +138,9 @@ def declared_name(files: Mapping[str, str]) -> str | None:
     return str(name) if isinstance(name, str) and name else None
 
 
-def validate_module_files(name: str | None, files: Mapping[str, str]) -> ValidationReport:
+def validate_module_files(
+    name: str | None, files: Mapping[str, str], transforms: Any = None
+) -> ValidationReport:
     """Validate a candidate module's files without installing or running them.
 
     ``name`` is the directory the module would be installed into, which the
@@ -176,12 +178,12 @@ def validate_module_files(name: str | None, files: Mapping[str, str]) -> Validat
         )
 
     manifest_source = files[MANIFEST_NAME]
-    issues.extend(_validate_manifest(name, manifest_source))
+    issues.extend(_validate_manifest(name, manifest_source, transforms))
     issues.extend(_validate_python(files.get(PYTHON_NAME)))
     return ValidationReport(tuple(issues))
 
 
-def _validate_manifest(name: str, source: str) -> list[ValidationIssue]:
+def _validate_manifest(name: str, source: str, transforms: Any = None) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     try:
         raw = yaml.safe_load(source) or {}
@@ -238,7 +240,7 @@ def _validate_manifest(name: str, source: str) -> list[ValidationIssue]:
         )
 
     issues.extend(_validate_settings(raw, source))
-    issues.extend(_validate_rules(name, raw, source))
+    issues.extend(_validate_rules(name, raw, source, transforms))
     return issues
 
 
@@ -266,7 +268,9 @@ def _validate_settings(raw: dict[str, Any], source: str) -> list[ValidationIssue
     return []
 
 
-def _validate_rules(name: str, raw: dict[str, Any], source: str) -> list[ValidationIssue]:
+def _validate_rules(
+    name: str, raw: dict[str, Any], source: str, transforms: Any = None
+) -> list[ValidationIssue]:
     entries = raw.get("rules") or []
     rules_line = _manifest_line(source, "rules")
     if not isinstance(entries, list):
@@ -306,7 +310,7 @@ def _validate_rules(name: str, raw: dict[str, Any], source: str) -> list[Validat
         try:
             # The loader's own compiler, not a copy of its checks. Anything it
             # rejects here it would reject at load (REQ MOD-014).
-            compile_rule(entry, module=name, index=index, priority=priority)
+            compile_rule(entry, module=name, index=index, priority=priority, transforms=transforms)
         except PporlockError as exc:
             issues.append(
                 ValidationIssue(

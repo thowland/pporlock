@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
 from ..config import Config
-from ..engine.cost import ModuleCostIndex, decide_offload
+from ..engine.cost import ModuleCostIndex
 from ..engine.evaluator import Evaluator, TimeBudget
 from ..engine.exclusions import ExclusionList, load_exclusions
 from ..engine.provenance import NoteCode, Provenance, ProvenanceBuilder
@@ -170,6 +171,27 @@ class Interceptor:
         self.evaluator = (
             evaluator if evaluator is not None else Evaluator(RuleSet(), exclusions=self.exclusions)
         )
+        # Body work goes to a pool of our own, sized from configuration
+        # (`budget.executor_workers`). It used to go to `run_in_executor(None,
+        # ...)`, asyncio's process-wide default — which ignored the setting
+        # entirely and shared its threads with the control plane's filesystem
+        # work, so an expensive transform could delay a reload and a reload
+        # could delay a transform (SEP_5_REVIEW F-11, REQ PXY-024, PRF-004).
+        self.executor = ThreadPoolExecutor(
+            max_workers=max(1, self.config.budget.executor_workers),
+            thread_name_prefix="pporlock-body",
+        )
+
+    def _evaluator_of(self, flow: Any) -> Evaluator:
+        """The evaluator this flow was started on (REQ MOD-004).
+
+        Falls back to the current one for a flow that never went through
+        ``request`` — a response synthesised by another addon, or a test that
+        drives one phase in isolation. That is the only case where the two can
+        legitimately differ.
+        """
+        stashed = flow.metadata.get("pporlock.evaluator")
+        return stashed if stashed is not None else self.evaluator
 
     # -- lifecycle -------------------------------------------------------
 
@@ -191,6 +213,7 @@ class Interceptor:
 
     def done(self) -> None:
         """Called on shutdown."""
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
     # -- interception hooks ----------------------------------------------
 
@@ -266,6 +289,15 @@ class Interceptor:
         _stash(flow, "started", started)
         _stash(flow, "wants_body", decision.wants_body)
         _stash(flow, "budget", budget)
+        # The evaluator itself, not just the values derived from it. A reload
+        # swaps `self.evaluator` atomically, which is enough only if each flow
+        # keeps the object it was evaluated against: dereferencing the attribute
+        # again at responseheaders and again at response let one flow be
+        # evaluated by two rule generations, combining generation A's
+        # body-demand flag with generation B's body rules, and naming in
+        # provenance a module set that never governed it
+        # (SEP_5_REVIEW F-03, REQ MOD-004).
+        _stash(flow, "evaluator", self.evaluator)
 
         self.counters.flows_total += 1
 
@@ -283,6 +315,7 @@ class Interceptor:
         builder = flow.metadata.get("pporlock.builder")
         if request is None or builder is None:
             return
+        evaluator = self._evaluator_of(flow)
 
         length: int | None
         try:
@@ -294,11 +327,11 @@ class Interceptor:
         # streams, mitmproxy has already put its headers on the wire, so a
         # mutation computed later is recorded as applied and changes nothing.
         response = normalize.normalize_response(flow, flow_id=_flow_id(flow))
-        header_decision = self.evaluator.evaluate_response_headers(request, response, builder)
+        header_decision = evaluator.evaluate_response_headers(request, response, builder)
         if apply_mod.apply_response_mutation(flow, header_decision.mutation):
             self.counters.modified += 1
 
-        decision = self.evaluator.decide_buffering(
+        decision = evaluator.decide_buffering(
             request,
             flow.response.headers.get("content-type"),
             length,
@@ -341,22 +374,6 @@ class Interceptor:
             toggles=active,
         )
 
-    def _should_offload(self, request: Any, response: Any) -> bool:
-        """Whether this flow's body work belongs on a worker thread.
-
-        Sprint 9 classified the work; this is what honours the classification.
-        Without it the decision would be advisory — recorded in provenance and
-        ignored in practice — and a document-parsing transform on a large page
-        would stall every other connection the browser has open.
-        """
-        return any(
-            decide_offload(
-                str(t.get("kind", "")), response.body_size, self.evaluator.offload_threshold
-            ).offload
-            for rule in self.evaluator.ruleset.matching_response_body(request, response)
-            for t in _rule_transforms(rule)
-        )
-
     async def response(self, flow: Any) -> None:
         """Response-side evaluation and flow completion.
 
@@ -377,22 +394,35 @@ class Interceptor:
             streamed=streamed,
         )
 
+        evaluator = self._evaluator_of(flow)
+
         if request is not None:
+            # PXY-021 bounds a body by its declared *or* observed size, and a
+            # chunked response declares nothing. mitmproxy's own
+            # `stream_large_bodies` (set from the same configuration) is the
+            # memory bound; this is what stops a transform being attempted on a
+            # body over the cap and records why (SEP_5_REVIEW F-06).
+            if evaluator.enforce_observed_size(response, builder):
+                response = normalize.normalize_response(
+                    flow, flow_id=_flow_id(flow), body=None, streamed=True
+                )
+                streamed = True
+
             # Headers were already applied in responseheaders(); only body work
             # remains here.
             budget = _unstash(flow, "budget")
-            if self._should_offload(request, response):
+            if evaluator.should_offload(request, response):
                 loop = asyncio.get_running_loop()
                 decision = await loop.run_in_executor(
-                    None,
-                    self.evaluator.evaluate_response_body,
+                    self.executor,
+                    evaluator.evaluate_response_body,
                     request,
                     response,
                     builder,
                     budget,
                 )
             else:
-                decision = self.evaluator.evaluate_response_body(request, response, builder, budget)
+                decision = evaluator.evaluate_response_body(request, response, builder, budget)
             if apply_mod.apply_response_mutation(flow, decision.mutation):
                 self.counters.modified += 1
                 # Re-normalise so the captured response is the one the browser
@@ -407,6 +437,7 @@ class Interceptor:
                 )
 
         _unstash(flow, "wants_body")
+        _unstash(flow, "evaluator")
 
         elapsed_ms = (time.perf_counter() - started) * 1000 if started is not None else 0.0
         provenance = builder.build(elapsed_ms)
@@ -416,8 +447,8 @@ class Interceptor:
         # module. One walk each, both O(entries), in the same place the flow
         # counters already increment (REQ PRF-007).
         self.module_cost.record(provenance)
-        if self.evaluator.registry is not None:
-            self.evaluator.registry.record_provenance(provenance)
+        if evaluator.registry is not None:
+            evaluator.registry.record_provenance(provenance)
         self.sink.record_http(request, response, provenance, {"pporlock_ms": elapsed_ms})
 
     def error(self, flow: Any) -> None:
@@ -664,15 +695,3 @@ def _stash(flow: Any, key: str, value: Any) -> None:
 
 def _unstash(flow: Any, key: str) -> Any:
     return flow.metadata.pop(f"pporlock.{key}", None)
-
-
-def _rule_transforms(rule: Any) -> list[dict[str, Any]]:
-    """A rule's transform blocks, single or list."""
-    single = rule.params.get("transform")
-    many = rule.params.get("transforms")
-    out: list[dict[str, Any]] = []
-    if isinstance(single, dict):
-        out.append(single)
-    if isinstance(many, list):
-        out.extend(item for item in many if isinstance(item, dict))
-    return out

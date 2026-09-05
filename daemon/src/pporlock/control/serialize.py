@@ -167,6 +167,10 @@ def serialize_flow(
             "closed": record.ws_closed,
             "close_code": record.ws_close_code,
             "message_count": len(record.ws_messages),
+            # Non-zero when the retention bound trimmed the front of the
+            # socket. A capture that is a window rather than the whole thing
+            # says so, exactly as a truncated body does (REQ CAP-003).
+            "dropped": record.ws_dropped,
         }
         if detail != "summary":
             websocket["messages"] = [serialize_ws_message(m, detail) for m in record.ws_messages]

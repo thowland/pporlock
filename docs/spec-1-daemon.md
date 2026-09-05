@@ -33,8 +33,14 @@ daemon/src/pporlock/
     interceptor.py       # the addon class, hook methods
     normalize.py         # mitmproxy → SPEC-0 §3 dataclasses
     apply.py             # SPEC-0 §3.3 mutations → mitmproxy flow
-    streaming.py         # buffering guard
-    options.py           # mitmproxy option wiring, anticache/anticomp
+
+  # The buffering guard and mitmproxy option wiring were sketched here as
+  # `addon/streaming.py` and `addon/options.py`. They were never written as
+  # separate modules: the guard is `Evaluator.decide_buffering` (§3.4), because
+  # it is a pure decision over the ruleset and belongs with the phase machine,
+  # and the option wiring is a dozen lines in `cli/runner.py`. Recorded rather
+  # than quietly dropped — a reviewer looking for a file that does not exist
+  # concludes the behaviour is missing (SEP_5_REVIEW F-15).
 
   engine/                # PURE. NO mitmproxy IMPORT. mypy --strict.
     __init__.py
@@ -152,21 +158,30 @@ Body assignment uses `flow.response.text` / `.content` so that decode and re-enc
 ### 3.4 Buffering guard
 
 ```python
-# addon/streaming.py
+# engine/evaluator.py
 @dataclass(frozen=True)
 class BufferingDecision:
     buffer: bool
-    reason: str | None          # "size" | "content_type" | None
+    reason: str | None    # "no_transform" | "size" | "content_type" | None
 
-def decide(headers, cfg: BufferingConfig,
-           wants_body: bool) -> BufferingDecision: ...
+class Evaluator:
+    def decide_buffering(self, request, content_type, content_length,
+                         wants_body, builder) -> BufferingDecision: ...
+    def enforce_observed_size(self, response, builder) -> bool: ...
 ```
 
 Called from `responseheaders`, which is the only point at which the decision can be made (REQ PXY-021). When `decide()` returns `buffer=False`, the addon sets `flow.response.stream = True` and the evaluator is told body transforms are unavailable, producing `skipped_streamed` outcomes and a `response_streamed` note (REQ PXY-022, SPEC-0 §4.3/§4.4).
 
 Defaults: 2 MiB size threshold; content-type allowlist `text/html`, `text/css`, `application/javascript`, `text/javascript`, `application/json`, `application/x-javascript`, plus charset variants. Configurable via `PUT /config`.
 
-`wants_body` is computed by the evaluator from the loaded ruleset: if no enabled rule could possibly produce a body transform for this response, the guard streams regardless of type and size. This is the cheapest available optimization and should be implemented from the start.
+`wants_body` is computed by the evaluator over **both tiers**: if no enabled rule could possibly produce a body transform for this response, *and* no active module defines `on_response`, the guard streams regardless of type and size. This is the cheapest available optimization and should be implemented from the start.
+
+Two refinements, both from the September 2026 review:
+
+- A rule counts as body demand only if at least one of its transforms actually consumes the body. `strip_csp` is declared as a body transform and applied during response-*header* evaluation, so a rule whose only transform is `strip_csp` does not make its response eligible for buffering (F-14).
+- A module whose entire content is an `on_response` hook counts as body demand, and its body work is offloaded above `budget.executor_threshold_bytes` exactly as an expensive declarative transform is. Leaving hooks out of both decisions meant a hook-only module — a layout the Python tutorial presents as supported — was handed `body=None` and could do nothing (F-01).
+
+**Declared size is not the only bound.** REQ PXY-021 bounds a body by its declared *or observed* size, and a chunked response declares nothing. Two mechanisms, because neither alone is enough: `cli/runner.py` sets mitmproxy's own `stream_large_bodies` from `buffering.max_body_bytes`, which is what actually stops the bytes accumulating; `Evaluator.enforce_observed_size` is the engine-side guard behind it, and is what puts the transition into provenance rather than attempting a transform on a body over the cap (F-06).
 
 ### 3.5 Exclusion at ClientHello
 
@@ -306,7 +321,7 @@ class TransformSpec:
     cost: str          # "cheap" | "expensive"
 ```
 
-`expensive` transforms, and any Python hook on a body over a configurable threshold (default 256 KiB), run via `loop.run_in_executor` on a bounded thread pool (REQ PXY-024). `cheap` transforms run inline. The registry's built-ins are classified: `regex_sub` and `replace_literal` are cheap under the size threshold and expensive above it; HTML-parsing transforms are always expensive.
+`expensive` transforms, and any Python hook on a body over a configurable threshold (default 256 KiB), run via `loop.run_in_executor` on a bounded thread pool owned by the interceptor and sized from `budget.executor_workers` (REQ PXY-024). It is deliberately **not** asyncio's default executor: the control plane's filesystem work uses that one, and sharing it meant an expensive transform could delay a reload and a reload could delay a transform. Both settings were defined, documented, published by `GET /config`, and read by nothing until the September 2026 review (F-11). `cheap` transforms run inline. The registry's built-ins are classified: `regex_sub` and `replace_literal` are cheap under the size threshold and expensive above it; HTML-parsing transforms are always expensive.
 
 ### 4.6 Transform registry
 
@@ -319,6 +334,8 @@ class TransformRegistry:
 ```
 
 Built-ins are enumerated normatively in SPEC-0 §5.5. Parameters validate at **load time** against the transform's schema, so a malformed transform is a module load error, not a runtime surprise (REQ MOD-014).
+
+Validation is in two stages, because the registry is not complete when rules compile: a module's own `on_load` may register a transform its rules name. `compile_rule` validates against a registry when it is given one — the `POST /validate` endpoint, `PUT /rules`, and the dry runner all have a complete one — and `RuleSet.validate_transforms` is the late pass the daemon runs once every `on_load` has, before the combined set is published. `regex_sub` compiles its pattern at this point too, so an invalid pattern or an unknown flag is a named load error rather than a per-flow failure that quarantines the module (F-07, F-08).
 
 `inject_script` implements the nonce policy of REQ PXY-041: parse the document's existing CSP for a `script-src` nonce, reuse it on the injected tag, and only relax the policy if no nonce is present. It emits `script_injected` with `detail.nonce_reused`.
 
@@ -391,6 +408,13 @@ class ModuleRegistry:
 
 Reload is a **snapshot swap**: a new registry snapshot and ruleset are built off the event loop (in the executor, since it involves filesystem reads and Python imports), then swapped atomically. In-flight flows continue against the snapshot they started with (REQ MOD-004). This is why the snapshot is immutable and why the evaluator holds a reference rather than consulting a mutable registry.
 
+Two things this requires that were stated here and not true in the code until the September 2026 review:
+
+- The replacement generation is built entirely into locals and published in a single assignment. It used to be built *in place* — `_modules` and `_contexts` emptied and refilled one module at a time, on a worker thread, while traffic ran against the same object — so a flow arriving mid-reload could see no modules or half of them (F-04).
+- Each flow stashes the evaluator it was first evaluated against and uses that object for every later phase. An atomic swap of the global reference is not sufficient on its own: dereferencing it again at `responseheaders` and again at `response` let one flow be evaluated by two generations (F-03).
+
+What this does **not** remove: `on_unload` runs before the replacement is loaded, which is the guarantee `on_unload` exists to make, so a hook already executing can overlap its own module's teardown. The window is bounded by hook duration rather than by the whole reload. Closing it entirely would mean loading the replacement before releasing the outgoing one, which is the opposite promise.
+
 File watching uses a debounced watcher (250 ms) on the module root. Explicit reload via `POST /modules/reload` uses the same path.
 
 ### 5.4 Error isolation and quarantine
@@ -405,7 +429,9 @@ Quarantine is sticky until the module is edited (which triggers reload) or expli
 
 ### 5.5 Module context and store
 
-`ModuleContext` implements exactly SPEC-0 §8.2 and nothing more; anything additional is private and must not be reachable from module code. The module store is SQLite at `~/.pporlock/module-store.db`, one table keyed by `(module, key)`, values JSON. Writes are queued to the executor; `store_set` is fire-and-forget from the module's perspective, `store_get` reads a write-through in-memory cache so it never touches disk on the event loop.
+`ModuleContext` implements exactly SPEC-0 §8.2 and nothing more; anything additional is private and must not be reachable from module code. The module store is SQLite at `~/.pporlock/module-store.db`, one table keyed by `(module, key)`, values JSON. `store_get` reads a write-through in-memory cache so it never touches disk on the event loop.
+
+Writes are queued to a single background writer thread per module, and the cache is updated synchronously so read-after-write holds. Writes to one key coalesce, so a module keeping a per-request counter costs one statement per drain rather than one per request. The queue is flushed on reload and on shutdown; a persistence failure is recorded in `last_error` rather than discarded. Until the September 2026 review `store_set` opened SQLite and executed the statement on the caller's thread — and a request hook's caller is the proxy event loop, so a module doing ordinary bookkeeping put connection setup, locking and journal work in front of every other connection the browser had open (F-13).
 
 ### 5.6 Profiles
 

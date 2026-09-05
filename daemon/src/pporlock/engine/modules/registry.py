@@ -115,16 +115,33 @@ class ModuleRegistry:
         # to be resident, and zeroing them on every edit would make the column
         # useless exactly while someone is iterating on a module (REQ PRF-007).
         live_stats = {name: m.stats for name, m in self._modules.items()}
+        outgoing = self._modules
 
-        for module in self._modules.values():
+        # The outgoing generation releases what it holds first — a module that
+        # opened a file or a connection gets the chance before its successor
+        # takes over, which is what `on_unload` is for.
+        for module in outgoing.values():
             self._call_lifecycle(module, "on_unload")
-            unload_python(module.name)
 
-        self._modules = {}
-        self._contexts = {}
+        # The replacement is then built entirely into locals and published in
+        # one assignment. It used to be built *in place*: `_modules` and
+        # `_contexts` were emptied and refilled one module at a time, on a
+        # worker thread, while traffic continued on the event loop against this
+        # same object. A flow arriving inside that window saw no modules, or
+        # half of them, or a context whose module was not yet initialised.
+        # Offloading the mutation kept the loop responsive; it did not make the
+        # mutation safe (SEP_5_REVIEW F-04, REQ MOD-004, MOD-024, DD-3).
+        #
+        # What this does not remove is the overlap between `on_unload` above and
+        # a hook already running on the old generation. Closing that would mean
+        # loading the replacement before releasing the outgoing one, which is
+        # the opposite of the guarantee `on_unload` makes. The window is now
+        # bounded by hook duration rather than by the whole reload.
+        modules: dict[str, LoadedModule] = {}
+        contexts: dict[str, ModuleContext] = {}
 
         for module in load_all(self.root):
-            self._modules[module.name] = module
+            modules[module.name] = module
             module.stats = live_stats.get(module.name) or ModuleStat(module=module.name)
             persisted = self.state.get(module.name)
             if persisted is not None:
@@ -141,8 +158,31 @@ class ModuleRegistry:
                 # First sighting: the manifest seeds the sidecar, once.
                 self.state.set(module.name, enabled=module.enabled, priority=module.priority)
             if module.state == "loaded":
-                self._contexts[module.name] = self._make_context(module, registry, profile)
-                self._call_lifecycle(module, "on_load")
+                contexts[module.name] = self._make_context(module, registry, profile)
+
+        # `on_load` before publication, so a module that registers a transform
+        # or warms a cache has done so before any flow can reach it.
+        for module in modules.values():
+            if module.state == "loaded":
+                self._call_lifecycle(module, "on_load", contexts)
+
+        # The swap. A flow reading either name sees a complete generation: the
+        # old one, or the new one, never a half-built one.
+        self._modules = modules
+        self._contexts = contexts
+
+        # sys.modules is cleaned up only after the swap. A hook that is still
+        # running holds the function object it is executing, so this cannot pull
+        # code out from under it; doing it before the swap would have unloaded
+        # code the still-published old generation could be asked to run.
+        for name in outgoing:
+            unload_python(name)
+
+        # Anything a module wrote through `ctx.store_set` is queued to a
+        # background writer (SEP_5_REVIEW F-13); a reload is a point at which
+        # it must be on disk.
+        for store in self._stores.values():
+            store.flush()
 
         # A module deleted from disk must not leave its row behind forever, and
         # must not come back enabled if it is ever reinstalled.
@@ -168,9 +208,11 @@ class ModuleRegistry:
             registry=registry,
         )
 
-    def _call_lifecycle(self, module: LoadedModule, hook: str) -> None:
+    def _call_lifecycle(
+        self, module: LoadedModule, hook: str, contexts: dict[str, ModuleContext] | None = None
+    ) -> None:
         fn = module.hooks().get(hook)
-        context = self._contexts.get(module.name)
+        context = (self._contexts if contexts is None else contexts).get(module.name)
         if fn is None or context is None:
             return
         try:

@@ -278,6 +278,13 @@ ctx.store_set("seen", count + 1)
 ctx.store_delete("seen")
 ```
 
+Writes update that cache immediately — read-after-write holds — and the SQLite
+statement is queued to a background writer, flushed on reload and on shutdown.
+Repeated writes to one key coalesce, so a counter you bump on every request
+costs one statement per drain rather than one per request. Writing on every
+flow is therefore fine; it is not, and never was, free, and until the September
+2026 review it happened on the proxy's own event loop.
+
 **Assets** — resolved inside your `assets/` directory, with containment checked
 **after** symlink resolution, so a symlink pointing out of the directory is
 caught rather than followed:

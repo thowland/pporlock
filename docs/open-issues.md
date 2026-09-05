@@ -1442,3 +1442,45 @@ have required running it, and running it would have shown that the gate did not.
 `test_version_script.py::test_the_gate_actually_runs_version_check` reads the
 `gate:` line out of the Makefile. It is a crude test of a build file, and it is
 the only kind that can see this.
+
+---
+
+## OI-39 — a hook can still overlap its own module's `on_unload`
+
+**Found:** the 5 September 2026 review, as part of F-04
+(`docs/SEP_5_REVIEW_FINDINGS.md`). **OPEN**, and deliberately so.
+
+F-04's real defect is closed. Reload used to run every `on_unload`, empty
+`_modules` and `_contexts` in place, and refill them one module at a time — on a
+worker thread, while traffic continued on the event loop against the same
+object. A flow arriving mid-reload saw no modules, or half of them. The
+replacement generation is now built entirely into locals and published in a
+single assignment, so a reader sees a complete generation either way.
+
+What remains is the ordering. `on_unload` runs *before* the replacement loads,
+because that is what `on_unload` is for: a module holding a file, a socket or a
+lock releases it before its successor takes over, and
+`test_on_unload_runs_before_the_replacement_loads` has asserted that since
+Sprint 11. A hook that is already executing when the reload begins can therefore
+still be running after its own module's teardown has been called.
+
+The window is now bounded by hook duration rather than by the whole reload,
+which is the difference between microseconds and a filesystem walk plus N Python
+imports. It is not zero.
+
+**To close** needs a decision, not code. The two orderings cannot both hold:
+
+1. **Load before unload.** Closes this entirely. Breaks any module that holds an
+   exclusive resource across a reload, because the new instance's `on_load` runs
+   while the old one still holds it.
+2. **Reference-count the generation.** Retain the outgoing snapshot until its
+   in-flight users finish, and run `on_unload` only then. Correct, and the
+   remediation F-04 actually asked for — but it needs every flow to hold and
+   release a generation reference, and a reload that waits on traffic can be
+   made to wait indefinitely by a socket that never closes.
+
+Option 2 is the right answer if this is ever worth its cost. It is listed here
+rather than done because nothing observed has been attributed to it: module code
+is trusted and single-user, `on_unload` is rare in practice (one shipped example
+defines it), and the failure requires a reload to land inside a hook that is
+mid-execution.

@@ -2113,3 +2113,232 @@ guard that nothing invokes. OI-11 in the build system rather than the product.
 shipped code. It is, however, what decides the version the running system
 reports, which is the first question of every diagnosis. It has thirteen now,
 including one that reads the `gate:` line out of the Makefile.
+
+### 0.13.0 — the 5 September 2026 review
+
+An external deep review of the daemon, weighted toward the MITM proxy and the
+rules engine. Fifteen findings, six of them P1. The report is
+`docs/SEP_5_REVIEW_FINDINGS.md`, kept in the repository with a disposition
+section added; this is what was done about it.
+
+**Every finding was valid.** None was a false positive, none was mitigated
+elsewhere, and none had a test that would have caught it. The suite was 2,083
+daemon tests and fully green against the reviewed revision. It is 2,144 now, and
+the 61 new ones are all in `daemon/tests/unit/test_review_sep_5.py`, one class
+per finding. That file was run against the pre-fix tree to confirm it fails
+before it was allowed to pass.
+
+**What the fifteen have in common** is worth stating, because it is the same
+shape as the five bugs `CLAUDE.md` already records. Not one of them is a helper
+computing the wrong answer. Every one is a *handoff*: a decision made in one
+phase and consumed in another, a bound enforced at insertion but not at growth,
+a configuration value defined and read by nothing, a snapshot swapped underneath
+a flow that had already been evaluated against it. The unit tests were right
+about the parts. The parts were assembled wrong.
+
+#### Semantic information lost between phases
+
+**F-02 — header operations were regrouped by type, destroying rule order.** The
+evaluator visited matching rules in the correct priority and declaration order
+and then folded them into three containers: removals, sets, additions. The
+adapter applied all removals, then all sets, then all additions. So rule 1
+adding `X-Review` and rule 2 removing it left the header *present*, and so did
+the reverse declaration order — while provenance faithfully reported two rules
+applied in the order written. MOD-012's all-match, applied-in-order semantics
+are the thing the documentation says is error-prone and important, and the
+implementation could not express them across two different operations.
+
+`HeaderMutation` now stores an ordered `ops` stream; `set_headers`,
+`add_headers` and `remove_headers` are read-only views over it, immutable so
+that an assignment through one raises rather than being silently discarded.
+`apply.py` walks the stream. `_merge_mutation` folds a hook's operations in the
+order the hook made them. Eight tests cover every pair of conflicting operations
+in both declaration orders, plus across module priorities, plus a hook's own
+mutation. A contract change, so SPEC-0 §3.3 and §8.3 changed with it.
+
+**F-03 — a flow did not keep the evaluator it started on.** The request hook
+stashed the request, the builder, the body-demand flag and the budget on the
+flow, and then `responseheaders` and `response` each dereferenced
+`self.evaluator` again. A reload landing between them evaluated one flow with
+two rule generations: generation A's body-demand flag against generation B's
+body rules, and a provenance record naming a module set that never governed the
+flow. The atomic swap was correct and insufficient — the object has to be
+*retained*, not merely swapped. It is stashed now.
+
+**F-12 — provenance reported actions as applied when nothing changed.** Two
+observations, both real. Removing an absent header or setting one to the value
+it already held was recorded `applied`; capture derives a flow's "was modified"
+state from applied provenance, so untouched flows appeared in the UI's modified
+filter. And `builder.short_circuit()` was called unconditionally after a
+short-circuit attempt, so a `map_local` whose file was missing — which correctly
+records the failure and lets the request go upstream — named that rule as the
+flow's short circuit anyway. The corpus case for exactly that scenario had the
+wrong value baked into it as the golden expectation, which is how it survived.
+
+The evaluator now threads a `_HeaderState` across the whole header phase, so
+`changed` reflects what the operation does to the message rather than what the
+rule declares — and a rule removing a header an *earlier rule* added is
+correctly a change, while a second rule removing the same header is correctly
+not. Reading the message once per rule would have got that wrong.
+
+**F-09 — two-sided header rules matched in the wrong phase and were counted
+twice.** A `headers` rule declaring both `request` and `response` was classified
+as response-phase, which let it carry response-only criteria like `status` —
+and its request half then applied regardless, because the request phase cannot
+see a response. It is now bound by request-phase criteria if it mutates the
+request at all, so `status: 500` beside a `request:` block is a load error
+(MOD-011). Separately, `__len__` and `all_rules` summed the phase partitions, in
+which such a rule deliberately appears twice; they read `self.rules` now.
+
+**F-14 — `strip_csp` made responses eligible for buffering.** It is declared as
+a body transform and applied during header evaluation, where it can still reach
+the wire on a streamed response. `wants_body` did not distinguish, so a rule
+whose only transform was `strip_csp` bought a full HTML buffer for a header
+edit. Body demand now means at least one transform that consumes the body.
+
+#### Bounds enforced at one point instead of end to end
+
+**F-01 — Python hooks were absent from every decision made before the body
+arrived.** `wants_body` consulted only declarative body rules, so a module whose
+entire content is an `on_response` hook — the layout
+`docs/tutorial-python-module.md` presents as a supported tier — reported no body
+demand, streamed, and was handed `response.body=None`. It ran and could do
+nothing. `_should_offload` was equally blind, so hook-only work ran inline on
+the proxy event loop however large the body, while an unrelated declarative
+transform on the same flow would have moved it to a worker. And the request-side
+budget was charged once, after every hook had returned, so it measured rather
+than enforced.
+
+Body demand and offload are now `Evaluator.wants_body` and
+`Evaluator.should_offload`, both over both tiers, using the configured
+threshold. Each hook is charged as it returns and the next is skipped when the
+budget is spent, recording `skipped_budget`. This does not interrupt a hook that
+has already started — nothing in-process can — but it stops one slow module
+spending every other module's share of the flow.
+
+**F-06 — only the *declared* body size was bounded.** PXY-021 says declared *or
+observed*, and a chunked response declares nothing, so a chunked HTML or JSON
+body of any size was accumulated in memory for transformation. Two mechanisms,
+because neither alone is enough: `cli/runner.py` sets mitmproxy's own
+`stream_large_bodies` from `buffering.max_body_bytes`, which is what actually
+stops the bytes accumulating; `Evaluator.enforce_observed_size` is the
+engine-side guard behind it and is what puts the transition into provenance
+rather than attempting a transform on a body over the cap.
+
+**F-11 — `executor_threshold_bytes` and `executor_workers` reached nothing.**
+Both are defined in `config.py`, documented in SPEC-1, and published by
+`GET /config`. The runtime evaluator was constructed without the threshold, so
+it kept its constructor default; and every offload went to
+`run_in_executor(None, ...)`, asyncio's process-wide default pool, which ignores
+the worker count and shares its threads with the control plane's filesystem
+work — so an expensive transform could delay a reload and a reload could delay a
+transform. The runner passes the threshold; the interceptor owns a
+`ThreadPoolExecutor` sized from the configuration and shuts it down in `done()`.
+
+The shape of this one is worth keeping: a test that constructs its own
+`Evaluator` with an explicit threshold passes whatever the daemon does. The new
+test builds the evaluator the way `pporlock run` does — the same seam as
+`TestStartupWiring`, for the same reason.
+
+**F-13 — `ctx.store_set` did SQLite on the caller's thread.** A request hook's
+caller is the proxy event loop, so a module doing ordinary bookkeeping put
+connection setup, locking and journal work in front of every other connection
+the browser had open — and the authoring documentation described the store as
+suitable for persistent module state without saying so. The cache update stays
+synchronous, because read-after-write must hold; the statement is queued to one
+background writer thread per module, coalesced per key, flushed on reload and on
+shutdown. A persistence failure is recorded in `last_error` rather than silently
+discarded, and only the exception's own text — a value that failed to serialise
+must not be echoed anywhere that might display it.
+
+**F-05 — WebSocket growth bypassed the ring's byte accounting.** The sink
+appends frames straight onto a `FlowRecord` already in the ring; the ring moved
+its counter only in `add` and `update`. Per-message truncation bounded one
+frame, nothing bounded the accumulation, and `stats` under-reported what was
+held — so a long-lived socket could grow past `max_bytes` without the bound ever
+acting, which is a PRF-005 violation reachable from an ordinary page.
+
+Two halves, because re-accounting alone would let the active socket evict every
+other flow to make room for itself. A retention policy first — newest frames
+win, oldest are dropped past 1 MiB of retained payload per record, and the count
+travels as `ws_dropped` so a windowed capture is never mistaken for a whole one
+— then `RingBuffer.adjust`, a delta rather than a re-measurement, because this
+runs once per frame and re-summing the ring on every frame would trade a memory
+bug for a throughput one. The `dropped` field is a contract change.
+
+#### Ownership, validation, and cost
+
+**F-10 — notes and logs were shared across concurrent hook invocations.** One
+`ModuleContext` per loaded module, owning mutable note and log lists, drained
+after each hook. Response-body evaluation runs in the executor, so two flows in
+the same module appended into the same lists and whichever drained first carried
+away both — a note about one page attached to another, and the correct flow left
+with none. `ctx.for_invocation()` gives each call its own buffers while sharing
+configuration, assets, the store and the registry. The test holds two hooks at a
+barrier so they genuinely overlap.
+
+**F-07 — transform kinds and parameters were never validated at rule load.**
+`compile_rule` checked only that a body rule had a `transform` or `transforms`
+key. A typo compiled cleanly and failed on the first matching request, where the
+error was blamed on the module author and could quarantine the module.
+
+Validation is two-stage, because the registry is genuinely not complete when
+rules compile — a module's own `on_load` may register a transform its rules
+name. `compile_rule` validates against a registry when given one (`POST
+/validate`, `PUT /rules`, the dry runner), and `RuleSet.validate_transforms` is
+the late pass the daemon runs once every `on_load` has.
+
+**F-08 — `regex_sub` recompiled its pattern on every matching body.** Match
+criteria are compiled at rule load; transform patterns were not, so a rule
+firing on every subresource of a page re-parsed the same regex each time. A
+transform block is a plain dict by design and has no identity to hang a compiled
+form on, so it is a bounded process-wide cache keyed by pattern and flags — and
+the validation half moved to load time, where an invalid pattern or an unknown
+flag is now a named load error rather than a per-flow failure.
+
+**F-15 — documentation described the intended architecture, not the
+implementation.** Most of it is closed by the fixes above, which is the point:
+the documentation was right and the code was wrong. What remained was corrected
+rather than reconciled downward — SPEC-1's file layout listed `addon/streaming.py`
+and `addon/options.py`, neither of which was ever written, and §3.4's signature
+was for a function that does not exist. Both are recorded as never-written with
+where the behaviour actually lives, because a reviewer looking for a file that
+is not there concludes the behaviour is missing.
+
+#### Deliberately not done
+
+`on_unload` still runs before the replacement generation loads, so a hook
+already executing can overlap its own module's teardown. Closing that means
+either loading before unloading — which breaks a module holding an exclusive
+resource, and contradicts what `on_unload` is for — or reference-counting the
+generation, which needs every flow to hold and release a reference and makes a
+reload waitable on a socket that never closes. **OI-39**, with the decision
+written down rather than the work half-done.
+
+#### Tests changed rather than added
+
+Five existing assertions changed, none to raise a number:
+
+- `test_models.py` — two container-type comparisons, because `add_headers` and
+  `remove_headers` are now immutable views. Same behaviour, same assertion.
+- `test_evaluator.py` — five of the same.
+- `test_ruleset.py` — `TestWantsBody` used `strip_csp` as its representative
+  body transform, which F-14 makes exactly the wrong choice. Now
+  `replace_literal`, with a comment pointing at the finding.
+- `test_modules.py::TestModuleStore` — six tests now `flush()` before reopening
+  the file. That the flush is *needed* is the finding.
+- `corpus/cases/06-map-local-missing-file-fails-loudly.json` — the golden file
+  asserted `short_circuited_by: "corpus:0"` for a request that went upstream.
+  The defect was encoded as the expectation, which is why six years of green
+  runs never mentioned it.
+
+**Gate results:**
+- G1: every finding demonstrated by a test that fails against `c38a9a5`
+- G2 coverage: daemon 95.5% (was 93), engine 96%, mcp 98.6%, web 94.6%, extension 93%
+- G3: 2,144 daemon + 134 mcp + 606 web + 336 extension, all passing
+- G4: five assertions adapted, listed above; nothing removed
+- G5: ruff, mypy --strict, tsc, eslint, prettier clean
+- G6: scanners clean; §2.5 walked for path traversal, redaction, trusted module
+  boundary, injection into rewritten pages, deserialization strictness and
+  logging hygiene — the areas this touched. The one thing it surfaced is
+  `last_error`, which now carries the exception text only.

@@ -210,7 +210,7 @@ class TestMutations:
         mut = HeaderMutation()
         mut.remove("Content-Security-Policy")
         mut.remove("content-security-policy")
-        assert mut.remove_headers == ["content-security-policy"]
+        assert mut.remove_headers == ("content-security-policy",)
 
     def test_set_lowercases(self) -> None:
         mut = HeaderMutation()
@@ -221,7 +221,7 @@ class TestMutations:
         mut = HeaderMutation()
         mut.add("Set-Cookie", "a=1")
         mut.add("set-cookie", "b=2")
-        assert mut.add_headers == [("set-cookie", "a=1"), ("set-cookie", "b=2")]
+        assert mut.add_headers == (("set-cookie", "a=1"), ("set-cookie", "b=2"))
 
     def test_request_mutation_empty_then_not(self) -> None:
         mut = RequestMutation()

@@ -22,29 +22,54 @@ from ..engine.models import (
 
 
 def _apply_header_ops(headers: Any, mutation: Any) -> bool:
-    """Apply remove/set/add to a mitmproxy Headers object.
+    """Apply the mutation's header operations to a mitmproxy Headers object.
 
-    Order is deliberate: remove, then set, then add. A rule that removes a
-    header and another that adds one must not depend on which ran first, and a
-    ``set`` must win over a stale value rather than appending beside it.
+    In declaration order, which is the whole point. This used to apply every
+    remove, then every set, then every add, on the reasoning that ordering
+    between *categories* did not matter. It does: rule 1 adding ``X-Review`` and
+    rule 2 removing it must leave the header gone, and the reverse declaration
+    order must leave it present. Regrouping by operation type made both orders
+    produce the same wire result while provenance faithfully reported two rules
+    applied in the order written — the exact class of silent disagreement this
+    system exists to prevent (SEP_5_REVIEW F-02, REQ MOD-012, PXY-036).
+
+    ``changed`` reflects the header collection, not the declaration: removing an
+    absent header or setting one to the value it already holds is not a change.
     """
     changed = False
 
-    for name in mutation.remove_headers:
-        if name in headers:
-            del headers[name]
+    for op, name, value in _ops_of(mutation):
+        if op == "remove":
+            if name in headers:
+                del headers[name]
+                changed = True
+        elif op == "set":
+            if headers.get(name) != value:
+                headers[name] = value
+                changed = True
+        else:
+            headers.add(name, value)
             changed = True
-
-    for name, value in mutation.set_headers.items():
-        if headers.get(name) != value:
-            headers[name] = value
-            changed = True
-
-    for name, value in mutation.add_headers:
-        headers.add(name, value)
-        changed = True
 
     return changed
+
+
+def _ops_of(mutation: Any) -> list[tuple[str, str, str]]:
+    """The mutation's ordered operations.
+
+    A mutation built by the engine or through ``set``/``add``/``remove`` carries
+    ``ops``. A module is trusted code and may hand back any object with the
+    documented attributes, so a source without ``ops`` is still honoured — in
+    the old fixed order, which is the only order it expresses.
+    """
+    ops = getattr(mutation, "ops", None)
+    if ops is not None:
+        return [(op, name, value) for op, name, value in ops]
+    return [
+        *(("remove", name, "") for name in getattr(mutation, "remove_headers", ())),
+        *(("set", name, value) for name, value in getattr(mutation, "set_headers", {}).items()),
+        *(("add", name, value) for name, value in getattr(mutation, "add_headers", ())),
+    ]
 
 
 def apply_redirect(request: Any, spec: RedirectSpec) -> bool:

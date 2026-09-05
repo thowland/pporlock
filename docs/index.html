@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pporlock — documentation</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5a5a5a; --line: #d9d9d9; --link: #0b5fa5; --bg: #fbfbf9; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e8e8e6; --muted: #a3a3a0; --line: #3a3a3a; --link: #7fb3e6; --bg: #151515; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+  h1 img { width: 28px; height: 28px; }
+  p.lede { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 1.1rem; margin: 36px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: color-mix(in srgb, var(--bg) 92%, var(--fg)); }
+  .card img { display: block; width: 100%; height: auto; border-bottom: 1px solid var(--line); }
+  .card div { padding: 12px 14px 14px; }
+  .card strong { display: block; margin-bottom: 4px; }
+  .card span { color: var(--muted); font-size: 0.92rem; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul { padding-left: 20px; } li { margin: 4px 0; }
+  li span { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1><img src="images/poppy.svg" alt=""> pporlock</h1>
+  <p class="lede">Local HTTPS interception and modification for Chrome, with provenance for every flow and an MCP server so an agent can read the traffic and author the modules. <a href="https://github.com/thowland/pporlock">Source and README on GitHub.</a></p>
+
+  <h2>How it fits together</h2>
+  <div class="grid">
+    <a class="card" href="architecture.html"><img src="images/diagram-architecture.png" alt="System architecture"><div><strong>System architecture</strong><span>The components and how they collaborate. The MCP server is a first-class client of the same control API as the web UI and the extension.</span></div></a>
+    <a class="card" href="request-lifecycle.html"><img src="images/diagram-request-lifecycle.png" alt="Request lifecycle"><div><strong>Request lifecycle</strong><span>One HTTPS flow through the daemon, phase by phase, including the return path and the buffering decision.</span></div></a>
+    <a class="card" href="rules-engine.html"><img src="images/diagram-rules-engine.png" alt="Rules engine"><div><strong>Rules engine</strong><span>From module.yaml, module.py and rules.yaml to a compiled rule set; how the Python tier composes with the declarative one.</span></div></a>
+  </div>
+
+  <h2>Guides</h2>
+  <ul>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/install.md">Install</a> <span>— setup, verification, and complete uninstall</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/llm-with-mcp.md">Driving it with an LLM</a> <span>— connecting the MCP server, prompting it, and reviewing what an agent wrote</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/tutorial-declarative-module.md">Tutorial: a declarative module</a></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/tutorial-python-module.md">Tutorial: a Python module with state</a></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/module-authoring.md">Module authoring</a> <span>— both tiers, the transform registry, the ctx API, the trust model</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/module-cookbook.md">Module cookbook</a></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/worked-example.md">Worked example</a> <span>— one problem end to end, via the UI and via MCP</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/troubleshooting.md">Troubleshooting</a></li>
+  </ul>
+
+  <h2>Reference</h2>
+  <ul>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/api-reference.md">Control API reference</a> <span>— generated from the OpenAPI spec</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/rule-schema.md">Rule and manifest schema</a> <span>— generated from the JSON Schemas</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/mcp/README.md">MCP tool reference</a> <span>— the tool table, the caps, the guardrails</span></li>
+    <li><a href="https://github.com/thowland/pporlock/blob/master/docs/open-issues.md">Open issues</a></li>
+  </ul>
+</main>
+</body>
+</html>
